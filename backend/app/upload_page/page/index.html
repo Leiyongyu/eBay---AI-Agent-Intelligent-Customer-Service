@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Upload</title>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<style>
+  :root { --fg: #1f2328; --muted: #6a737d; --line: #d8dee4; --accent: #0969da; --bg: #f6f8fa; --ok: #1a7f37; --err: #cf222e; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 -apple-system, "Segoe UI", Roboto, Arial, sans-serif; color: var(--fg); background: var(--bg); }
+  main { max-width: 640px; margin: 0 auto; padding: 16px; }
+  header { display: flex; align-items: center; gap: 12px; margin: 8px 0 16px; }
+  header h1 { font-size: 20px; margin: 0; flex: 1; }
+  .shop { color: var(--muted); font-size: 14px; }
+  .lang { font-size: 13px; color: var(--accent); cursor: pointer; background: none; border: 0; }
+  section { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+  section h2 { font-size: 16px; margin: 0 0 10px; }
+  label { display: block; font-weight: 600; margin: 12px 0 4px; }
+  input[type=text], select, textarea { width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+  textarea { min-height: 96px; resize: vertical; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row > * { flex: 1 1 160px; }
+  .choice { display: flex; gap: 14px; flex-wrap: wrap; font-weight: normal; }
+  .choice label { font-weight: normal; margin: 0; display: flex; align-items: center; gap: 6px; }
+  button.primary { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 12px 18px; font: inherit; font-weight: 600; width: 100%; margin-top: 14px; cursor: pointer; }
+  button.primary:disabled { opacity: .5; cursor: default; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .err { color: var(--err); margin-top: 10px; }
+  .ok { color: var(--ok); }
+  .file { border-top: 1px solid var(--line); padding: 10px 0; }
+  .file .top { display: flex; gap: 8px; align-items: center; }
+  .file .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar { height: 6px; background: #eaeef2; border-radius: 3px; overflow: hidden; margin-top: 6px; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .x { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 18px; }
+  .drop { border: 2px dashed var(--line); border-radius: 10px; padding: 20px; text-align: center; cursor: pointer; }
+  .hidden { display: none; }
+  ul.tips { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+  .item { display: flex; gap: 8px; align-items: flex-start; font-weight: normal; margin: 6px 0; }
+  .done-box { text-align: center; padding: 24px 8px; }
+  .done-box .code { font-size: 22px; font-weight: 700; margin: 8px 0; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 data-t="title"></h1>
+    <button class="lang" id="lang"></button>
+  </header>
+  <div class="shop" id="shop"></div>
+
+  <section id="closed" class="hidden"><p data-t="closed"></p></section>
+
+  <section id="s1" class="hidden">
+    <h2 data-t="s1"></h2>
+    <label for="order" data-t="order"></label>
+    <input type="text" id="order" inputmode="numeric" placeholder="12-34567-89012" autocomplete="off">
+    <label data-t="check"></label>
+    <div class="choice">
+      <label><input type="radio" name="how" value="zip" checked> <span data-t="byZip"></span></label>
+      <label><input type="radio" name="how" value="user"> <span data-t="byUser"></span></label>
+    </div>
+    <input type="text" id="checkval" autocomplete="off" style="margin-top:8px">
+    <div class="cf-turnstile" style="margin-top:12px" data-sitekey="{{TURNSTILE_SITE_KEY}}" data-callback="onTurnstile"></div>
+    <button class="primary" id="verify" data-t="next"></button>
+    <div class="err" id="e1"></div>
+  </section>
+
+  <section id="s2" class="hidden">
+    <h2 data-t="s2"></h2>
+    <div id="items"></div>
+    <label for="issue" data-t="issue"></label>
+    <select id="issue">
+      <option value="" data-t="choose"></option>
+      <option value="NOT_FIT" data-t="NOT_FIT"></option>
+      <option value="INSTALL" data-t="INSTALL"></option>
+      <option value="DAMAGED" data-t="DAMAGED"></option>
+      <option value="NOT_WORKING" data-t="NOT_WORKING"></option>
+      <option value="WRONG_MISSING" data-t="WRONG_MISSING"></option>
+      <option value="OTHER" data-t="OTHER"></option>
+    </select>
+    <div id="vehicle" class="hidden">
+      <label data-t="vehicle"></label>
+      <div class="row">
+        <input type="text" id="v_make" data-p="make">
+        <input type="text" id="v_model" data-p="model">
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="v_year" data-p="year">
+        <input type="text" id="v_engine" data-p="engine">
+      </div>
+      <input type="text" id="v_vin" data-p="vin" style="margin-top:8px">
+      <label data-t="installed"></label>
+      <div class="choice">
+        <label><input type="radio" name="inst" value="INSTALLED"> <span data-t="INSTALLED"></span></label>
+        <label><input type="radio" name="inst" value="TRIED"> <span data-t="TRIED"></span></label>
+        <label><input type="radio" name="inst" value="NOT"> <span data-t="NOT"></span></label>
+      </div>
+    </div>
+    <label for="desc" data-t="desc"></label>
+    <textarea id="desc" maxlength="4000"></textarea>
+    <button class="primary" id="saveform" data-t="next"></button>
+    <div class="err" id="e2"></div>
+  </section>
+
+  <section id="s3" class="hidden">
+    <h2 data-t="s3"></h2>
+    <div class="muted" data-t="tipsTitle"></div>
+    <ul class="tips"><li data-t="tip1"></li><li data-t="tip2"></li><li data-t="tip3"></li></ul>
+    <div class="drop" id="drop" style="margin-top:12px"><span data-t="pick"></span><br><span class="muted" id="limits"></span></div>
+    <input type="file" id="picker" multiple class="hidden"
+           accept="image/*,video/*,.pdf,.zip,.rar,.7z,.mov,.mp4,.heic,.txt,.doc,.docx,.xls,.xlsx,.csv">
+    <div id="files"></div>
+    <button class="primary" id="submit" data-t="submit" disabled></button>
+    <div class="err" id="e3"></div>
+    <p class="muted" data-t="privacy"></p>
+  </section>
+
+  <section id="s4" class="hidden">
+    <div class="done-box">
+      <div class="ok" style="font-size:40px">✓</div>
+      <div data-t="thanks"></div>
+      <div class="code" id="code"></div>
+      <div class="muted" data-t="after"></div>
+    </div>
+  </section>
+</main>
+<script>
+(() => {
+  const OPEN = {{OPEN}};
+  const T = {
+    de: { title: "Fotos & Videos hochladen", closed: "Der Upload ist gerade nicht verfügbar. Bitte versuchen Sie es später erneut.",
+      s1: "1. Bestellung bestätigen", order: "eBay-Bestellnummer", check: "Zur Bestätigung", byZip: "Postleitzahl der Lieferadresse",
+      byUser: "eBay-Nutzername", next: "Weiter", s2: "2. Problem beschreiben", item: "Welcher Artikel?", issue: "Art des Problems",
+      choose: "Bitte wählen", NOT_FIT: "Passt nicht", INSTALL: "Problem beim Einbau", DAMAGED: "Beschädigt angekommen",
+      NOT_WORKING: "Funktioniert nicht", WRONG_MISSING: "Falscher Artikel / Teile fehlen", OTHER: "Sonstiges",
+      vehicle: "Fahrzeug", make: "Marke", model: "Modell", year: "Baujahr", engine: "Motor (z. B. 2.0 TDI)", vin: "FIN / VIN (optional)",
+      installed: "Wurde der Artikel eingebaut?", INSTALLED: "Eingebaut", TRIED: "Probeweise", NOT: "Nicht eingebaut",
+      desc: "Beschreibung (was ist passiert?)", s3: "3. Fotos und Videos hochladen", tipsTitle: "So helfen Sie uns am meisten:",
+      tip1: "Zeigen Sie das Problem deutlich, bei Bedarf aus mehreren Winkeln.", tip2: "Filmen Sie bei Funktionsproblemen den Fehler im Betrieb.",
+      tip3: "Fotografieren Sie Etikett bzw. Teilenummer des Artikels.", pick: "Dateien auswählen", submit: "Absenden",
+      privacy: "Ihre Dateien werden nur zur Bearbeitung Ihres Anliegens verwendet und nach 30 Tagen automatisch gelöscht.",
+      thanks: "Vielen Dank! Wir haben Ihre Angaben erhalten.", after: "Wir prüfen alles und melden uns über eBay-Nachrichten bei Ihnen.",
+      limits: "Max. {f} GB pro Datei, {o} GB pro Bestellung", uploading: "Wird hochgeladen…", done: "Fertig", failed: "Fehlgeschlagen – erneut versuchen",
+      retry: "Erneut versuchen", need: "Bitte füllen Sie alle Pflichtfelder aus.",
+      err: { mismatch: "Bestellnummer und Postleitzahl bzw. Nutzername passen nicht zusammen.", order_format: "Bitte geben Sie eine gültige Bestellnummer ein (z. B. 12-34567-89012).",
+        captcha: "Die Sicherheitsprüfung ist fehlgeschlagen. Bitte laden Sie die Seite neu.", rate: "Zu viele Versuche. Bitte versuchen Sie es später erneut.",
+        link: "Dieser Link ist ungültig oder abgelaufen.", session: "Die Sitzung ist abgelaufen. Bitte laden Sie die Seite neu.",
+        type: "Dieser Dateityp wird nicht unterstützt.", too_large: "Die Datei ist zu groß.", order_quota: "Das Upload-Limit für diese Bestellung ist erreicht.",
+        too_many: "Zu viele Dateien.", no_files: "Bitte laden Sie mindestens eine Datei hoch.", uploading: "Bitte warten Sie, bis alle Uploads fertig sind.",
+        issue: "Bitte wählen Sie die Art des Problems.", closed: "Der Upload ist gerade nicht verfügbar.", default: "Etwas ist schiefgelaufen. Bitte versuchen Sie es erneut." } },
+    en: { title: "Upload photos & videos", closed: "Uploading is not available right now. Please try again later.",
+      s1: "1. Confirm your order", order: "eBay order number", check: "To confirm", byZip: "Postcode of the delivery address",
+      byUser: "eBay username", next: "Continue", s2: "2. Describe the problem", item: "Which item?", issue: "Type of problem",
+      choose: "Please choose", NOT_FIT: "Does not fit", INSTALL: "Installation problem", DAMAGED: "Arrived damaged",
+      NOT_WORKING: "Does not work", WRONG_MISSING: "Wrong item / parts missing", OTHER: "Other",
+      vehicle: "Vehicle", make: "Make", model: "Model", year: "Year", engine: "Engine (e.g. 2.0 TDI)", vin: "VIN (optional)",
+      installed: "Has the item been installed?", INSTALLED: "Installed", TRIED: "Test-fitted", NOT: "Not installed",
+      desc: "Description (what happened?)", s3: "3. Upload photos and videos", tipsTitle: "How to help us most:",
+      tip1: "Show the problem clearly, from several angles if needed.", tip2: "For functional problems, film the fault while it happens.",
+      tip3: "Take a photo of the label or part number on the item.", pick: "Choose files", submit: "Submit",
+      privacy: "Your files are only used to handle your request and are deleted automatically after 30 days.",
+      thanks: "Thank you! We have received your information.", after: "We will check everything and get back to you via eBay messages.",
+      limits: "Max. {f} GB per file, {o} GB per order", uploading: "Uploading…", done: "Done", failed: "Failed – try again",
+      retry: "Try again", need: "Please fill in all required fields.",
+      err: { mismatch: "The order number and postcode or username do not match.", order_format: "Please enter a valid order number (e.g. 12-34567-89012).",
+        captcha: "The security check failed. Please reload the page.", rate: "Too many attempts. Please try again later.",
+        link: "This link is invalid or has expired.", session: "Your session has expired. Please reload the page.",
+        type: "This file type is not supported.", too_large: "The file is too large.", order_quota: "The upload limit for this order has been reached.",
+        too_many: "Too many files.", no_files: "Please upload at least one file.", uploading: "Please wait until all uploads have finished.",
+        issue: "Please choose the type of problem.", closed: "Uploading is not available right now.", default: "Something went wrong. Please try again." } },
+  };
+  const $ = (id) => document.getElementById(id);
+  const params = new URLSearchParams(location.search);
+  let lang = (params.get("lang") || navigator.language || "en").toLowerCase().startsWith("de") ? "de" : "en";
+  let session = sessionStorage.getItem("up_session");
+  let turnstileToken = null;
+  let state = null;
+  const jobs = new Map(); // 本地文件 → 上传进度
+
+  window.onTurnstile = (t) => { turnstileToken = t; };
+
+  function tr() {
+    const L = T[lang];
+    document.documentElement.lang = lang;
+    document.title = L.title;
+    document.querySelectorAll("[data-t]").forEach((el) => { el.textContent = L[el.dataset.t] ?? ""; });
+    document.querySelectorAll("[data-p]").forEach((el) => { el.placeholder = L[el.dataset.p] ?? ""; });
+    $("checkval").placeholder = document.querySelector("input[name=how]:checked").value === "zip" ? L.byZip : L.byUser;
+    $("lang").textContent = lang === "de" ? "English" : "Deutsch";
+    if (state) renderLimits();
+    renderFiles();
+  }
+  $("lang").onclick = () => { lang = lang === "de" ? "en" : "de"; tr(); };
+  document.querySelectorAll("input[name=how]").forEach((r) => r.onchange = tr);
+
+  function errText(e) { const L = T[lang].err; return L[e && e.code] || L.default; }
+  async function call(method, path, body) {
+    const headers = { "Content-Type": "application/json" };
+    if (session) headers["X-Upload-Session"] = session;
+    const r = await fetch("/upload/api" + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) { const d = data.detail && typeof data.detail === "object" ? data.detail : data; throw d; }
+    return data;
+  }
+  function show(id) { ["s1", "s2", "s3", "s4"].forEach((s) => $(s).classList.toggle("hidden", s !== id)); }
+
+  function apply(st) {
+    state = st;
+    session = st.session;
+    sessionStorage.setItem("up_session", session);
+    $("shop").textContent = (st.store_name || "") + (st.order_id ? " · " + st.order_id : "");
+    if (st.status !== "DRAFT") { $("code").textContent = st.code || ""; show("s4"); return; }
+    const items = $("items");
+    items.innerHTML = "";
+    if (st.items.length > 1) {
+      const l = document.createElement("label"); l.textContent = T[lang].item; items.appendChild(l);
+      st.items.forEach((it, i) => {
+        const w = document.createElement("label"); w.className = "item";
+        const r = document.createElement("input"); r.type = "radio"; r.name = "item"; r.value = it.item_id || ""; r.dataset.title = it.title;
+        r.checked = st.form.item_id ? st.form.item_id === it.item_id : i === 0;
+        const s = document.createElement("span"); s.textContent = it.title + (it.quantity > 1 ? ` (×${it.quantity})` : "");
+        w.append(r, s); items.appendChild(w);
+      });
+    } else if (st.items.length === 1) {
+      const p = document.createElement("div"); p.className = "muted"; p.textContent = st.items[0].title; items.appendChild(p);
+    }
+    $("issue").value = st.form.issue_type || "";
+    $("desc").value = st.form.description || "";
+    const v = st.form.vehicle || {};
+    ["make", "model", "year", "engine", "vin"].forEach((k) => { $("v_" + k).value = v[k] || ""; });
+    if (st.form.installed) { const r = document.querySelector(`input[name=inst][value=${st.form.installed}]`); if (r) r.checked = true; }
+    toggleVehicle();
+    renderLimits();
+    show(st.form.issue_type ? "s3" : "s2");
+    renderFiles();
+  }
+  function renderLimits() {
+    const gb = (b) => Math.round(b / 1024 ** 3 * 10) / 10;
+    $("limits").textContent = T[lang].limits.replace("{f}", gb(state.limits.max_file_bytes)).replace("{o}", gb(state.limits.max_order_bytes));
+  }
+  function toggleVehicle() { $("vehicle").classList.toggle("hidden", !["NOT_FIT", "INSTALL"].includes($("issue").value)); }
+  $("issue").onchange = toggleVehicle;
+
+  // ① 校验订单
+  $("verify").onclick = async () => {
+    $("e1").textContent = "";
+    const how = document.querySelector("input[name=how]:checked").value;
+    const val = $("checkval").value.trim();
+    if (!$("order").value.trim() || !val) { $("e1").textContent = T[lang].need; return; }
+    $("verify").disabled = true;
+    try {
+      apply(await call("POST", "/verify", { order_id: $("order").value.trim(), [how === "zip" ? "zip" : "username"]: val,
+        turnstile_token: turnstileToken, language: lang }));
+    } catch (e) {
+      $("e1").textContent = errText(e);
+      if (window.turnstile) { window.turnstile.reset(); turnstileToken = null; }
+    } finally { $("verify").disabled = false; }
+  };
+
+  // ② 问题描述
+  $("saveform").onclick = async () => {
+    $("e2").textContent = "";
+    const issue = $("issue").value;
+    if (!issue) { $("e2").textContent = T[lang].err.issue; return; }
+    const item = document.querySelector("input[name=item]:checked");
+    const one = state.items.length === 1 ? state.items[0] : null;
+    const inst = document.querySelector("input[name=inst]:checked");
+    const vehicle = {};
+    ["make", "model", "year", "engine", "vin"].forEach((k) => { if ($("v_" + k).value.trim()) vehicle[k] = $("v_" + k).value.trim(); });
+    try {
+      await call("POST", "/form", { issue_type: issue, description: $("desc").value, installed: inst ? inst.value : null,
+        vehicle, item_id: item ? item.value : one && one.item_id, item_title: item ? item.dataset.title : one && one.title });
+      state.form.issue_type = issue;
+      show("s3");
+    } catch (e) { $("e2").textContent = errText(e); }
+  };
+
+  // ③ 文件：登记 → 分块直传 R2（3 路并发，失败重试，断了能续）→ 合并
+  $("drop").onclick = () => $("picker").click();
+  $("picker").onchange = () => { [...$("picker").files].forEach(addFile); $("picker").value = ""; };
+  $("drop").ondragover = (e) => { e.preventDefault(); };
+  $("drop").ondrop = (e) => { e.preventDefault(); [...e.dataTransfer.files].forEach(addFile); };
+
+  function fileKey(f) { return `up:${state.order_id}:${f.name}:${f.size}:${f.lastModified}`; }
+  function addFile(file) {
+    const job = { file, id: Number(localStorage.getItem(fileKey(file))) || null, done: 0, status: "uploading", error: "" };
+    jobs.set(fileKey(file), job);
+    renderFiles();
+    upload(job);
+  }
+  async function upload(job) {
+    job.status = "uploading"; job.error = ""; renderFiles();
+    try {
+      const known = job.id && state.files.find((f) => f.id === job.id);
+      if (known && known.uploaded) { job.status = "done"; job.done = job.file.size; renderFiles(); return; }
+      if (!known) {
+        const r = await call("POST", "/files", { name: job.file.name, size: job.file.size, type: job.file.type || null });
+        job.id = r.file_id; localStorage.setItem(fileKey(job.file), String(job.id));
+        state.files.push({ id: job.id, name: job.file.name, size: job.file.size, uploaded: false });
+      }
+      const partBytes = state.limits.part_bytes;
+      const total = Math.ceil(job.file.size / partBytes);
+      const first = await call("POST", `/files/${job.id}/parts`, { part_numbers: [1] });
+      const etags = new Map(first.uploaded.map((p) => [p.part_number, p.etag]));
+      job.done = first.uploaded.reduce((s, p) => s + p.size, 0);
+      const todo = [];
+      for (let n = 1; n <= total; n++) if (!etags.has(n)) todo.push(n);
+      let next = 0;
+      async function worker() {
+        while (next < todo.length) {
+          const batch = todo.slice(next, next + 10); next += batch.length;
+          const signed = await call("POST", `/files/${job.id}/parts`, { part_numbers: batch });
+          for (const n of batch) {
+            const blob = job.file.slice((n - 1) * partBytes, Math.min(n * partBytes, job.file.size));
+            let ok = false, err;
+            for (let attempt = 0; attempt < 4 && !ok; attempt++) {
+              try {
+                const r = await fetch(signed.urls[String(n)], { method: "PUT", body: blob });
+                if (!r.ok) throw new Error("HTTP " + r.status);
+                etags.set(n, r.headers.get("ETag")); ok = true;
+              } catch (e) { err = e; await new Promise((res) => setTimeout(res, 1000 * (attempt + 1))); }
+            }
+            if (!ok) throw err;
+            job.done += blob.size; renderFiles();
+          }
+        }
+      }
+      await Promise.all([worker(), worker(), worker()]);
+      await call("POST", `/files/${job.id}/complete`, { parts: [...etags].map(([part_number, etag]) => ({ part_number, etag })) });
+      job.status = "done"; job.done = job.file.size;
+      const f = state.files.find((x) => x.id === job.id); if (f) f.uploaded = true;
+      localStorage.removeItem(fileKey(job.file));
+    } catch (e) {
+      job.status = "failed"; job.error = e && e.code ? errText(e) : "";
+      if (e && ["type", "too_large", "order_quota", "too_many"].includes(e.code)) job.status = "rejected";
+    }
+    renderFiles();
+  }
+  async function removeJob(key) {
+    const job = jobs.get(key);
+    jobs.delete(key);
+    if (job && job.id) { try { await call("DELETE", `/files/${job.id}`); } catch (e) { /* 已提交或已不存在 */ } state.files = state.files.filter((f) => f.id !== job.id); }
+    renderFiles();
+  }
+  function renderFiles() {
+    const box = $("files"); if (!box) return;
+    box.innerHTML = "";
+    const L = T[lang];
+    const shownIds = new Set();
+    for (const [key, job] of jobs) {
+      if (job.id) shownIds.add(job.id);
+      const pct = job.file.size ? Math.round(job.done / job.file.size * 100) : 0;
+      const d = document.createElement("div"); d.className = "file";
+      d.innerHTML = `<div class="top"><span class="name"></span><span class="muted st"></span><button class="x" title="×">×</button></div><div class="bar"><div></div></div>`;
+      d.querySelector(".name").textContent = job.file.name;
+      d.querySelector(".st").textContent = job.status === "done" ? L.done : job.status === "uploading" ? `${pct}%` : (job.error || L.failed);
+      d.querySelector(".bar > div").style.width = pct + "%";
+      d.querySelector(".x").onclick = () => removeJob(key);
+      if (job.status === "failed") { const b = document.createElement("button"); b.className = "lang"; b.textContent = L.retry; b.onclick = () => upload(job); d.querySelector(".top").appendChild(b); }
+      box.appendChild(d);
+    }
+    for (const f of (state && state.files) || []) {  // 刷新页面前已传完的文件
+      if (shownIds.has(f.id) || !f.uploaded) continue;
+      const d = document.createElement("div"); d.className = "file";
+      d.innerHTML = `<div class="top"><span class="name"></span><span class="muted ok"></span></div>`;
+      d.querySelector(".name").textContent = f.name; d.querySelector(".ok").textContent = L.done;
+      box.appendChild(d);
+    }
+    const busy = [...jobs.values()].some((j) => j.status === "uploading");
+    const any = ((state && state.files) || []).some((f) => f.uploaded);
+    $("submit").disabled = busy || !any;
+  }
+
+  // ④ 提交
+  $("submit").onclick = async () => {
+    $("e3").textContent = ""; $("submit").disabled = true;
+    try {
+      const r = await call("POST", "/submit");
+      sessionStorage.removeItem("up_session");
+      $("code").textContent = r.code; show("s4");
+    } catch (e) { $("e3").textContent = errText(e); renderFiles(); }
+  };
+
+  // 启动：关闭 / 链接进来 / 刷新后续传 / 新开
+  tr();
+  if (!OPEN) { $("closed").classList.remove("hidden"); return; }
+  const link = params.get("t");
+  if (link) {
+    history.replaceState(null, "", location.pathname);  // 地址栏不留令牌
+    call("POST", "/verify", { link_token: link, language: lang }).then(apply)
+      .catch((e) => { show("s1"); $("e1").textContent = errText(e); });
+  } else if (session) {
+    call("GET", "/state").then(apply).catch(() => { sessionStorage.removeItem("up_session"); session = null; show("s1"); });
+  } else {
+    show("s1");
+  }
+})();
+</script>
+</body>
+</html>

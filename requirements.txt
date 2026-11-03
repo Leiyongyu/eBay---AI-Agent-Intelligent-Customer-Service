@@ -1,0 +1,30 @@
+# 直接依赖（固定版本）。完整锁定版本见 requirements.lock.txt
+# Python 3.11+（开发验证用 3.12）
+fastapi==0.161.1
+uvicorn[standard]==0.54.0
+pydantic==2.14.1
+pydantic-settings==2.16.1
+python-dotenv==1.2.4
+sqlalchemy==2.1.6
+langchain-core==1.7.0
+langchain-openai==1.7.2
+langgraph==1.2.16
+tzdata==2026.5
+# 飞书售后知识整理：生成审核用 Excel（scripts/feishu_kb_build.py）
+openpyxl==3.1.5
+# 知识库全文检索的中文分词（缓存写到 data/jieba，不写 C 盘临时目录）
+jieba==0.42.1
+# 买家附件：校验图片、去除 EXIF、重新编码（backend/app/media）
+pillow==13.0.0
+# 发票 PDF 生成（backend/app/invoicing/pdf.py）
+reportlab==5.1.0
+# 买家上传页：Cloudflare R2（兼容 S3）分块上传签名、拉回文件（backend/app/upload_page）
+boto3==1.43.123
+# 店铺凭证 AES-256-GCM 加密（backend/app/security）
+cryptography==50.0.2
+psycopg[binary]==3.3.6
+# 本机 Redis 为 5.0：redis_bus.py 里固定 protocol=2（RESP2）
+redis==8.1.0
+# 测试
+httpx==0.28.1
+pytest==9.1.1

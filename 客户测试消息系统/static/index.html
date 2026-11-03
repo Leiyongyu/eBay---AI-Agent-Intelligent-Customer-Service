@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>客户测试消息系统</title>
+<style>
+  :root {
+    --bg: #f3f4f6; --panel: #fff; --line: #e5e7eb; --text: #1f2937; --muted: #6b7280;
+    --brand: #2563eb; --brand-soft: #dbeafe; --buyer: #2563eb; --seller: #fff;
+    --warn: #b45309; --warn-soft: #fef3c7; --ok: #047857; --ok-soft: #d1fae5; --err: #b91c1c; --err-soft: #fee2e2;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 "Microsoft YaHei", "PingFang SC", system-ui, sans-serif; color: var(--text); background: var(--bg); }
+  button { font: inherit; cursor: pointer; border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 5px 12px; }
+  button.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+  button.link { border: none; background: none; color: var(--muted); padding: 2px 6px; }
+  button.link:hover { color: var(--err); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  input, select, textarea { font: inherit; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; background: #fff; color: var(--text); }
+  input:focus, select:focus, textarea:focus { outline: 2px solid var(--brand-soft); border-color: var(--brand); }
+
+  .app { display: grid; grid-template-columns: 300px 1fr; height: 100vh; }
+  aside { background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+  .side-head { padding: 14px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; }
+  .side-head h1 { font-size: 16px; margin: 0; }
+  .health { padding: 8px 16px; font-size: 12px; border-bottom: 1px solid var(--line); }
+  .health.ok { color: var(--ok); background: var(--ok-soft); }
+  .health.bad { color: var(--err); background: var(--err-soft); }
+  .users { overflow-y: auto; flex: 1; padding: 8px; }
+  .user { border-radius: 8px; margin-bottom: 4px; }
+  .user-row { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 8px; cursor: pointer; }
+  .user-row:hover { background: var(--bg); }
+  .user.active > .user-row { background: var(--brand-soft); }
+  .avatar { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-weight: 600; flex: none; }
+  .user-info { flex: 1; min-width: 0; }
+  .user-name { font-weight: 600; }
+  .sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sessions { padding: 2px 0 6px 50px; }
+  .session { padding: 6px 8px; border-radius: 6px; cursor: pointer; display: flex; gap: 6px; align-items: flex-start; }
+  .session:hover { background: var(--bg); }
+  .session.active { background: #eef2ff; }
+  .session .t { flex: 1; min-width: 0; }
+  .session .t div:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+  .new-session { font-size: 13px; color: var(--brand); padding: 6px 8px; cursor: pointer; }
+  .empty-side { color: var(--muted); padding: 24px 12px; text-align: center; }
+
+  main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .topbar { background: var(--panel); border-bottom: 1px solid var(--line); padding: 12px 20px; }
+  .topbar .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .topbar label { color: var(--muted); font-size: 13px; }
+  .topbar select { min-width: 220px; max-width: 320px; }
+  .topbar input.link-input { flex: 1; min-width: 280px; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .chip { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 10px; background: var(--bg); color: var(--muted); }
+  .chip.ok { background: var(--ok-soft); color: var(--ok); }
+  .chip.warn { background: var(--warn-soft); color: var(--warn); }
+  .chip.err { background: var(--err-soft); color: var(--err); }
+  .chip.run { background: var(--brand-soft); color: var(--brand); }
+  .card { display: flex; gap: 12px; align-items: center; }
+  .card img { width: 56px; height: 56px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); }
+  .card .title { font-weight: 600; }
+  .card a { color: var(--brand); text-decoration: none; }
+
+  .messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+  .placeholder { margin: auto; color: var(--muted); text-align: center; max-width: 420px; }
+  .msg { display: flex; flex-direction: column; max-width: 70%; }
+  .msg.buyer { align-self: flex-end; align-items: flex-end; }
+  .msg.seller, .msg.system { align-self: flex-start; }
+  .bubble { padding: 9px 13px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; }
+  .buyer .bubble { background: var(--buyer); color: #fff; border-bottom-right-radius: 4px; }
+  .seller .bubble { background: var(--seller); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .system .bubble { background: var(--warn-soft); color: var(--warn); font-size: 13px; }
+  .meta { font-size: 11px; color: var(--muted); margin: 3px 4px 0; }
+  .imgs { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .imgs img { width: 96px; height: 96px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
+  .draft { align-self: flex-start; max-width: 70%; border: 1px dashed #f59e0b; background: #fffbeb; border-radius: 12px; padding: 10px 13px; }
+  .draft h4 { margin: 0 0 6px; font-size: 13px; color: var(--warn); }
+  .draft .text { white-space: pre-wrap; }
+  .draft .zh { white-space: pre-wrap; color: var(--muted); font-size: 13px; margin-top: 6px; border-top: 1px solid #fde68a; padding-top: 6px; }
+  .draft ul { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: var(--warn); }
+  .typing { align-self: flex-start; color: var(--muted); font-size: 13px; }
+
+  .composer { background: var(--panel); border-top: 1px solid var(--line); padding: 12px 20px; }
+  .composer textarea { width: 100%; resize: vertical; min-height: 64px; max-height: 240px; }
+  .composer .bar { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+  .composer .bar .grow { flex: 1; }
+  .thumbs { display: flex; gap: 6px; flex-wrap: wrap; }
+  .thumb { position: relative; }
+  .thumb img { width: 44px; height: 44px; object-fit: cover; border-radius: 4px; border: 1px solid var(--line); }
+  .thumb span { position: absolute; top: -6px; right: -6px; background: #374151; color: #fff; border-radius: 50%; width: 16px; height: 16px; font-size: 11px; line-height: 16px; text-align: center; cursor: pointer; }
+  .quick { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .quick button { font-size: 12px; padding: 2px 10px; border-radius: 12px; color: var(--muted); }
+
+  dialog { border: none; border-radius: 10px; padding: 20px; width: 380px; box-shadow: 0 10px 40px rgba(0,0,0,.2); }
+  dialog h3 { margin: 0 0 14px; }
+  dialog .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+  dialog .field span { font-size: 13px; color: var(--muted); }
+  dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .toast { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); background: #111827; color: #fff; padding: 8px 16px; border-radius: 6px; z-index: 99; max-width: 80vw; }
+  .toast.err { background: var(--err); }
+
+  /* 窄窗口：侧栏收窄，商品链接输入框占满一行 */
+  @media (max-width: 900px) {
+    .app { grid-template-columns: 220px 1fr; }
+    .sessions { padding-left: 12px; }
+    .topbar select, .topbar input.link-input { min-width: 0; width: 100%; max-width: none; }
+    .msg, .draft { max-width: 90%; }
+  }
+  /* 很窄时上下排列：用户列表在上（限高可滚动），聊天在下 */
+  @media (max-width: 640px) {
+    .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+    aside { max-height: 35vh; border-right: none; border-bottom: 1px solid var(--line); }
+    .topbar, .composer, .messages { padding-left: 16px; padding-right: 16px; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="side-head">
+      <h1>客户测试消息系统</h1>
+      <button class="primary" id="btnNewUser">+ 新建用户</button>
+    </div>
+    <div class="health" id="health">正在连接智能客服主程序…</div>
+    <div class="users" id="users"></div>
+  </aside>
+
+  <main>
+    <div class="topbar" id="topbar"></div>
+    <div class="messages" id="messages"><div class="placeholder">左侧先新建一个测试用户，再开始发消息</div></div>
+    <div class="composer" id="composer" hidden>
+      <div class="quick" id="quick"></div>
+      <div class="thumbs" id="thumbs"></div>
+      <textarea id="text" placeholder="以买家身份输入消息，Ctrl+Enter 发送"></textarea>
+      <div class="bar">
+        <button id="btnImage">添加图片</button>
+        <input type="file" id="file" accept="image/*" multiple hidden>
+        <span class="grow sub" id="sendHint"></span>
+        <button class="primary" id="btnSend">发送</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<dialog id="userDialog">
+  <form method="dialog" id="userForm">
+    <h3>新建测试用户</h3>
+    <label class="field"><span>名称（只在本页显示）</span><input name="name" required maxlength="60" placeholder="如：德国买家 Hans"></label>
+    <label class="field"><span>买家账号名（eBay 用户名，可留空自动生成）</span><input name="buyer_key" maxlength="100" placeholder="如：hans_de_2026"></label>
+    <label class="field"><span>备注（可选）</span><input name="note" maxlength="200" placeholder="如：测试退货场景"></label>
+    <div class="actions">
+      <button type="button" onclick="this.closest('dialog').close('cancel')">取消</button>
+      <button class="primary" value="ok">创建</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+const $ = (id) => document.getElementById(id)
+const COLORS = ['#2563eb', '#7c3aed', '#db2777', '#ea580c', '#059669', '#0891b2', '#4f46e5', '#65a30d']
+const JOB_STATE = {
+  RECEIVED: ['排队中', 'run'], RUNNING: ['AI 生成中…', 'run'], REVIEW_REQUIRED: ['待人工审核', 'warn'],
+  AUTO_ELIGIBLE: ['自动候选（待审核）', 'warn'], SENDING: ['发送中', 'run'], SENT: ['已回复', 'ok'],
+  SEND_UNCERTAIN: ['发送结果不确定', 'err'], RETRYABLE_ERROR: ['出错，等待重试', 'err'],
+  FAILED_HANDOFF: ['失败转人工', 'err'], CANCELLED_STALE: ['已被新消息合并', ''], RESOLVED_NO_REPLY: ['判定无需回复', ''],
+}
+const PENDING_REVIEW = ['REVIEW_REQUIRED', 'AUTO_ELIGIBLE', 'FAILED_HANDOFF']
+const BUSY = ['RECEIVED', 'RUNNING', 'SENDING']
+const QUICK = [
+  'Hi, does this fit my car?',
+  'When will my order be shipped?',
+  'How much is shipping to Germany?',
+  'Hallo, passt das auf meinen VW Golf 7?',
+  'I received the item but it is broken.',
+  'Thanks, all good!',
+]
+
+const state = {
+  meta: null, stores: [], users: [], sessions: [],
+  userId: localStorage.getItem('sim.user') || null,
+  sessionId: null,            // null = 新会话
+  draftStore: localStorage.getItem('sim.store') || '',
+  draftLink: '', parsed: null,
+  conv: null, convKey: '', listing: null,
+  images: [], sending: false,
+}
+
+async function api(path, opts = {}) {
+  const resp = await fetch(path, {
+    ...opts,
+    headers: opts.body ? { 'Content-Type': 'application/json' } : undefined,
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  })
+  const data = await resp.json().catch(() => ({}))
+  if (!resp.ok) throw new Error(typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail || data))
+  return data
+}
+
+function toast(text, err = false) {
+  const el = document.createElement('div')
+  el.className = 'toast' + (err ? ' err' : '')
+  el.textContent = text
+  document.body.appendChild(el)
+  setTimeout(() => el.remove(), err ? 5000 : 2200)
+}
+
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+const color = (id) => COLORS[[...id].reduce((a, c) => a + c.charCodeAt(0), 0) % COLORS.length]
+const storeName = (id) => state.stores.find((s) => s.id === id)?.name || id
+const fmtTime = (iso) => iso ? new Date(iso).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : ''
+const currentUser = () => state.users.find((u) => u.id === state.userId)
+const currentSession = () => state.sessions.find((s) => s.id === state.sessionId)
+
+// ------------------------------------------------------------------ 加载
+async function loadMeta() {
+  const m = state.meta = await api('/api/meta')
+  const el = $('health')
+  if (m.db_ok && m.send_enabled) {
+    el.className = 'health ok'
+    el.textContent = `独立运行 · 数据库 ${m.database}`
+  } else {
+    el.className = 'health bad'
+    el.textContent = m.error || '数据库不可用'
+  }
+  if (m.db_ok && !state.stores.length) {
+    state.stores = await api('/api/stores').catch(() => [])
+    if (!state.stores.some((s) => s.id === state.draftStore)) state.draftStore = state.stores[0]?.id || ''
+    renderTopbar()
+  }
+}
+
+async function loadUsers() {
+  state.users = await api('/api/users')
+  if (!currentUser()) state.userId = state.users[0]?.id || null
+  if (state.userId) state.sessions = await api('/api/sessions?user_id=' + state.userId)
+  else state.sessions = []
+  renderUsers()
+}
+
+// ------------------------------------------------------------------ 侧栏
+function renderUsers() {
+  const box = $('users')
+  if (!state.users.length) {
+    box.innerHTML = '<div class="empty-side">还没有测试用户<br>点右上角“新建用户”</div>'
+    return
+  }
+  box.innerHTML = state.users.map((u) => {
+    const active = u.id === state.userId
+    const sessions = active ? `<div class="sessions">
+        <div class="new-session ${state.sessionId ? '' : 'active'}" data-new>+ 新会话（换店铺 / 商品链接）</div>
+        ${state.sessions.map((s) => `<div class="session ${s.id === state.sessionId ? 'active' : ''}" data-session="${s.id}">
+          <div class="t"><div>${esc(s.title || (s.item_id ? '刊登 ' + s.item_id : '无商品（一般咨询）'))}</div>
+          <div class="sub">${esc(storeName(s.store_id))} · ${esc(s.last_text || '')}</div></div>
+          <button class="link" title="只删本地记录，不删主程序会话" data-del-session="${s.id}">×</button></div>`).join('')}
+      </div>` : ''
+    return `<div class="user ${active ? 'active' : ''}">
+      <div class="user-row" data-user="${u.id}">
+        <div class="avatar" style="background:${color(u.id)}">${esc([...u.name][0])}</div>
+        <div class="user-info"><div class="user-name">${esc(u.name)}</div>
+          <div class="sub">${esc(u.buyer_key)}${u.note ? ' · ' + esc(u.note) : ''}</div></div>
+        <button class="link" title="删除用户（只删本地）" data-del-user="${u.id}">×</button>
+      </div>${sessions}</div>`
+  }).join('')
+}
+
+$('users').addEventListener('click', async (e) => {
+  const t = e.target.closest('[data-del-user],[data-del-session],[data-user],[data-session],[data-new]')
+  if (!t) return
+  if (t.dataset.delUser) {
+    const u = state.users.find((x) => x.id === t.dataset.delUser)
+    if (!confirm(`删除测试用户「${u.name}」？\n只删本页的记录，主程序工作台里的会话不受影响。`)) return
+    await api('/api/users/' + u.id, { method: 'DELETE' })
+    if (state.userId !== u.id) return loadUsers()
+    state.userId = null
+    state.sessionId = null
+    await loadUsers()
+    return selectSession(state.sessions[0]?.id || null)
+  }
+  if (t.dataset.delSession) {
+    await api('/api/sessions/' + t.dataset.delSession, { method: 'DELETE' })
+    if (state.sessionId === t.dataset.delSession) selectSession(null)
+    return loadUsers()
+  }
+  if (t.dataset.user) {
+    if (t.dataset.user === state.userId) return
+    state.userId = t.dataset.user
+    localStorage.setItem('sim.user', state.userId)
+    selectSession(null)
+    await loadUsers()
+    const first = state.sessions[0]
+    if (first) selectSession(first.id)
+    return
+  }
+  selectSession(t.dataset.session || null)
+  renderUsers()
+})
+
+$('btnNewUser').onclick = () => { $('userForm').reset(); $('userDialog').showModal() }
+$('userDialog').addEventListener('close', async () => {
+  if ($('userDialog').returnValue !== 'ok') return
+  const f = new FormData($('userForm'))
+  try {
+    const u = await api('/api/users', { method: 'POST', body: { name: f.get('name'), buyer_key: f.get('buyer_key') || null, note: f.get('note') || null } })
+    state.userId = u.id
+    state.sessionId = null
+    localStorage.setItem('sim.user', u.id)
+    await loadUsers()
+    selectSession(null)
+    toast(`已创建 ${u.name}（${u.buyer_key}）`)
+  } catch (err) { toast(err.message, true) }
+})
+
+// ------------------------------------------------------------------ 顶栏
+function selectSession(id) {
+  state.sessionId = id
+  state.conv = null; state.convKey = ''; state.listing = null
+  renderTopbar(); renderMessages()
+  $('composer').hidden = !state.userId
+  if (id) refreshConversation(true)
+}
+
+function storeOptions() {
+  const group = (label, list) => list.length ? `<optgroup label="${label}">${list.map((s) =>
+    `<option value="${esc(s.id)}" ${s.id === state.draftStore ? 'selected' : ''}>${esc(s.name)}${s.auto_send_enabled ? '' : '（未开自动回复）'}</option>`).join('')}</optgroup>` : ''
+  return group('真实店铺', state.stores.filter((s) => s.is_ebay)) + group('演示店铺', state.stores.filter((s) => !s.is_ebay))
+}
+
+function renderTopbar() {
+  const bar = $('topbar')
+  const user = currentUser()
+  if (!user) { bar.innerHTML = '<span class="sub">未选择测试用户</span>'; return }
+  const s = currentSession()
+  if (!s) {
+    const p = state.parsed
+    bar.innerHTML = `<div class="row">
+        <label>店铺</label><select id="storeSel">${storeOptions()}</select>
+        <label>商品链接</label>
+        <input class="link-input" id="linkInput" placeholder="粘贴本店 eBay 商品链接，如 https://www.ebay.de/itm/123456789012（留空 = 不带商品的一般咨询）" value="${esc(state.draftLink)}">
+      </div>
+      <div class="hint">新会话：以 <b>${esc(user.name)}</b>（${esc(user.buyer_key)}）身份发第一条消息时创建。
+        ${p ? (p.error ? `<span class="chip err">${esc(p.error)}</span>` : p.item_id ? `<span class="chip ok">刊登号 ${p.item_id}${p.marketplace_id ? ' · ' + p.marketplace_id : ''}</span> 发送时主程序会核对是否属于所选店铺` : '') : ''}
+      </div>`
+    $('storeSel').onchange = (e) => { state.draftStore = e.target.value; localStorage.setItem('sim.store', state.draftStore) }
+    $('linkInput').oninput = (e) => { state.draftLink = e.target.value; parseLinkSoon() }
+    return
+  }
+  const conv = state.conv?.conversation
+  const job = state.conv?.job
+  const [label, cls] = job ? JOB_STATE[job.state] || [job.state, ''] : ['暂无任务', '']
+  const l = state.listing
+  const price = l?.price ? `${l.price.value} ${l.price.currency || ''}` : ''
+  const card = s.item_id ? `<div class="card">
+      ${l?.picture_url ? `<img src="${esc(l.picture_url)}" alt="">` : ''}
+      <div><div class="title">${esc(l?.title || '刊登 ' + s.item_id)}</div>
+        <div class="sub">刊登号 ${esc(s.item_id)}${price ? ' · ' + esc(price) : ''}${l?.marketplace_id ? ' · ' + esc(l.marketplace_id) : ''}
+          ${l?.url ? ` · <a href="${esc(l.url)}" target="_blank" rel="noopener">打开商品页</a>` : ''}
+          ${l?.error ? ` · <span class="chip err">${esc(l.error)}</span>` : ''}</div></div></div>`
+    : '<div class="title">一般咨询（未带商品）</div>'
+  bar.innerHTML = `<div class="row" style="justify-content:space-between">
+      ${card}
+      <div style="text-align:right">
+        <div><span class="chip ${cls}">${esc(label)}</span>
+          ${conv?.handoff_state === 'HUMAN' ? '<span class="chip warn">已转人工</span>' : ''}</div>
+        <div class="sub" style="margin-top:4px">${esc(storeName(s.store_id))} · 会话 #${s.conversation_id}${conv ? ' · ' + esc(conv.marketplace_id) : ''}</div>
+      </div></div>`
+}
+
+let parseTimer = null
+function parseLinkSoon() {
+  clearTimeout(parseTimer)
+  parseTimer = setTimeout(async () => {
+    const url = state.draftLink.trim()
+    if (!url) { state.parsed = null; return renderHintOnly() }
+    try { state.parsed = await api('/api/parse-link', { method: 'POST', body: { url } }) }
+    catch (err) { state.parsed = { error: err.message } }
+    renderHintOnly()
+  }, 300)
+}
+function renderHintOnly() {
+  // 只重画提示行，避免打断输入框
+  const input = $('linkInput'), focused = input && document.activeElement === input, pos = input?.selectionStart
+  renderTopbar()
+  const again = $('linkInput')
+  if (again && focused) { again.focus(); again.setSelectionRange(pos, pos) }
+}
+
+// ------------------------------------------------------------------ 消息区
+function renderMessages() {
+  const box = $('messages')
+  if (!currentUser()) { box.innerHTML = '<div class="placeholder">左侧先新建一个测试用户，再开始发消息</div>'; return }
+  if (!state.sessionId) {
+    box.innerHTML = `<div class="placeholder">选好店铺、粘贴商品链接（可不填），在下方输入买家消息发送。<br><br>
+      同一用户 + 店铺 + 商品在主程序里是同一个会话；想从头测，新建一个用户即可。</div>`
+    return
+  }
+  const d = state.conv
+  if (!d) { box.innerHTML = '<div class="placeholder">加载中…</div>'; return }
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60
+  const parts = d.messages.map((m) => {
+    const role = m.role === 'BUYER' ? 'buyer' : m.role === 'SYSTEM' ? 'system' : 'seller'
+    let tag = ''
+    if (role === 'seller') tag = m.trace?.auto ? 'AI 自动发送' : m.trace?.from_ai ? 'AI 草稿 · 人工审核后发送' : '人工回复'
+    const imgs = m.attachments.length ? `<div class="imgs">${m.attachments.map((a) =>
+      a.status === 'STORED' ? `<img src="/api/attachments/${a.id}/file" alt="">` : `<span class="chip err">图片 ${esc(a.status)}</span>`).join('')}</div>` : ''
+    return `<div class="msg ${role}"><div class="bubble">${esc(m.body)}${imgs}</div>
+      <div class="meta">${role === 'buyer' ? '我' : role === 'system' ? 'eBay 系统' : '卖家'} · ${fmtTime(m.sent_at)}${tag ? ' · ' + tag : ''}</div></div>`
+  })
+  const job = d.job, draft = d.agent_draft
+  if (job && BUSY.includes(job.state)) {
+    // 本程序只负责写入消息，回复由主程序的 Worker 生成；排队太久多半是主程序没在运行
+    const waited = (Date.now() - new Date(job.created_at)) / 1000
+    parts.push(job.state === 'RECEIVED' && waited > 20
+      ? '<div class="typing">消息已排队，等待主程序处理（主程序没运行时不会回复，启动后自动处理）</div>'
+      : '<div class="typing">卖家正在输入…（AI 处理中）</div>')
+  }
+  if (job && PENDING_REVIEW.includes(job.state)) {
+    const reasons = [...(draft?.review_reasons || []), ...(job.decision_reasons || [])].map((r) => typeof r === 'string' ? r : JSON.stringify(r))
+    parts.push(`<div class="draft"><h4>AI 草稿 · 客户看不到，需在工作台审核后发送</h4>
+      ${draft?.text ? `<div class="text">${esc(draft.text)}</div>` : '<div class="sub">没有生成草稿</div>'}
+      ${draft?.text_zh ? `<div class="zh">${esc(draft.text_zh)}</div>` : ''}
+      <div class="sub" style="margin-top:6px">${draft ? `意图 ${esc(draft.intent || '-')} · 风险 ${esc(draft.risk_level || '-')} · 决策 ${esc(draft.decision || '-')}` : ''}</div>
+      ${reasons.length ? `<ul>${[...new Set(reasons)].map((r) => `<li>${esc(r)}</li>`).join('')}</ul>` : ''}
+      ${job.last_error ? `<ul><li>${esc(job.last_error)}</li></ul>` : ''}
+      ${d.run?.error ? `<ul><li>${esc(d.run.error)}</li></ul>` : ''}</div>`)
+  }
+  box.innerHTML = parts.join('') || '<div class="placeholder">还没有消息</div>'
+  if (atBottom || state.justSent) { box.scrollTop = box.scrollHeight; state.justSent = false }
+}
+
+async function refreshConversation(first = false) {
+  const s = currentSession()
+  if (!s) return
+  try {
+    const d = await api('/api/conversations/' + s.conversation_id)
+    if (state.sessionId !== s.id) return
+    const key = JSON.stringify(d)
+    if (key !== state.convKey) {
+      const prevState = state.conv?.job?.state
+      state.conv = d; state.convKey = key
+      renderMessages(); renderTopbar()
+      if (prevState && d.job?.state !== prevState && !BUSY.includes(d.job?.state)) state.justSent = true
+    }
+    if (first && s.item_id) loadListing(s)
+  } catch (err) {
+    if (first) toast(err.message, true)
+  }
+}
+
+async function loadListing(s) {
+  try {
+    const l = await api(`/api/sessions/${s.id}/listing`)
+    if (state.sessionId !== s.id) return
+    state.listing = l
+    renderTopbar()
+    if (l.title && l.title !== s.title) { s.title = l.title; renderUsers() }
+  } catch { /* 商品卡片查不到不影响聊天 */ }
+}
+
+// ------------------------------------------------------------------ 发送
+function renderThumbs() {
+  $('thumbs').innerHTML = state.images.map((img, i) =>
+    `<div class="thumb"><img src="${img.data_base64}" alt=""><span data-rm="${i}">×</span></div>`).join('')
+}
+$('thumbs').onclick = (e) => {
+  const i = e.target.dataset.rm
+  if (i !== undefined) { state.images.splice(+i, 1); renderThumbs() }
+}
+$('btnImage').onclick = () => $('file').click()
+$('file').onchange = async (e) => {
+  for (const f of e.target.files) {
+    if (state.images.length >= 5) { toast('最多 5 张图片', true); break }
+    if (f.size > 10 * 1024 * 1024) { toast(`图片超过 10MB：${f.name}`, true); continue }
+    const data = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f) })
+    state.images.push({ name: f.name, data_base64: data })
+  }
+  e.target.value = ''
+  renderThumbs()
+}
+
+$('quick').innerHTML = QUICK.map((q) => `<button data-q="${esc(q)}">${esc(q)}</button>`).join('')
+$('quick').onclick = (e) => { if (e.target.dataset.q) { $('text').value = e.target.dataset.q; $('text').focus() } }
+
+async function send() {
+  const text = $('text').value
+  if (state.sending || (!text.trim() && !state.images.length)) return
+  const user = currentUser()
+  if (!user) return
+  const s = currentSession()
+  state.sending = true
+  $('btnSend').disabled = true
+  $('sendHint').textContent = s ? '' : '正在创建会话' + (state.draftLink.trim() ? '并核对商品…' : '…')
+  try {
+    const r = await api('/api/send', { method: 'POST', body: {
+      user_id: user.id, session_id: s?.id || null, store_id: s ? null : state.draftStore,
+      item_url: s ? null : state.draftLink, text, images: state.images,
+    } })
+    $('text').value = ''
+    state.images = []; renderThumbs()
+    state.justSent = true
+    if (!s) {
+      state.draftLink = ''; state.parsed = null
+      await loadUsers()
+      selectSession(r.session.id)
+      renderUsers()
+    } else {
+      await refreshConversation()
+      loadUsers()
+    }
+  } catch (err) {
+    toast(err.message, true)
+  } finally {
+    state.sending = false
+    $('btnSend').disabled = false
+    $('sendHint').textContent = ''
+  }
+}
+$('btnSend').onclick = send
+$('text').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send() } })
+
+// ------------------------------------------------------------------ 轮询
+setInterval(() => { if (!document.hidden && state.sessionId) refreshConversation() }, 2000)
+setInterval(() => { if (!document.hidden) loadMeta().catch(() => {}) }, 15000)
+
+;(async () => {
+  await loadMeta().catch((err) => { $('health').className = 'health bad'; $('health').textContent = err.message })
+  await loadUsers()
+  renderTopbar()
+  $('composer').hidden = !state.userId
+  if (state.sessions[0]) { selectSession(state.sessions[0].id); renderUsers() } else renderMessages()
+})()
+</script>
+</body>
+</html>

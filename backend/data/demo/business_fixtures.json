@@ -1,0 +1,109 @@
+{
+  "_note": "演示业务数据（虚构），与 测试知识库/星驰汽配_虚拟客服知识库_v1.md 的商品和政策保持一致。BUSINESS_SOURCE=fixture 时由只读工具读取；正式环境改为 MySQL 业务库只读适配器。",
+  "updated_at": "2026-10-23T08:00:00Z",
+  "stores": [
+    {"id": "STORE_A", "name": "星驰汽配 美国店（演示）", "ebay_user_id": "stardrive_us_demo", "timezone": "America/Los_Angeles", "default_marketplace_id": "EBAY_US"},
+    {"id": "STORE_B", "name": "星驰汽配 英国店（演示）", "ebay_user_id": "stardrive_uk_demo", "timezone": "Europe/London", "default_marketplace_id": "EBAY_GB"}
+  ],
+  "buyers": [
+    {"store_id": "STORE_A", "buyer_key": "buyer_us_001", "label": "US 买家 001（1 个在途订单：前刹车片）"},
+    {"store_id": "STORE_A", "buyer_key": "buyer_us_002", "label": "US 买家 002（已签收订单 + 未结退货 case）"},
+    {"store_id": "STORE_A", "buyer_key": "buyer_us_003", "label": "US 买家 003（2 个订单，用于订单歧义）"},
+    {"store_id": "STORE_A", "buyer_key": "buyer_us_new", "label": "US 新买家（无订单，售前咨询）"},
+    {"store_id": "STORE_B", "buyer_key": "buyer_gb_001", "label": "UK 买家 001（1 个已发货订单：水泵）"},
+    {"store_id": "STORE_B", "buyer_key": "buyer_gb_new", "label": "UK 新买家（无订单，售前咨询）"}
+  ],
+  "listings": [
+    {
+      "item_id": "110000000001", "store_id": "STORE_A", "marketplace_id": "EBAY_US",
+      "title": "StarDrive Front Ceramic Brake Pads for 2016-2021 Honda Civic (excl. Si / Type R)",
+      "variations": [{"sku": "SD-BP-1023", "aspects": {"Placement on Vehicle": "Front"}}],
+      "item_specifics": {"Brand": "StarDrive", "Material": "Ceramic", "Pieces": "4 pads (one front axle)", "Hardware Included": "Yes"},
+      "compatibility": ["2016-2021 Honda Civic LX", "2016-2021 Honda Civic EX", "2016-2021 Honda Civic EX-L", "2016-2021 Honda Civic Sport", "2016-2021 Honda Civic Touring"],
+      "handling_time": "Same business day if paid before 2 PM PT, otherwise next business day",
+      "shipping_options": ["Standard Shipping (USPS Ground Advantage / UPS Ground)", "Expedited Shipping (UPS 2nd Day Air)"],
+      "listing_status": "ACTIVE"
+    },
+    {
+      "item_id": "110000000002", "store_id": "STORE_A", "marketplace_id": "EBAY_US",
+      "title": "StarDrive LED Projector Headlight Assembly for 2018-2020 Ford F-150 (Halogen models)",
+      "variations": [
+        {"sku": "SD-HL-5120-L", "aspects": {"Placement on Vehicle": "Left (Driver Side)"}},
+        {"sku": "SD-HL-5120-R", "aspects": {"Placement on Vehicle": "Right (Passenger Side)"}},
+        {"sku": "SD-HL-5120-P", "aspects": {"Placement on Vehicle": "Left and Right (Pair)"}}
+      ],
+      "item_specifics": {"Brand": "StarDrive", "Bulb Type": "LED", "Fits": "Factory halogen headlight models only"},
+      "compatibility": ["2018-2020 Ford F-150 with factory halogen headlights"],
+      "handling_time": "Same business day if paid before 2 PM PT, otherwise next business day",
+      "shipping_options": ["Standard Shipping (UPS Ground)"],
+      "listing_status": "ACTIVE"
+    },
+    {
+      "item_id": "110000000003", "store_id": "STORE_A", "marketplace_id": "EBAY_US",
+      "title": "StarDrive Upstream O2 Oxygen Sensor Bank 1 Sensor 1 for 2018-2023 Toyota Camry 2.5L",
+      "variations": [{"sku": "SD-O2-3301", "aspects": {"Position": "Upstream (Bank 1 Sensor 1)"}}],
+      "item_specifics": {"Brand": "StarDrive", "Type": "Air Fuel Ratio Sensor"},
+      "compatibility": ["2018-2023 Toyota Camry 2.5L L4 (non-hybrid)"],
+      "handling_time": "Same business day if paid before 2 PM PT, otherwise next business day",
+      "shipping_options": ["Standard Shipping (USPS Ground Advantage)"],
+      "listing_status": "ACTIVE"
+    },
+    {
+      "item_id": "110000000004", "store_id": "STORE_A", "marketplace_id": "EBAY_US",
+      "title": "StarDrive Front Vented Brake Rotors (Pair) 282mm for 2016-2021 Honda Civic",
+      "variations": [{"sku": "SD-RT-2208", "aspects": {"Placement on Vehicle": "Front", "Quantity": "Pair (2 rotors)"}}],
+      "item_specifics": {"Brand": "StarDrive", "Diameter": "282 mm", "Coating": "Anti-rust"},
+      "compatibility": ["2016-2021 Honda Civic (excl. Si / Type R)"],
+      "handling_time": "Same business day if paid before 2 PM PT, otherwise next business day",
+      "shipping_options": ["Standard Shipping (UPS Ground)"],
+      "listing_status": "ACTIVE"
+    },
+    {
+      "item_id": "220000000001", "store_id": "STORE_B", "marketplace_id": "EBAY_GB",
+      "title": "StarDrive Engine Water Pump for Hyundai Elantra 1.8 2012-2017",
+      "variations": [{"sku": "SD-WP-7002", "aspects": {}}],
+      "item_specifics": {"Brand": "StarDrive", "Gasket Included": "Yes"},
+      "compatibility": ["2012-2017 Hyundai Elantra 1.8"],
+      "handling_time": "Same working day if paid before 1 PM UK time, otherwise next working day",
+      "shipping_options": ["Royal Mail Tracked 48"],
+      "listing_status": "ACTIVE"
+    }
+  ],
+  "products": [
+    {"sku": "SD-BP-1023", "store_scope": ["STORE_A", "STORE_B"], "title": "Front Ceramic Brake Pads", "attributes": {"placement": "Front axle", "pieces": 4, "hardware_included": true, "wear_indicator": "mechanical"}, "compatibility": ["2016-2021 Honda Civic LX/EX/EX-L/Sport/Touring (front)"], "not_compatible": ["Civic Si", "Civic Type R"], "listing_status": "ACTIVE"},
+    {"sku": "SD-BP-1023R", "store_scope": ["STORE_A", "STORE_B"], "title": "Rear Ceramic Brake Pads", "attributes": {"placement": "Rear axle (R = Rear, not Right)", "pieces": 4, "hardware_included": false}, "compatibility": ["2016-2021 Honda Civic rear disc (Si OK)"], "not_compatible": ["Civic Type R"], "listing_status": "ACTIVE"},
+    {"sku": "SD-RT-2208", "store_scope": ["STORE_A", "STORE_B"], "title": "Front Vented Brake Rotors (Pair)", "attributes": {"quantity_per_unit": "1 pair (2 rotors)", "diameter_mm": 282, "oversize": true}, "compatibility": ["2016-2021 Honda Civic front"], "not_compatible": ["Civic Si", "Civic Type R"], "listing_status": "ACTIVE"},
+    {"sku": "SD-O2-3301", "store_scope": ["STORE_A", "STORE_B"], "title": "Upstream O2 Sensor (Bank 1 Sensor 1)", "attributes": {"position": "Upstream, before catalytic converter", "category": "electronic"}, "compatibility": ["2018-2023 Toyota Camry 2.5L non-hybrid"], "not_compatible": ["Camry Hybrid", "Camry 3.5L V6", "Downstream / Sensor 2 position"], "listing_status": "ACTIVE"},
+    {"sku": "SD-HL-5120-L", "store_scope": ["STORE_A"], "title": "LED Headlight Assembly - Left (Driver Side, US)", "attributes": {"side": "Left / Driver side (LHD)", "oversize": true}, "compatibility": ["2018-2020 Ford F-150 with factory halogen headlights"], "not_compatible": ["F-150 with factory LED headlights"], "listing_status": "ACTIVE"},
+    {"sku": "SD-HL-5120-R", "store_scope": ["STORE_A"], "title": "LED Headlight Assembly - Right (Passenger Side, US)", "attributes": {"side": "Right / Passenger side (LHD)", "oversize": true}, "compatibility": ["2018-2020 Ford F-150 with factory halogen headlights"], "not_compatible": ["F-150 with factory LED headlights"], "listing_status": "ACTIVE"},
+    {"sku": "SD-HL-5120-P", "store_scope": ["STORE_A"], "title": "LED Headlight Assembly - Pair", "attributes": {"side": "Left + Right", "oversize": true}, "compatibility": ["2018-2020 Ford F-150 with factory halogen headlights"], "not_compatible": ["F-150 with factory LED headlights"], "listing_status": "ACTIVE"},
+    {"sku": "SD-WP-7002", "store_scope": ["STORE_A", "STORE_B"], "title": "Engine Water Pump", "attributes": {"gasket_included": true, "thermostat_included": false}, "compatibility": ["2012-2017 Hyundai Elantra 1.8L"], "not_compatible": [], "listing_status": "ACTIVE"},
+    {"sku": "SD-AF-9105", "store_scope": ["STORE_A", "STORE_B"], "title": "Engine Air Filter", "attributes": {"category": "consumable", "oversize": false}, "compatibility": ["2018-2023 Toyota Camry 2.5L"], "not_compatible": [], "listing_status": "ACTIVE"}
+  ],
+  "orders": [
+    {"order_id": "26-10001-US", "store_id": "STORE_A", "buyer_key": "buyer_us_001", "item_id": "110000000001", "sku": "SD-BP-1023", "quantity": 1, "marketplace_id": "EBAY_US", "order_status": "SHIPPED", "paid_at": "2026-10-20T19:05:00Z"},
+    {"order_id": "26-10002-US", "store_id": "STORE_A", "buyer_key": "buyer_us_002", "item_id": "110000000003", "sku": "SD-O2-3301", "quantity": 1, "marketplace_id": "EBAY_US", "order_status": "DELIVERED", "paid_at": "2026-10-05T16:40:00Z"},
+    {"order_id": "26-10003-US", "store_id": "STORE_A", "buyer_key": "buyer_us_003", "item_id": "110000000004", "sku": "SD-RT-2208", "quantity": 1, "marketplace_id": "EBAY_US", "order_status": "SHIPPED", "paid_at": "2026-10-21T17:10:00Z"},
+    {"order_id": "26-10004-US", "store_id": "STORE_A", "buyer_key": "buyer_us_003", "item_id": "110000000001", "sku": "SD-BP-1023", "quantity": 1, "marketplace_id": "EBAY_US", "order_status": "PAID", "paid_at": "2026-10-23T01:30:00Z"},
+    {"order_id": "26-20001-GB", "store_id": "STORE_B", "buyer_key": "buyer_gb_001", "item_id": "220000000001", "sku": "SD-WP-7002", "quantity": 1, "marketplace_id": "EBAY_GB", "order_status": "SHIPPED", "paid_at": "2026-10-21T10:15:00Z"}
+  ],
+  "packages": [
+    {"order_id": "26-10001-US", "package_id": "PKG-10001-1", "carrier": "USPS", "tracking_number": "9400100000000000010001", "tracking_status": "IN_TRANSIT", "latest_event": "Departed USPS Regional Facility, Phoenix AZ", "event_time": "2026-10-22T21:14:00Z", "estimated_delivery": "2026-10-25"},
+    {"order_id": "26-10002-US", "package_id": "PKG-10002-1", "carrier": "USPS", "tracking_number": "9400100000000000010002", "tracking_status": "DELIVERED", "latest_event": "Delivered, In/At Mailbox", "event_time": "2026-10-09T18:02:00Z", "estimated_delivery": "2026-10-09"},
+    {"order_id": "26-10003-US", "package_id": "PKG-10003-1", "carrier": "UPS", "tracking_number": "1Z000000000000003", "tracking_status": "LABEL_CREATED", "latest_event": "Shipping label created, UPS awaiting item", "event_time": "2026-10-21T22:30:00Z", "estimated_delivery": null},
+    {"order_id": "26-20001-GB", "package_id": "PKG-20001-1", "carrier": "Royal Mail", "tracking_number": "RM000000002GB", "tracking_status": "IN_TRANSIT", "latest_event": "Item received at Birmingham Mail Centre", "event_time": "2026-10-22T07:40:00Z", "estimated_delivery": "2026-10-24"}
+  ],
+  "inventory": [
+    {"store_id": "STORE_A", "sku": "SD-BP-1023", "sellable_quantity": 42, "reserved_quantity": 3, "in_transit_quantity": 0, "warehouse": "US-Ontario"},
+    {"store_id": "STORE_A", "sku": "SD-BP-1023R", "sellable_quantity": 0, "reserved_quantity": 0, "in_transit_quantity": 60, "warehouse": "US-Ontario"},
+    {"store_id": "STORE_A", "sku": "SD-RT-2208", "sellable_quantity": 7, "reserved_quantity": 1, "in_transit_quantity": 0, "warehouse": "US-Ontario"},
+    {"store_id": "STORE_A", "sku": "SD-O2-3301", "sellable_quantity": 15, "reserved_quantity": 0, "in_transit_quantity": 0, "warehouse": "US-Ontario"},
+    {"store_id": "STORE_A", "sku": "SD-HL-5120-L", "sellable_quantity": 2, "reserved_quantity": 0, "in_transit_quantity": 10, "warehouse": "US-Ontario"},
+    {"store_id": "STORE_A", "sku": "SD-HL-5120-R", "sellable_quantity": 0, "reserved_quantity": 0, "in_transit_quantity": 10, "warehouse": "US-Ontario"},
+    {"store_id": "STORE_A", "sku": "SD-HL-5120-P", "sellable_quantity": 4, "reserved_quantity": 0, "in_transit_quantity": 0, "warehouse": "US-Ontario"},
+    {"store_id": "STORE_B", "sku": "SD-WP-7002", "sellable_quantity": 9, "reserved_quantity": 1, "in_transit_quantity": 0, "warehouse": "UK-Birmingham"}
+  ],
+  "cases": [
+    {"store_id": "STORE_A", "order_id": "26-10002-US", "case_type": "RETURN", "case_id": "RET-5000123", "status": "OPEN", "opened_at": "2026-10-21T03:00:00Z", "due_by": "2026-10-24T03:00:00Z", "last_action": "Buyer opened return: Doesn't work or defective"}
+  ]
+}
