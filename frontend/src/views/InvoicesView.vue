@@ -259,7 +259,7 @@ onUnmounted(() => window.removeEventListener('hashchange', fromHash))
           </div>
           <el-table :data="reqs" v-loading="reqLoading" size="small" border class="clickable" @row-click="(r: InvoiceRequestRow) => (openReq = r.id)">
             <el-table-column label="状态" width="120">
-              <template #default="{ row }"><el-tag size="small" :type="REQ_TYPE[row.status]" effect="dark">{{ row.status_label }}</el-tag></template>
+              <template #default="{ row }"><el-tag size="small" :type="REQ_TYPE[row.status]">{{ row.status_label }}</el-tag></template>
             </el-table-column>
             <el-table-column label="买家" min-width="150">
               <template #default="{ row }">
@@ -499,7 +499,7 @@ onUnmounted(() => window.removeEventListener('hashchange', fromHash))
   margin-left: auto;
 }
 .small {
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 .pre {
   white-space: pre-wrap;
@@ -508,7 +508,7 @@ onUnmounted(() => window.removeEventListener('hashchange', fromHash))
   margin-left: 8px;
 }
 .warn {
-  color: #b26a00;
+  color: var(--warn-text);
 }
 .mb-s {
   margin-bottom: 10px;

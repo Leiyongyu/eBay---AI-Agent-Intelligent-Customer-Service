@@ -166,7 +166,7 @@ def receive(payload: dict) -> dict:
     topic = meta.get("topic")
     nid = str(note.get("notificationId") or hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest())
     # EBAY_SYNC_ENABLED=false（暂停拉取，如只用模拟来信测试）时只记录、不拉取；仍返回成功，免得 eBay 因连续失败停用推送地址
-    paused = not get_settings().ebay_sync_enabled
+    paused = not get_settings().ebay_sync_enabled or not get_settings().ebay_push_enabled  # 关了推送同样只记录
     status = "IGNORED" if topic != TOPIC else ("PAUSED" if paused else "QUEUED")
     with session_scope() as db:
         if db.scalar(select(EbayNotification.id).where(EbayNotification.notification_id == nid)):

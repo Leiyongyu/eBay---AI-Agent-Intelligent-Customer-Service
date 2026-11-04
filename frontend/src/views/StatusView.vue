@@ -454,11 +454,11 @@ onMounted(() => {
   margin-bottom: 8px;
 }
 .err {
-  color: #c45656;
-  font-size: 12px;
+  color: var(--danger-text);
+  font-size: var(--fs-xs);
 }
 .run {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   padding: 4px 0;
   border-bottom: 1px dashed var(--el-border-color-lighter);
 }

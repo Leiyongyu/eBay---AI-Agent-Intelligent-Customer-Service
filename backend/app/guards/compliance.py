@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 from ..config import get_settings
 
-RULES_VERSION = "compliance-2026.10.23-1"
+RULES_VERSION = "compliance-2026.11.03-1"
 
 BUILTIN_URL_WHITELIST = {
     # eBay 自有域名
@@ -42,6 +42,11 @@ _LETTER_SUFFIX = re.compile(r"^\s?[A-Z]{1,3}\b")
 _EBAY_ORDER_ID = re.compile(r"\d{2}-\d{5}-\d{5}")
 _INVOICE_NO = re.compile(r"(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])-\d{5}(?:-\d{1,2})?")  # 本系统发票号 20261030-32244
 _YEAR_RANGE_OR_DATE = re.compile(r"(?:19|20)\d{2}\s*[-–/]\s*(?:(?:19|20)\d{2}|\d{1,2}\s*[-/]\s*\d{1,2})")
+# 日在前的日期（德式 03.11.2026、欧式 03/11/2026），可带时间（“03.11.2026 03:59”“02.11.2026, um 21:25 Uhr”）：
+# 物流轨迹时间常这样写，查电话号码前先遮掉，否则“03.11.2026 03”会凑够 10 位数字被当成电话
+_DAY_FIRST_DATE_TIME = re.compile(
+    r"(?<!\d)\d{1,2}[./]\d{1,2}[./](?:19|20)\d{2}"
+    r"(?:,?\s*(?:um|at|alle|à|a las)?\s*\d{1,2}[:h]\d{2}(?::\d{2})?(?:\s*Uhr)?)?(?!\d)", re.I)
 _CARD = re.compile(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)")
 _MESSENGER = re.compile(r"whats\s*app|wechat|微信|telegram|skype|line\s*id|signal app|instagram|facebook|messenger|discord|kakao", re.I)
 _HANDLE = re.compile(r"@[a-z0-9_.]{3,}|\b(?:id|handle|account|number|号)\s*[:：]?\s*[a-z0-9_.+-]{4,}", re.I)
@@ -152,7 +157,8 @@ class ComplianceChecker:
             digits = re.sub(r"\D", "", m.group(0))
             if 13 <= len(digits) <= 19 and _luhn_ok(digits) and digits not in allowed_digits:
                 add("pii.card_number", "BLOCK", m, "疑似银行卡号回显")
-        for m in _PHONE.finditer(t):
+        no_dates = _DAY_FIRST_DATE_TIME.sub(lambda d: "x" * len(d.group(0)), t)  # 等长替换，命中位置不变
+        for m in _PHONE.finditer(no_dates):
             if in_url(m):
                 continue  # 链接里的数字（刊登号等）由外链规则负责
             s = m.group(0)

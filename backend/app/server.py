@@ -9,11 +9,13 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import APP_NAME, APP_VERSION
-from .api import accounts, aftersales_files, ebay, upload_public, invoices, knowledge_admin, maintenance, system, usage, webhooks, workbench
+from .api import accounts, aftersales_files, ebay, upload_public, invoices, knowledge_admin, maintenance, ship_notices, system, usage, webhooks, workbench
 from .auth import auth_middleware, require_admin
 from .config import PROJECT_ROOT, get_settings
 from .aftersales_mail.service import worker as aftersales_mail_worker
 from .logistics.tickets import worker as logistics_ticket_worker
+from .translation import translator
+from .ship_notices import worker as ship_notice_worker
 from .ebay.notifications import push_not_ready_reasons, push_worker, recheck_destination
 from .ebay.scheduler import scheduler as ebay_scheduler
 from .retention import scheduler as retention_scheduler
@@ -48,7 +50,7 @@ async def lifespan(app: FastAPI):
     # Cloudflare 隧道跟着本程序启停（.env 填了 CLOUDFLARED_PATH 和令牌才启动）
     if not tunnel.start() and (s.cloudflared_path or s.cloudflare_tunnel_token):
         log.warning("Cloudflare 隧道未启动：%s", "；".join(tunnel_not_ready()))
-    if not push_not_ready_reasons():
+    if s.ebay_push_enabled and not push_not_ready_reasons():
         push_worker.start()  # 推送触发的单店铺拉取；订阅在状态页“启用推送订阅”里建
         log.info("eBay 实时推送接收已就绪：%s", s.ebay_notify_endpoint)
         if tunnel.running:
@@ -58,10 +60,16 @@ async def lifespan(app: FastAPI):
                  "（试运行，只统计不删除）" if s.retention_dry_run else "")
     if aftersales_mail_worker.start():  # 售后邮箱收信与每日清理（邮箱没配好时只做清理）
         log.info("售后邮箱任务已启动：%s", "；".join(s.aftersales_mail_not_ready_reasons()) or "每 %s 秒收信" % s.aftersales_mail_poll_seconds)
+    if ship_notice_worker.start():  # 汇总当天已发货的订单，生成待审核的发货通知
+        log.info("发货通知汇总已启动：每 %s 分钟", s.ship_notice_interval_minutes)
+    if translator.start():  # 买家来信自动译成中文
+        log.info("买家消息自动翻译已启动")
     if logistics_ticket_worker.start():  # 每天同步谷仓查件单，谷仓回复后起草给买家的回复建议
         log.info("谷仓查件单同步已启动：每天 %s", s.logistics_ticket_sync_time)
     yield
     logistics_ticket_worker.stop()
+    translator.stop()
+    ship_notice_worker.stop()
     aftersales_mail_worker.stop()
     retention_scheduler.stop()
     push_worker.stop()
@@ -76,6 +84,7 @@ def create_app() -> FastAPI:
     app.include_router(accounts.router)
     app.include_router(system.router)
     app.include_router(workbench.router)
+    app.include_router(ship_notices.router)  # 发货通知：按负责店铺
     app.include_router(invoices.router)  # 会话里的发票：按店铺范围；留底 PDF 只有管理员能看
     app.include_router(aftersales_files.router)  # 售后附件：管理员或账号打开“可看售后附件”，按店铺范围
     app.include_router(upload_public.router)  # 买家上传页 /upload：不需要登录（隧道只放行 /upload 开头）

@@ -63,7 +63,7 @@ class Aftersales:
     """客服标记转售后的问题类型与状态。"""
     PENDING, IN_PROGRESS, DONE = "PENDING", "IN_PROGRESS", "DONE"
     STATUS_LABELS = {PENDING: "待售后处理", IN_PROGRESS: "售后处理中", DONE: "售后已完成"}
-    TYPES = ["退货", "退款", "赔偿/部分退款", "不适配", "破损/错发/缺件", "质量问题", "物流异常/未收到", "物流超时需判断补发", "取消订单",
+    TYPES = ["退货", "退款", "赔偿/部分退款", "不适配", "破损/错发/缺件", "质量问题", "物流异常/未收到", "物流问题需判断补发", "取消订单",
              "改地址", "其他"]
     # AI 识别的意图 → 标记时默认选中的类型（只是建议，客服可改）
     INTENT_HINT = {"return_refund": "退货", "refund_status": "退款", "damaged_wrong": "破损/错发/缺件",
@@ -206,7 +206,7 @@ class Message(Base):
 
 class MessageTag(Base):
     __tablename__ = "message_tags"
-    __table_args__ = {"comment": "会话标记的可选项（管理员维护），如 查适配中、不适配、等买家回复"}
+    __table_args__ = {"comment": "会话标记的可选项，如 查适配中、不适配、等买家回复；所有账号都能在标记弹窗里新建、删除，管理员可改名、排序、停用"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
     name: Mapped[str] = mapped_column(String(32), unique=True, comment="标记名称")
@@ -220,10 +220,11 @@ class MessageTag(Base):
 
 class ConversationMark(Base):
     __tablename__ = "conversation_marks"
-    __table_args__ = {"comment": "会话标记：客服给整段会话标当前状态（如 查适配中、不适配）并写备注；一个会话一个标记"}
+    __table_args__ = (UniqueConstraint("conversation_id", "tag_id", name="uq_conversation_marks_conv_tag"),
+                      {"comment": "会话标记：给整段会话标当前状态（如 查适配中、不适配）并写备注；一个会话可以打多个标记，同一标记只打一次"})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
-    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), unique=True, comment="被标记的会话 ID")
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), index=True, comment="被标记的会话 ID")
     store_id: Mapped[str] = mapped_column(String(64), index=True, comment="所属店铺 ID")
     tag_id: Mapped[int] = mapped_column(ForeignKey("message_tags.id"), index=True, comment="标记项 ID")
     note: Mapped[str | None] = mapped_column(Text, comment="备注")
@@ -960,7 +961,39 @@ class LogisticsTicket(Base):
     handled_at: Mapped[datetime | None] = mapped_column(DateTime, comment="客服处理完（已回复买家）的时间（UTC）；空 = 待处理")
     handled_by: Mapped[str | None] = mapped_column(String(64), comment="处理的客服")
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="最近同步时间（UTC）")
-    origin: Mapped[str | None] = mapped_column(String(16), comment="来源：空/SYNC 从谷仓同步；AI_DRAFT 系统按物流规则保存的草稿")
-    io_desc: Mapped[str | None] = mapped_column(String(300), comment="查件需求（系统建草稿时写的说明）")
-    created_by: Mapped[str | None] = mapped_column(String(64), comment="建单人（系统建的为 AI（物流规则））")
-    created_at: Mapped[datetime | None] = mapped_column(DateTime, comment="系统建草稿的时间（UTC）")
+    origin: Mapped[str | None] = mapped_column(String(16), comment="来源：空 从谷仓同步；AI_DRAFT 系统按物流规则起草（草稿只存本系统，查件单号为 DRAFT- 开头，提交后换成谷仓单号）")
+    io_desc: Mapped[str | None] = mapped_column(String(300), comment="查件需求（系统起草、客服可改）")
+    created_by: Mapped[str | None] = mapped_column(String(64), comment="起草人（系统起草的为 AI（物流规则））")
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, comment="系统起草的时间（UTC）")
+    it_type_id: Mapped[int | None] = mapped_column(Integer, comment="查件类型 ID（谷仓查件类型接口的 value）")
+    sm_code: Mapped[str | None] = mapped_column(String(32), comment="物流方式代码（选查件类型用），如 DEDHL")
+    submitted_by: Mapped[str | None] = mapped_column(String(64), comment="在工作台提交到谷仓的客服")
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime, comment="提交到谷仓的时间（UTC）")
+    send_status: Mapped[str | None] = mapped_column(String(16), comment="查件结果发给买家：SENT 已发送 / NEEDS_HUMAN 需人工 / FAILED 发送失败 / NO_BUYER 找不到买家；空 = 还没回复或未处理")
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, comment="查件结果发给买家的时间（UTC）")
+    sent_message_id: Mapped[int | None] = mapped_column(Integer, comment="发给买家的消息 ID（messages.id）")
+    send_error: Mapped[str | None] = mapped_column(String(300), comment="没自动发送的原因")
+
+
+class ShipNotice(Base):
+    __tablename__ = "ship_notices"
+    __table_args__ = {"comment": "发货通知：每天汇总当天在 eBay 标记已发货的订单，按站点语言写好订单号、承运商、跟踪号、查件链接，人工审核后发给买家（目前为模拟发送）"}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    store_id: Mapped[str] = mapped_column(String(64), index=True, comment="订单所属店铺")
+    order_id: Mapped[str] = mapped_column(String(64), unique=True, comment="eBay 订单号（一个订单只发一次）")
+    buyer_key: Mapped[str | None] = mapped_column(String(128), comment="买家 eBay 账号")
+    marketplace_id: Mapped[str | None] = mapped_column(String(32), comment="订单站点，决定消息语言")
+    ship_date: Mapped[str] = mapped_column(String(10), index=True, comment="发货日期（北京时间 YYYY-MM-DD，按 eBay 标记发货时间）")
+    shipped_at: Mapped[datetime | None] = mapped_column(DateTime, comment="eBay 标记发货时间（UTC）")
+    packages: Mapped[list] = mapped_column(JSON, comment="包裹 [{carrier, tracking_no, url}]")
+    language: Mapped[str] = mapped_column(String(8), comment="消息语言 de / en / fr / it / es")
+    text: Mapped[str] = mapped_column(Text, comment="发给买家的消息（可在审核时修改）")
+    text_zh: Mapped[str | None] = mapped_column(Text, comment="中文对照")
+    status: Mapped[str] = mapped_column(String(16), default="PENDING", index=True, comment="PENDING 待审核 / SENT 已发送 / SKIPPED 不发")
+    skip_reason: Mapped[str | None] = mapped_column(String(200), comment="不发的原因（如订单已取消、有退款，或审核员跳过）")
+    conversation_id: Mapped[int | None] = mapped_column(Integer, index=True, comment="发到的买家会话（没有会话的发送时按订单新建）")
+    sent_message_id: Mapped[int | None] = mapped_column(Integer, comment="发出的消息 ID（messages.id）")
+    sent_by: Mapped[str | None] = mapped_column(String(64), comment="发送（审核通过）的人")
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, comment="发送时间（UTC）")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="生成时间（UTC）")

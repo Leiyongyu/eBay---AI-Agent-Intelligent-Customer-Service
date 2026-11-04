@@ -18,7 +18,7 @@ import logging
 import threading
 from datetime import datetime, time as dtime, timedelta, timezone
 
-from sqlalchemy import delete, exists, func, select, true
+from sqlalchemy import delete, exists, func, select, true, update
 from sqlalchemy.orm import Session
 
 from .config import Settings, get_settings
@@ -36,6 +36,7 @@ from .models import (
     MessageAttachment,
     ConversationMark,
     InvoiceRequest,
+    LogisticsTicket,
     ReplyJob,
     ReplyJobSource,
     ReviewFeedback,
@@ -165,6 +166,8 @@ def delete_conversations(db: Session, conv_ids: list[int]) -> tuple[dict, set[st
     db.execute(delete(ConversationMark).where(ConversationMark.conversation_id.in_(conv_ids)))
     # 发票申请（含买家邮箱）随会话删；已生成的发票留底不删（invoices 表，财务要求保存）
     db.execute(delete(InvoiceRequest).where(InvoiceRequest.conversation_id.in_(conv_ids)))
+    # 谷仓查件单保留（来自谷仓），只解除与会话的关联；之后同步时按买家重新匹配
+    db.execute(update(LogisticsTicket).where(LogisticsTicket.conversation_id.in_(conv_ids)).values(conversation_id=None))
     n_msgs = db.execute(delete(Message).where(Message.conversation_id.in_(conv_ids))).rowcount or 0
     n_convs = db.execute(delete(Conversation).where(Conversation.id.in_(conv_ids))).rowcount or 0
     return {"conversations": n_convs, "messages": n_msgs, "attachments": n_atts, "jobs": n_jobs}, files

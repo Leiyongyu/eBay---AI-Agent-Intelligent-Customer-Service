@@ -214,6 +214,40 @@ def install_credential_guards() -> None:
 
 # 模型里改成可空的已有字段：PostgreSQL 启动时去掉 NOT NULL（SQLite 测试库每次新建，不需要）
 RELAX_NOT_NULL = [("aftersales_files", "mail_id")]
+# 唯一约束调整（PostgreSQL）：去掉旧的单列唯一，加上新的组合唯一
+DROP_UNIQUE = [("conversation_marks", ["conversation_id"])]  # 原来一个会话只能一个标记
+ADD_UNIQUE = [("conversation_marks", "uq_conversation_marks_conv_tag", ["conversation_id", "tag_id"])]
+
+
+def migrate_unique() -> list[str]:
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    engine = get_engine()
+    if engine.dialect.name != "postgresql":
+        return []
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    done = []
+    with engine.begin() as conn:
+        for table, cols in DROP_UNIQUE:
+            if table not in tables:
+                continue
+            for uc in inspector.get_unique_constraints(table):
+                if list(uc["column_names"]) == cols:
+                    conn.execute(text(f'ALTER TABLE "{table}" DROP CONSTRAINT "{uc["name"]}"'))
+                    done.append(f"去掉 {table}({', '.join(cols)}) 唯一约束")
+            for ix in inspector.get_indexes(table):
+                if ix.get("unique") and list(ix["column_names"]) == cols:
+                    conn.execute(text(f'DROP INDEX IF EXISTS "{ix["name"]}"'))
+                    done.append(f"去掉 {table}({', '.join(cols)}) 唯一索引")
+        for table, name, cols in ADD_UNIQUE:
+            if table in tables:
+                conn.execute(text(f'CREATE UNIQUE INDEX IF NOT EXISTS "{name}" ON "{table}" ({", ".join(chr(34) + c + chr(34) for c in cols)})'))
+    if done:
+        logging.getLogger(__name__).info("表结构调整：%s", "；".join(done))
+    return done
 
 
 def relax_not_null() -> list[str]:
@@ -247,6 +281,7 @@ def init_db() -> None:
     Base.metadata.create_all(get_engine())
     add_missing_columns()
     relax_not_null()
+    migrate_unique()
     sync_comments()
     install_credential_guards()
     from .knowledge.vector_index import vector_status

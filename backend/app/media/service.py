@@ -38,7 +38,7 @@ class MediaError(Exception):
 
 # ---------------------------------------------------------------- 登记
 def register_ebay_media(db: Session, msg: Message, media: list[dict] | None) -> list[MessageAttachment]:
-    """把 eBay messageMedia 登记为附件；只登记不下载（下载在 Agent 运行时按需进行）。"""
+    """把 eBay messageMedia 登记为附件（登记后由调用方用 ensure_stored 下载：拉取时立即下载）。"""
     s = get_settings()
     created = []
     for i, m in enumerate(media or [], 1):
@@ -176,6 +176,9 @@ def ensure_stored(db: Session, atts: list[MessageAttachment], client: httpx.Clie
             continue
         try:
             store_image(att, download(att.source_url or "", client))
+            msg = db.get(Message, att.message_id)
+            if msg is not None and msg.sent_at:  # 保留期按买家发图的时间算，与聊天记录一致
+                att.expires_at = min(att.expires_at, msg.sent_at + timedelta(days=get_settings().media_retention_days))
         except MediaError as e:
             _fail(att, str(e))
         except Exception as e:  # 单个附件出错不影响整个回复任务

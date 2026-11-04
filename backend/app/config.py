@@ -72,10 +72,10 @@ class Settings(BaseSettings):
     media_max_per_message: int = 5
     media_max_dimension: int = 2048  # 保存副本的最长边，超出等比缩小（也减少识图 token）
     media_allowed_hosts: str = "ebayimg.com,ebay.com,ebaystatic.com"  # 只从这些域名（含子域名）下载
-    media_retention_days: int = 30  # 与聊天记录保留期一致；消息被清理时附件文件一并删除
+    media_retention_days: int = 90  # 与聊天记录保留期一致；消息被清理时附件文件一并删除
 
     # 聊天记录保留期（按消息在 eBay 的发送时间；店铺可在 stores.retention_days 单独设置）
-    data_retention_days: int = 30  # 0 = 不清理
+    data_retention_days: int = 90  # 每个会话的消息保留 3 个月（按消息时间）；0 = 不清理
     retention_cleanup_time: str = "03:30"  # 每天几点清理（本机时间 HH:MM）；错过时下次启动补跑
     retention_batch_size: int = 500  # 每批删除的消息数，每批单独提交
     retention_dry_run: bool = True  # 试运行：只统计会删多少，不真删
@@ -102,6 +102,7 @@ class Settings(BaseSettings):
     ebay_deletion_endpoint: str | None = None
     # eBay 实时推送（Notification API）接收地址：公网 HTTPS，经 Cloudflare 隧道转到本机；挑战校验同样用 EBAY_VERIFICATION_TOKEN
     ebay_notify_endpoint: str | None = None
+    ebay_push_enabled: bool = True  # 实时推送开关；false = 收到推送只记录（仍回 204，免得 eBay 停用推送地址），不触发拉取
     # 测试期用：工作台显示“删除会话”按钮，只能删测试会话（非 eBay 拉取）；正式上线前关掉，并移除相关接口与按钮
     test_delete_enabled: bool = False
     auth_session_hours: int = 12  # 登录闲置多少小时后需要重新登录（有访问就顺延）
@@ -170,7 +171,14 @@ class Settings(BaseSettings):
     logistics_reship_days: int = 7  # 轨迹多少天没更新要人工判断是否补发
     logistics_ticket_sync_time: str = "10:00"  # 每天同步谷仓查件单的时间（本机时间）；没开机的启动后补跑
     logistics_ticket_sync_days: int = 30  # 每次同步最近多少天创建的查件单（谷仓上限 186 天）
-    logistics_ticket_auto_draft: bool = False  # 物流需人工（断更、异常、妥投未收到）时自动在谷仓保存查件单草稿，人工核对后提交
+    logistics_ticket_sync_interval_minutes: int = 60  # 每隔多少分钟同步一次查件单；0 = 只按 LOGISTICS_TICKET_SYNC_TIME 每天一次
+    logistics_ticket_auto_send: bool = False  # 谷仓回复后自动把查件结果（AI 起草的消息 + 附件）发给买家（目前为模拟发送）；需人工的不自动发
+    ship_notice_enabled: bool = False  # 汇总当天已发货的订单，生成发货通知（订单号、承运商、跟踪号、查件链接）待人工审核发送
+    ship_notice_interval_minutes: int = 60  # 每隔多少分钟汇总一次当天已发货的订单
+    auto_translate_buyer_messages: bool = False  # 买家来信自动译成中文（新拉到的和打开会话时还没译的），工作台显示原文 + 译文
+    logistics_ticket_auto_draft: bool = False  # 物流需人工（断更、异常、妥投未收到）时自动起草查件单（只存本系统），客服在工作台核对后提交到谷仓
+    logistics_ticket_auto_submit: bool = False  # 起草后直接提交到谷仓（不用人工核对）；这类回复（告诉买家已发起查件）也不再因物流原因转人工
+    logistics_ticket_send_needs_human: bool = False  # 谷仓回复后需要人工的结果（丢失、退回、妥投未收到等）也直接回复买家，同时标待售后
     logistics_ticket_notify_emails: str = ""  # 查件单通知邮箱（谷仓必填，最多 10 个，逗号分隔）
 
     # eBay 消息拉取（只读，Commerce Message API）
@@ -220,6 +228,7 @@ class Settings(BaseSettings):
     auto_send_exclude_intents: str | None = None  # 白名单为 * 时仍要人工的意图，如 fitment,price_offer
     auto_send_evidence: str = "kb"  # kb：必须引用知识库；any：任一依据（知识库/商品/查询结果）或回复无事实陈述
     auto_reply_max_streak: int = 1  # 同一会话 AI 最多连续自动回复几次，达到后买家再来信交人工
+    auto_tag_enabled: bool = True  # 按 AI 识别的问题类型自动给会话打标记（适配咨询、物流查询、退货退款等）
 
     compliance_extra_url_whitelist: str | None = None
 

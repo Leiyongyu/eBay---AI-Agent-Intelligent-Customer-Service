@@ -32,6 +32,7 @@ export interface Claim {
 export interface ConversationItem {
   id: number
   store_id: string
+  store_name?: string // 店铺名（列表卡片显示）
   marketplace_id: string
   buyer_key: string
   item_id: string | null
@@ -48,7 +49,8 @@ export interface ConversationItem {
   claim: Claim | null
   auto_replied: boolean // 当前任务由 AI 自动回复发出
   aftersales: AftersalesInfo | null
-  mark: MessageMarkInfo | null // 会话标记（如 查适配中）
+  mark: MessageMarkInfo | null // 第一个会话标记（兼容旧字段）
+  marks?: MessageMarkInfo[] // 会话上的全部标记（可以多个）
   invoice_status: 'WAITING_EMAIL' | 'OPEN' | 'DONE' | 'CANCELLED' | null // 发票申请：OPEN 待审核发送
   item_url: string | null
   unread_count: number // 团队未读条数（收到的消息）
@@ -82,10 +84,11 @@ export interface ChatMessage {
   direction: string
   body: string
   zh_translation: string | null
+  translating?: boolean // 正在后台自动翻译
   sent_at: string
   subject: string | null
   sender_key: string | null
-  media: { mediaName?: string; mediaType?: string; mediaUrl?: string }[]
+  media: { mediaName?: string; mediaType?: string; mediaUrl?: string; fileId?: number }[] // fileId：店铺发出的附件（如查件结果 POD），存在售后附件里
   attachments: Attachment[]
   /** 工作台模拟发送的店铺消息（没有发到 eBay） */
   simulated: boolean
@@ -245,10 +248,32 @@ export interface JobTrace extends DraftTrace {
   generation: number
 }
 
+/** 对话里的查件记录（发起查件 / 收到反馈），按时间插在聊天记录中 */
+export interface TicketTimelineItem {
+  kind: 'opened' | 'replied'
+  key: string
+  at: string
+  ticket_id: number
+  io_code: string
+  type: string | null
+  tracking_no: string | null
+  desc?: string | null
+  by?: string | null
+  status?: string | null
+  draft?: boolean
+  reply?: string | null
+  attachments?: { name: string | null; file_id: number | null }[]
+  send_status?: string | null
+  send_error?: string | null
+  sent_at?: string | null
+  needs_human?: boolean | null
+}
+
 export interface ConversationDetail extends DraftTrace {
   conversation: {
     id: number
     store_id: string
+    store_name?: string // 店铺名（会话头部显示）
     ebay_conversation_id: string
     conversation_type: string
     marketplace_id: string
@@ -261,10 +286,12 @@ export interface ConversationDetail extends DraftTrace {
     conversation_title: string | null
     platform_status: string | null
     aftersales: AftersalesInfo | null // 客服标记转售后的状态
-    mark: MessageMarkInfo | null // 会话标记
+    mark: MessageMarkInfo | null // 第一个会话标记（兼容旧字段）
+    marks?: MessageMarkInfo[] // 会话上的全部标记
     item_url: string | null // 在 eBay 打开商品（按刊登站点选域名）
   }
   messages: ChatMessage[]
+  ticket_timeline?: TicketTimelineItem[]
   events: { id: number; event_type: string; source: string; case_id: string | null; detail: string | null; occurred_at: string }[]
   jobs: { id: number; state: string; run_generation: number; created_at: string }[]
   job: JobInfo | null
@@ -305,6 +332,7 @@ export interface MessageTag {
   color: 'primary' | 'success' | 'warning' | 'danger' | 'info'
   sort: number
   is_active: boolean
+  created_by?: string | null
 }
 
 /** 会话上的标记 */
@@ -548,6 +576,15 @@ export interface LogisticsTicketItem {
   io_desc: string | null
   created_by: string | null
   created_at: string | null
+  is_local_draft: boolean
+  it_type_id: number | null
+  sm_code: string | null
+  submitted_by: string | null
+  submitted_at: string | null
+  send_status: string | null
+  sent_at: string | null
+  sent_message_id: number | null
+  send_error: string | null
 }
 
 export interface ReshipStock {
@@ -556,4 +593,11 @@ export interface ReshipStock {
   all_in_stock?: boolean
   summary: string
   items: { sku: string; quantity: number; warehouse_code: string | null; sellable: number; enough: boolean; other_warehouses: string[] }[]
+}
+
+export interface LogisticsTicketRow extends LogisticsTicketItem {
+  store_id: string | null
+  store_name: string | null
+  buyer_key: string | null
+  conversation_id: number | null
 }

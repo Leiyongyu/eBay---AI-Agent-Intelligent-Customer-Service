@@ -481,35 +481,35 @@ onMounted(async () => {
 }
 .stats {
   margin-top: 8px;
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 .site {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   margin-bottom: 4px;
 }
 .site-name {
   width: 70px;
 }
 .issue {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   padding: 3px 8px;
   border-radius: 4px;
   margin-bottom: 3px;
 }
 .issue.err {
-  background: #fef0f0;
+  background: var(--danger-soft);
 }
 .issue.warn {
-  background: #fdf6ec;
+  background: var(--warn-soft);
 }
 .section-title.err {
-  color: #c45656;
+  color: var(--danger-text);
 }
 .section-title.warn {
-  color: #b88230;
+  color: var(--warn-text);
 }
 b.err {
-  color: #c45656;
+  color: var(--danger-text);
 }
 .imp {
   border-bottom: 1px solid var(--line);
@@ -520,13 +520,13 @@ b.err {
   align-items: center;
   gap: 10px;
   margin: 8px 0;
-  font-size: 13px;
+  font-size: var(--fs-sm);
   flex-wrap: wrap;
 }
 .text {
   white-space: pre-wrap;
   padding: 6px 16px;
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 @media (max-width: 1000px) {
   .top {

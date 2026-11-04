@@ -55,7 +55,9 @@ REASON_LABELS = {
     "TRACKING_EXCEPTION": "物流轨迹异常（丢失、损坏、退件、扣关、投递失败或运输过久），需人工处理",
     "TRACKING_DELIVERED_NOT_RECEIVED": "轨迹显示已签收但买家说没收到，按未收到货纠纷人工处理",
     "TRACKING_NOT_FOUND": "查不到物流信息（没有跟踪号或轨迹查不到），需人工核实",
-    "TRACKING_STALLED": "物流轨迹多天未更新（达到 LOGISTICS_STALL_DAYS），需人工跟进",
+    "TRACKING_STALLED": "物流轨迹多天未更新（达到 LOGISTICS_STALL_DAYS），需人工判断是否补发",
+    "TRACKING_LOST_DAMAGED": "物流轨迹显示损坏、丢失、退回或运输过久，需人工判断是否补发",
+    "EMPTY_PARCEL": "买家说收到的是空包裹，需人工判断是否补发",
     "TRACKING_RESHIP_REVIEW": "物流轨迹长时间未更新（达到 LOGISTICS_RESHIP_DAYS），需人工判断是否补发",
     "RESHIP_REQUESTED": "买家要求补发/重发/换货，由人工决定",
 }

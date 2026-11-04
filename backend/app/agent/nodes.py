@@ -54,6 +54,7 @@ from ..tools.executor import ToolBudgetExceeded, ToolExecutor
 from ..tools.registry import MODEL_TOOL_DESCRIPTIONS, model_tool_specs
 from ..logistics import followup as logistics_followup
 from ..logistics.track17 import RISKY_STATUS as TRACK_RISKY_STATUS
+from .. import auto_tags
 from .. import usage as usage_log
 from .schemas import ReplyDraftOutput
 from .state import AgentDeps, AgentState
@@ -386,6 +387,9 @@ def build_messages(state: AgentState, deps: AgentDeps) -> list[BaseMessage]:
         *([f"当前商品：{run.item_id}（{state['snapshot'].get('conversation_title') or '标题未知'}）"] if run.item_id else []),
         *([f"本店售后邮箱：{deps.settings.aftersales_public_email}（买家需要发视频或大文件时可以提供，请买家在邮件主题写上订单号）"]
           if deps.settings.aftersales_public_email else []),
+        *(["物流查件：包裹轨迹多天未更新、轨迹异常、或已签收但买家说没收到时，系统会自动向仓库和承运商发起查件。"
+           "这时告诉买家我们已经联系承运商核实包裹情况，有结果会第一时间通知；不给具体时间，不承诺退款、补发或赔偿"]
+          if deps.settings.logistics_ticket_auto_submit and deps.settings.goodcang_ready else []),
         "</runtime_context>",
         "<tool_observations>",
         json.dumps(observations, ensure_ascii=False, default=str),
@@ -582,9 +586,12 @@ _NOT_RECEIVED = re.compile(
     r"pas (re[çc]u|arriv)|non (ho )?ricevut|no (he )?recibido|no ha llegado", re.I)
 
 
-_LOGISTICS_HUMAN = {"TRACKING_RESHIP_REVIEW": "物流超时需判断补发", "RESHIP_REQUESTED": "物流超时需判断补发",
-                    "TRACKING_NOT_FOUND": "物流异常/未收到", "TRACKING_STALLED": "物流异常/未收到",
-                    "TRACKING_EXCEPTION": "物流异常/未收到", "TRACKING_DELIVERED_NOT_RECEIVED": "物流异常/未收到"}
+# 损坏、丢件、退回、空包裹、轨迹未更新/长时间没更新、买家要求补发 → 需判断补发；其余物流问题 → 物流异常/未收到
+RESHIP_TYPE = "物流问题需判断补发"
+_LOGISTICS_HUMAN = {"TRACKING_RESHIP_REVIEW": RESHIP_TYPE, "RESHIP_REQUESTED": RESHIP_TYPE, "TRACKING_STALLED": RESHIP_TYPE,
+                    "TRACKING_LOST_DAMAGED": RESHIP_TYPE, "EMPTY_PARCEL": RESHIP_TYPE,
+                    "TRACKING_NOT_FOUND": "物流异常/未收到", "TRACKING_EXCEPTION": "物流异常/未收到",
+                    "TRACKING_DELIVERED_NOT_RECEIVED": "物流异常/未收到"}
 
 
 def _mark_logistics_aftersales(db, job, state: AgentState, reasons: list[str]) -> str | None:
@@ -595,7 +602,7 @@ def _mark_logistics_aftersales(db, job, state: AgentState, reasons: list[str]) -
     conv = db.get(Conversation, job.conversation_id)
     if conv is None or conv.aftersales_status in (Aftersales.PENDING, Aftersales.IN_PROGRESS):
         return None
-    kind = next((_LOGISTICS_HUMAN[r] for r in hits if _LOGISTICS_HUMAN[r] == "物流超时需判断补发"), _LOGISTICS_HUMAN[hits[0]])
+    kind = next((_LOGISTICS_HUMAN[r] for r in hits if _LOGISTICS_HUMAN[r] == RESHIP_TYPE), _LOGISTICS_HUMAN[hits[0]])
     lines = [risk.REASON_LABELS.get(r, r) for r in hits]
     for o in state["observations"]:
         if o["tool_name"] == "get_package_status" and isinstance(o.get("data"), (dict, list)):
@@ -620,12 +627,20 @@ _RESHIP = re.compile(
     r"补发|重发|再发", re.I)
 
 
+_EMPTY_PARCEL = re.compile(
+    r"\bempty\s+(box|package|parcel|carton)\b|(box|package|parcel)\s+(was|is|came|arrived)\s+empty|nothing\s+(was\s+)?inside|"
+    r"leere?[sn]?\s+(paket|karton|packung|schachtel)|paket\s+(war|ist|kam)\s+leer|nichts\s+(drin|darin|enthalten)|"
+    r"colis\s+vide|carton\s+vide|pacco\s+vuoto|scatola\s+vuota|paquete\s+vac[ií]o|caja\s+vac[ií]a|空包|空箱|空盒|里面没有东西|什么都没有", re.I)
+
+
 def _tracking_problems(state: AgentState, buyer_text: str) -> list[str]:
     """物流需要人工的情况（规则见 logistics/assess.py）：查不到、异常、断更、超时需判断补发、已签收但买家说没收到；
     买家自己提出补发、重发、换货也交人工。"""
     out = []
     if _RESHIP.search(buyer_text or ""):
         out.append("RESHIP_REQUESTED")
+    if _EMPTY_PARCEL.search(buyer_text or ""):
+        out.append("EMPTY_PARCEL")
     for o in state["observations"]:
         if o["tool_name"] != "get_package_status" or not isinstance(o.get("data"), (dict, list)):
             continue
@@ -777,10 +792,7 @@ def persist_candidate(state: AgentState, deps: AgentDeps):
         detail["invoice_request"] = _invoice_request(db, job, state, res["invoice_email"])
     elif res["has_draft"] and "invoice_vat" in (res["draft"].get("intents") or []):
         detail["invoice_request"] = _invoice_waiting(db, job, state)
-    marked = _mark_logistics_aftersales(db, job, state, res["reasons"])
-    if marked:
-        detail["aftersales_marked"] = marked
-    try:  # 谷仓查件单草稿、补发库存：失败只记录，不影响草稿落库
+    try:  # 谷仓查件单（起草、按配置直接提交）、补发库存：失败只记录，不影响草稿落库
         with db.begin_nested():
             follow = logistics_followup.after_reply(db, job, db.get(Conversation, job.conversation_id), state, res["reasons"])
     except Exception as e:  # noqa: BLE001
@@ -788,11 +800,43 @@ def persist_candidate(state: AgentState, deps: AgentDeps):
         follow = {"error": type(e).__name__}
     if follow:
         detail["logistics_followup"] = follow
+    if res["has_draft"]:  # 按问题类型自动打标记：失败不影响草稿落库
+        try:
+            with db.begin_nested():
+                tagged = auto_tags.apply(db, db.get(Conversation, job.conversation_id), res["draft"].get("intents") or [])
+            if tagged:
+                detail["auto_tags"] = tagged
+        except Exception:  # noqa: BLE001
+            log.exception("自动打标记失败 job=%s", job.id)
+    handled = _apply_logistics_auto(db, job, run.run_generation, res, follow)
+    if handled:
+        detail["logistics_auto_handled"] = sorted(handled)
+    marked = _mark_logistics_aftersales(db, job, state, [r for r in res["reasons"] if r not in handled])
+    if marked:
+        detail["aftersales_marked"] = marked
     if job.state == JobState.AUTO_ELIGIBLE and res["has_draft"]:
         detail["auto_send"] = _auto_send(db, job)
         if detail["auto_send"] == "SENT":
             return {"_status": "AUTO_SENT", "_detail": detail}
     return {"_status": job.state, "_detail": detail}
+
+
+def _apply_logistics_auto(db, job: ReplyJob, generation: int, res: dict, follow: dict | None) -> set[str]:
+    """查件单已自动提交（或已有在跟的）：这些物流原因不用人工审核，告诉买家“已发起查件”的回复照常走自动发送。
+    其他原因（店铺开关、合规、风险等）照旧。返回去掉的原因。"""
+    handled = logistics_followup.auto_handled(follow) & set(res["reasons"])
+    if not handled:
+        return set()
+    left = [r for r in res["reasons"] if r not in handled]
+    job.decision_reasons = left
+    draft = db.scalar(select(Draft).where(Draft.job_id == job.id, Draft.run_generation == generation))
+    if draft is not None:
+        draft.review_reasons = left
+    if not left and res["has_draft"]:
+        job.state = JobState.AUTO_ELIGIBLE
+        if draft is not None:
+            draft.decision = "AUTO_ELIGIBLE"
+    return handled
 
 
 def _order_candidates(state: AgentState) -> list[str]:

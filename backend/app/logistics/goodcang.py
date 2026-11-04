@@ -1,5 +1,5 @@
 """谷仓 OMS 开放接口：按 eBay 订单号查出库单，拿跟踪号、尾程承运商、出库仓、出库/揽收/妥投时间；查件单、库存只读。
-唯一的写操作是新增查件单，且只“保存”为草稿（save_type=1），由客服在谷仓后台核对后提交。
+唯一的写操作是新增查件单：草稿只存在本系统，客服在工作台核对、修改后点“提交到谷仓”才调用（save_type=2 提交）。
 
 认证与 JMH-Date-Platform 的 RuoYi 项目一致：请求头 app-token / app-key（只放 .env）。
 查询按接口文档：POST /order/get_order_list，code_type=reference_no（参考号 = eBay 订单号）+ order_code，
@@ -22,7 +22,7 @@ STATUS_LABELS = {"W": "待发货（仓库处理中）", "D": "已发货"}
 KEEP = ("order_code", "reference_no", "order_status", "shipping_method", "carrier_name", "tracking_no",
         "warehouse_code", "wp_code", "date_create", "date_shipping", "ascan_time", "dscan_time",
         "carrier_estimated_delivery_time", "estimated_arrival_date", "abnormal_problem_reason")
-SAVE_DRAFT = 1  # 新增查件单 save_type：1 保存（草稿，可在谷仓后台修改后提交）/ 2 直接提交
+SAVE_DRAFT, SAVE_SUBMIT = 1, 2  # 新增查件单 save_type：1 保存（谷仓后台草稿）/ 2 提交
 
 _gate = threading.Lock()
 _next_at = 0.0
@@ -110,17 +110,17 @@ class GoodcangClient:
         body = data.get("data") or {}
         return body.get("list") or [], int(body.get("total") or 0)
 
-    # ------------------------------------------------------------ 写接口：只保存草稿
-    def create_ticket_draft(self, *, order_code: str, reference_no: str, tracking_no: str, it_type_id: int,
-                            io_desc: str, emails: list[str]) -> str:
-        """新增查件单，save_type=1 只保存不提交：客服在谷仓后台核对、可修改后再提交。返回查件单号。"""
+    # ------------------------------------------------------------ 写接口：新增查件单（客服在工作台点提交时才调用）
+    def create_ticket(self, *, order_code: str, reference_no: str, tracking_no: str, it_type_id: int,
+                      io_desc: str, emails: list[str], save_type: int = SAVE_SUBMIT) -> str:
+        """新增查件单并返回查件单号。save_type=2 提交给谷仓客服处理；1 只在谷仓后台保存草稿。"""
         desc = io_desc.strip()[:300]
         if len(desc) < 5:
             raise GoodcangError("查件需求至少 5 个字")
         if not emails:
             raise GoodcangError("没有配置查件单通知邮箱（LOGISTICS_TICKET_NOTIFY_EMAILS）")
         data = self._post("/assistant/create_logistic_ticket", {
-            "save_type": SAVE_DRAFT, "order_code": order_code, "reference_no": reference_no,
+            "save_type": save_type, "order_code": order_code, "reference_no": reference_no,
             "tracking_no": tracking_no, "it_type_id": int(it_type_id), "io_desc": desc,
             "customer_emails_list": emails[:10], "attachment_id_list": []})
         if data.get("code") != 0:

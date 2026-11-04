@@ -139,7 +139,7 @@ const STATUS_TYPE: Record<string, 'success' | 'warning' | 'danger' | 'info' | 'p
   <el-drawer :model-value="!!reqId" size="720px" :title="req ? `发票申请 #${req.id}` : '发票申请'" @close="emit('close')">
     <template v-if="info && req">
       <div class="head">
-        <el-tag :type="req.status === 'OPEN' ? 'warning' : req.status === 'DONE' ? 'success' : 'info'" effect="dark">
+        <el-tag :type="req.status === 'OPEN' ? 'warning' : req.status === 'DONE' ? 'success' : 'info'">
           {{ req.status_label }}
         </el-tag>
         <span>买家 <b class="mono">{{ req.buyer_key }}</b> · {{ req.store_id }} · {{ req.marketplace_id }}</span>
@@ -263,13 +263,13 @@ const STATUS_TYPE: Record<string, 'success' | 'warning' | 'danger' | 'info' | 'p
   margin-bottom: 6px;
 }
 .small {
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 .pre {
   white-space: pre-wrap;
 }
 .warn {
-  color: #b26a00;
+  color: var(--warn-text);
 }
 .actions {
   display: flex;

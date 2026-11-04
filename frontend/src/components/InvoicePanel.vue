@@ -19,7 +19,7 @@ watch(() => [props.convId, props.refreshKey], load, { immediate: true })
 
 <template>
   <div v-if="info?.request" class="inv-box" :class="info.request.status">
-    <el-tag size="small" :type="info.request.status === 'OPEN' ? 'warning' : info.request.status === 'DONE' ? 'success' : 'info'" effect="dark">
+    <el-tag size="small" :type="info.request.status === 'OPEN' ? 'warning' : info.request.status === 'DONE' ? 'success' : 'info'">
       发票：{{ info.request.status_label }}
     </el-tag>
     <span v-if="info.request.note" class="muted">{{ info.request.note }}</span>
@@ -35,12 +35,12 @@ watch(() => [props.convId, props.refreshKey], load, { immediate: true })
   gap: 8px;
   padding: 6px 12px;
   border-bottom: 1px solid var(--line);
-  background: #f3fbf5;
-  font-size: 13px;
+  background: #eff6ee;
+  font-size: var(--fs-sm);
 }
 .inv-box.OPEN,
 .inv-box.WAITING_EMAIL {
-  background: #fff8ec;
+  background: var(--warn-soft);
 }
 .spacer {
   flex: 1;

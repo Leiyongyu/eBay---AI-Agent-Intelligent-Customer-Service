@@ -27,8 +27,8 @@ async function submit() {
 <template>
   <div class="login-page">
     <form class="login-card" @submit.prevent="submit">
-      <div class="title">eBay 智能客服 · 工作台</div>
-      <div class="sub">请使用管理员分配的账号登录</div>
+      <div class="title"><span class="brand-mark" aria-hidden="true" />eBay 客服工作台</div>
+      <div class="sub">使用管理员分配的账号登录</div>
       <el-input v-model="username" size="large" placeholder="账号" autocomplete="username" autofocus />
       <el-input v-model="password" size="large" type="password" show-password placeholder="密码" autocomplete="current-password" />
       <el-button type="primary" size="large" native-type="submit" :loading="loading" style="width: 100%">登录</el-button>
@@ -43,34 +43,47 @@ async function submit() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #1d2433;
+  background: var(--bg);
   padding: 16px;
 }
 .login-card {
   width: 100%;
   max-width: 360px;
-  background: #fff;
-  border-radius: 10px;
-  padding: 28px 24px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--brand);
+  border-radius: 6px;
+  padding: 30px 26px 24px;
   display: flex;
   flex-direction: column;
   gap: 14px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 8px 28px rgba(45, 58, 58, 0.06);
 }
 .title {
-  font-size: 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 19px;
   font-weight: 600;
-  text-align: center;
+  color: var(--brand);
+  letter-spacing: 0.02em;
+}
+.brand-mark {
+  width: 15px;
+  height: 20px;
+  border-radius: 2px;
+  background: linear-gradient(135deg, var(--brand) 0 62%, var(--sage) 62% 100%);
 }
 .sub {
-  text-align: center;
   color: var(--muted);
-  font-size: 13px;
-  margin-top: -6px;
+  font-size: var(--fs-sm);
+  margin: -6px 0 6px;
 }
 .hint {
-  font-size: 12px;
+  font-size: var(--fs-xs);
+  line-height: 1.6;
   color: var(--muted);
-  text-align: center;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
 }
 </style>

@@ -139,7 +139,7 @@ async function claim(mail: AftersalesMailItem) {
 <style scoped>
 .as-box {
   border-bottom: 1px solid var(--line);
-  background: #f5f9ff;
+  background: var(--accent-soft);
   padding: 6px 12px;
 }
 .as-box.empty {
@@ -147,13 +147,13 @@ async function claim(mail: AftersalesMailItem) {
   padding: 3px 12px;
 }
 .small {
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 .as-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 .spacer {
   flex: 1;

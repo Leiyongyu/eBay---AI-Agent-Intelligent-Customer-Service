@@ -187,3 +187,22 @@ def test_ebay_media_registration_and_cleanup(app_env):
         assert path and path.exists()
         assert media.cleanup_expired(db) == 1
         assert not path.exists() and db.get(MessageAttachment, atts[0].id).status == "EXPIRED"
+
+
+def test_opening_conversation_downloads_pending_ebay_images(client, monkeypatch):
+    """eBay 拉取时只登记图片；没进 AI 的历史消息，打开会话时也要把图片下载下来给审核员看。"""
+    from app.db import session_scope
+    from app.ingestion.service import _append_message, get_or_create_conversation
+
+    data = jpeg_bytes(size=(400, 300))
+    monkeypatch.setattr(media, "download", lambda url, client=None, settings=None: data)
+    with session_scope() as db:
+        conv = get_or_create_conversation(db, "STORE_A", "C-IMG1", "buyer_img", None, "EBAY_DE", None)
+        msg = _append_message(db, conv, "M-IMG1", "BUYER", "IN", "see photo", None)
+        media.register_ebay_media(db, msg, [{"mediaName": "image", "mediaType": "IMAGE",
+                                             "mediaUrl": "https://i.ebayimg.com/images/g/abc/s-l1600.jpg"}])
+        conv_id = conv.id
+    d = client.get(f"/internal/conversations/{conv_id}").json()
+    att = d["messages"][0]["attachments"][0]
+    assert att["status"] == "STORED" and att["file_url"]
+    assert client.get(att["file_url"]).headers["content-type"] == "image/jpeg"

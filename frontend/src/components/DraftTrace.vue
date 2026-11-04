@@ -313,7 +313,7 @@ function evidenceTag(id: string) {
 
 <style scoped>
 .trace {
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 .summary {
   display: flex;
@@ -323,7 +323,7 @@ function evidenceTag(id: string) {
   margin-bottom: 10px;
 }
 .reasoning {
-  background: #f0f7ff;
+  background: var(--accent-soft);
   border-left: 3px solid var(--accent);
   border-radius: 4px;
   padding: 6px 10px;
@@ -353,10 +353,10 @@ function evidenceTag(id: string) {
   line-height: 1.6;
 }
 .quote {
-  border-left: 3px solid #e6a23c;
+  border-left: 3px solid var(--warn);
   padding: 2px 8px;
   margin-bottom: 4px;
-  background: #fffaf0;
+  background: var(--warn-soft);
   white-space: pre-wrap;
 }
 .tools {
@@ -383,7 +383,7 @@ function evidenceTag(id: string) {
   margin-top: 4px;
 }
 .claim {
-  border-left: 3px solid #a0cfff;
+  border-left: 3px solid var(--aqua);
   padding: 2px 8px;
   margin-bottom: 8px;
   display: flex;
@@ -397,25 +397,25 @@ function evidenceTag(id: string) {
   text-overflow: ellipsis;
 }
 .ev-pop {
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 .ev-body {
   margin-top: 6px;
   white-space: pre-wrap;
 }
 .note {
-  font-size: 12px;
-  background: #f4f4f5;
+  font-size: var(--fs-xs);
+  background: var(--sunken);
   border-radius: 4px;
   padding: 4px 8px;
   margin-top: 6px;
 }
 .note.err,
 .err {
-  color: #c45656;
+  color: var(--danger-text);
 }
 .note.err {
-  background: #fef0f0;
+  background: var(--danger-soft);
 }
 .spin {
   display: inline-block;
@@ -426,15 +426,15 @@ function evidenceTag(id: string) {
   border-radius: 50%;
 }
 .pkg {
-  border-left: 3px solid #a0cfff;
+  border-left: 3px solid var(--aqua);
   padding: 2px 8px;
   margin: 6px 0;
   line-height: 1.6;
 }
 .ev-line {
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 .danger {
-  color: #c45656;
+  color: var(--danger-text);
 }
 </style>

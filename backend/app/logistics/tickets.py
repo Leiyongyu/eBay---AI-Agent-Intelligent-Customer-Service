@@ -1,6 +1,7 @@
-"""谷仓查件单同步（只读）：每天拉最近 LOGISTICS_TICKET_SYNC_DAYS 天的查件单（含客服在谷仓后台手动建的），
-按订单号定位店铺和买家会话；谷仓新回复的，把附件（如 POD）存进售后附件，并起草给买家的回复建议，
-需要人工的（妥投未收到、退回、可能补发等）把会话标成待售后。回复建议不自动发送，由客服在会话里使用。
+"""谷仓查件单同步（只读拉取）：每隔 LOGISTICS_TICKET_SYNC_INTERVAL_MINUTES 分钟拉最近 LOGISTICS_TICKET_SYNC_DAYS 天的查件单
+（含客服在谷仓后台手动建的），按订单号定位店铺、买家和会话。谷仓新回复的：附件（如 POD）一律存进售后附件，
+AI 按买家语言起草给买家的消息；开了 LOGISTICS_TICKET_AUTO_SEND 时，不需要人工的直接连同附件发给买家
+（目前为模拟发送；买家还没有会话的新建一个），需要人工的（妥投未收到、退回、丢失、可能补发等）不发，把会话标成待售后。
 """
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ import logging
 import re
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -22,6 +24,7 @@ from ..db import session_scope, utcnow
 from ..models import (Aftersales, AftersalesFile, AuditEvent, Conversation, LogisticsTicket, Message, Store,
                       TrackingNumber)
 from ..prompts import load_prompt
+from ..sending.service import SIMULATED_PREFIX
 from .assess import CN
 from .goodcang import GoodcangClient, GoodcangError
 
@@ -30,7 +33,12 @@ ACTOR = "logistics_tickets"
 # 这些查件类型的结果多半要人工决定（退款、补发、改派等）
 HUMAN_TYPES = {"妥投未收到", "退回原因", "拦截", "改派", "查妥投地址"}
 EBAY_ORDER = re.compile(r"\d{2}-\d{5}-\d{5}")
-HUMAN_WORDS = re.compile(r"丢|遗失|退回|退件|破损|损坏|赔|补发|重发|无法派送|地址|拒收|销毁|扣")
+# 查件结果里这些说法 = 包裹到不了买家手里，需判断补发（转人工、查补发库存）
+RESHIP_WORDS = re.compile(r"丢|遗失|退回|退件|破损|损坏|补发|重发|销毁|空包|空箱|空盒|未更新|久未|断更|无轨迹|没有轨迹|无更新|没有更新")
+HUMAN_WORDS = re.compile(RESHIP_WORDS.pattern + r"|赔|无法派送|地址|拒收|扣")
+SEND_ACTOR = "AI（查件结果）"
+SITE_LANG = {"EBAY_DE": "德语", "EBAY_AT": "德语", "EBAY_FR": "法语", "EBAY_IT": "意大利语", "EBAY_ES": "西班牙语",
+             "EBAY_GB": "英语", "EBAY_US": "英语"}
 
 
 class TicketReply(BaseModel):
@@ -143,6 +151,11 @@ def _context(db: Session, t: LogisticsTicket) -> tuple[str, str]:
     msgs = db.scalars(select(Message).where(Message.conversation_id == t.conversation_id)
                       .order_by(Message.conversation_seq.desc()).limit(10)).all()[::-1]
     conv = "\n".join(f"[{m.sender_role} {m.sent_at:%Y-%m-%d}] {(m.body or '')[:600]}" for m in msgs)
+    if not any(m.sender_role == "BUYER" for m in msgs):
+        c = db.get(Conversation, t.conversation_id)
+        site = c.marketplace_id if c else None
+        conv = (conv + "\n" if conv else "") + (f"（买家还没有来信，这是我们主动通知；站点 {site}，"
+                                                f"用{SITE_LANG.get(site or '', '英语')}写）")
     rec = db.scalar(select(TrackingNumber).where(TrackingNumber.number == (t.tracking_no or "")))
     tr = rec.track or {} if rec else {}
     tracking = {"carrier": tr.get("carrier"), "tracking_number": t.tracking_no, "status": tr.get("status_label"),
@@ -173,20 +186,70 @@ def _suggest(db: Session, t: LogisticsTicket, provider) -> None:
     t.suggested_at = utcnow()
 
 
+def _ensure_conversation(db: Session, t: LogisticsTicket) -> Conversation | None:
+    """买家还没来信时，为这个订单新建一个本地买家会话，用来发查件结果（真实发送接入后改为 eBay 主动消息）。"""
+    from ..ingestion.service import get_or_create_conversation
+
+    if t.conversation_id:
+        return db.get(Conversation, t.conversation_id)
+    if not (t.store_id and t.buyer_key and t.reference_no):
+        return None
+    store = db.get(Store, t.store_id)
+    conv = get_or_create_conversation(db, t.store_id, f"ORDER-{t.reference_no}", t.buyer_key, None,
+                                      store.default_marketplace_id if store else "UNKNOWN", "logistics_ticket")
+    conv.channel_source = "logistics"  # 真实买家、本系统发起的通知会话：不是测试会话，也不是从 eBay 拉取的
+    t.conversation_id = conv.id
+    return conv
+
+
+def _send(db: Session, t: LogisticsTicket, conv: Conversation) -> None:
+    """把 AI 起草的查件结果连同附件发给买家（模拟发送：追加一条店铺消息，不调 eBay）。合规硬阻断的不发。"""
+    from ..guards.compliance import ComplianceChecker
+    from ..ingestion.service import _append_message
+
+    text = (t.suggestion or "").strip()
+    if not text:
+        t.send_status, t.send_error = "FAILED", "没有起草出消息"
+        return
+    check = ComplianceChecker().check(text)
+    if check.result == "BLOCK":
+        t.send_status, t.send_error = "FAILED", "合规检查不通过，需人工修改后发送"
+        return
+    files = [db.get(AftersalesFile, a["file_id"]) for a in t.attachments or [] if a.get("file_id")]
+    media = []
+    for f in files:
+        if f is None or f.status != "STORED":
+            continue
+        ctype = f.content_type or ""
+        kind = "IMAGE" if ctype.startswith("image/") else ("PDF" if "pdf" in ctype else "DOC")
+        media.append({"mediaName": f.original_name, "mediaType": kind, "fileId": f.id})
+    msg = _append_message(db, conv, f"{SIMULATED_PREFIX}{uuid.uuid4().hex[:12]}", "SELLER", "OUT", text, None)
+    msg.media, msg.zh_translation = media or None, t.suggestion_zh
+    conv.row_version += 1
+    now = utcnow()
+    t.send_status, t.sent_at, t.sent_message_id, t.send_error = "SENT", now, msg.id, None
+    t.handled_at, t.handled_by = now, SEND_ACTOR
+    db.add(AuditEvent(actor=SEND_ACTOR, action="AUTO_SIMULATED_SEND", store_id=conv.store_id, conversation_id=conv.id,
+                      detail={"io_code": t.io_code, "message_id": msg.ebay_message_id, "attachments": len(media),
+                              "compliance": check.result, "source": "logistics_ticket"}))
+
+
 def _mark(db: Session, t: LogisticsTicket, client: GoodcangClient | None = None) -> None:
     conv = db.get(Conversation, t.conversation_id) if t.conversation_id else None
     if not conv or conv.aftersales_status in (Aftersales.PENDING, Aftersales.IN_PROGRESS):
         return
     now = utcnow()
     note = f"谷仓查件单 {t.io_code}（{t.type_name}）已回复：{(t.reply or '见附件')[:300]}"
-    if client is not None and t.reference_no and HUMAN_WORDS.search(t.reply or ""):  # 可能要补发：附上补发库存
+    if client is not None and t.reference_no and RESHIP_WORDS.search(t.reply or ""):  # 需判断补发：附上补发库存
         from .followup import reship_stock
 
         try:
             note += "；" + reship_stock(client, t.reference_no)["summary"]
         except Exception as e:  # noqa: BLE001  查不到库存也要照常标记
             note += f"；补发库存查询失败：{e if isinstance(e, GoodcangError) else type(e).__name__}"
-    conv.aftersales_status, conv.aftersales_type = Aftersales.PENDING, "物流异常/未收到"
+    reship = bool(RESHIP_WORDS.search(t.reply or ""))
+    conv.aftersales_status = Aftersales.PENDING
+    conv.aftersales_type = "物流问题需判断补发" if reship else "物流异常/未收到"
     conv.aftersales_note = note[:1000]
     conv.aftersales_marked_by, conv.aftersales_marked_at, conv.aftersales_handled_by = "AI（查件结果）", now, None
     conv.aftersales_updated_at = now
@@ -202,7 +265,7 @@ def sync(db: Session, *, client: GoodcangClient | None = None, provider=None, lo
     start = end - timedelta(days=min(186, max(1, s.logistics_ticket_sync_days)))
     fmt = "%Y-%m-%d %H:%M:%S"
     now = utcnow()
-    stats = {"tickets": 0, "new": 0, "located": 0, "suggested": 0, "needs_human": 0, "errors": []}
+    stats = {"tickets": 0, "new": 0, "located": 0, "suggested": 0, "needs_human": 0, "sent": 0, "errors": []}
     page, seen = 1, []
     while True:
         rows, total = client.ticket_list(start.strftime(fmt), end.strftime(fmt), page=page)
@@ -227,17 +290,37 @@ def sync(db: Session, *, client: GoodcangClient | None = None, provider=None, lo
         try:
             _locate(db, t, locate, cache)
             stats["located"] += bool(t.store_id)
-            if (t.conversation_id and not t.handled_at and not t.suggested_at
-                    and _replied_recently(t, suggest_days)):
-                _save_attachments(db, t, http)
+            fresh = not t.handled_at and not t.suggested_at and _replied_recently(t, suggest_days)
+            if fresh and s.logistics_ticket_auto_send:
+                conv = _ensure_conversation(db, t)
+            else:
+                conv = db.get(Conversation, t.conversation_id) if t.conversation_id else None
+            if fresh and t.store_id:
+                _save_attachments(db, t, http)  # 附件（POD 等）一律存下来，有没有买家会话都能在查件单页看
+            if fresh and conv is None and t.store_id:
+                t.send_status, t.send_error = "NO_BUYER", "没找到订单买家，无法通知"
+            if fresh and conv is not None:
                 if provider is not None:
                     _suggest(db, t, provider)
                     stats["suggested"] += 1
                 else:
                     t.needs_human = True
-                if t.needs_human:
+                if t.needs_human and s.logistics_ticket_auto_send and s.logistics_ticket_send_needs_human:
                     stats["needs_human"] += 1
+                    _send(db, t, conv)  # 照样告诉买家查件结果（不承诺退款补发），同事在售后里跟进
+                    stats["sent"] += t.send_status == "SENT"
                     _mark(db, t, client)
+                elif t.needs_human:
+                    stats["needs_human"] += 1
+                    t.send_status = "NEEDS_HUMAN"
+                    t.send_error = "查件结果需要人工决定（如妥投未收到、退回、丢失、可能补发），没有自动发送"
+                    _mark(db, t, client)
+                elif s.logistics_ticket_auto_send:
+                    _send(db, t, conv)
+                    if t.send_status == "SENT":
+                        stats["sent"] += 1
+                    else:
+                        _mark(db, t, client)
             db.flush()
         except Exception as e:  # noqa: BLE001  单张失败不影响其他
             log.exception("查件单 %s 处理失败", t.io_code)
@@ -248,7 +331,8 @@ def sync(db: Session, *, client: GoodcangClient | None = None, provider=None, lo
 
 
 class LogisticsTicketWorker:
-    """每天 LOGISTICS_TICKET_SYNC_TIME 后同步一次查件单（没开机的启动后补跑）；谷仓没配置时不启动。"""
+    """每隔 LOGISTICS_TICKET_SYNC_INTERVAL_MINUTES 分钟同步一次查件单（设为 0 时每天 LOGISTICS_TICKET_SYNC_TIME 一次，
+    没开机的启动后补跑）；谷仓没配置时不启动。"""
 
     def __init__(self):
         self._stop = threading.Event()
@@ -277,11 +361,15 @@ class LogisticsTicketWorker:
     def _due(self) -> bool:
         from ..retention import last_due, parse_clock
 
-        due = last_due(datetime.now(), parse_clock(get_settings().logistics_ticket_sync_time))
-        due_utc = due.astimezone(timezone.utc).replace(tzinfo=None)
+        s = get_settings()
         with session_scope() as db:
             last = db.scalar(select(func.max(AuditEvent.created_at)).where(AuditEvent.action == "LOGISTICS_TICKET_SYNC"))
-        return last is None or last < due_utc
+        if last is None:
+            return True
+        if s.logistics_ticket_sync_interval_minutes > 0:  # 每隔 N 分钟一次：谷仓回复了尽快通知买家
+            return utcnow() - last >= timedelta(minutes=s.logistics_ticket_sync_interval_minutes)
+        due = last_due(datetime.now(), parse_clock(s.logistics_ticket_sync_time))
+        return last < due.astimezone(timezone.utc).replace(tzinfo=None)
 
     def run_now(self) -> dict:
         with self._lock:
@@ -301,7 +389,7 @@ class LogisticsTicketWorker:
                     self.run_now()
             except Exception:  # noqa: BLE001
                 log.exception("查件单同步出错")
-            self._wake.wait(900)
+            self._wake.wait(300)
             self._wake.clear()
 
 

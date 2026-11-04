@@ -1,15 +1,139 @@
+/* 主题：温和护眼型。主色深青（按钮、链接、选中态），墨绿只用于品牌标识和少量强调，避免和"成功"混淆 */
 :root {
-  --bg: #f4f5f7;
-  --panel: #ffffff;
-  --line: #e4e7ec;
-  --text: #1f2329;
-  --muted: #6b7280;
-  --buyer: #f2f4f7;
-  --seller: #e8f3ff;
-  --system: #fff7e6;
-  --accent: #2f6fde;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  /* 业务色 */
+  --brand: #2f6b5e;          /* 墨绿：品牌、标题强调 */
+  --accent: #246b6b;         /* 深青：主按钮、选中、链接 */
+  --accent-soft: #e6f0ef;    /* 深青浅底：选中行、提示条 */
+  --sage: #8fbc8f;           /* 鼠尾草绿：辅助装饰 */
+  --aqua: #a8dadc;           /* 浅青：辅助边框（AI 草稿、引用） */
+
+  --bg: #f7f5f2;             /* 浅豆沙：页面底 */
+  --panel: #fdfcfa;          /* 米白：面板 */
+  --sunken: #f3f1ec;         /* 面板内的凹陷区（聊天区、代码块） */
+  --line: #e4e1da;
+  --line-soft: #eeebe5;
+  --text: #2d3a3a;
+  --text-2: #4a5858;
+  --muted: #6b7b7b;
+
+  --ok: #4caf50;
+  --ok-text: #3d8c40;
+  --warn: #e6a23c;
+  --warn-text: #a8731f;
+  --warn-soft: #fbf4e6;
+  --danger: #e05a5a;
+  --danger-text: #b34848;
+  --danger-soft: #fbeeee;
+
+  /* 聊天气泡 */
+  --buyer: #efefe9;
+  --seller: #e3eeec;
+  --system: #f8f1e2;
+
+  /* Element Plus 主题覆盖 */
+  --el-color-primary: #246b6b;
+  --el-color-primary-light-3: #669797;
+  --el-color-primary-light-5: #92b5b5;
+  --el-color-primary-light-7: #bdd3d3;
+  --el-color-primary-light-8: #d3e1e1;
+  --el-color-primary-light-9: #e9f0f0;
+  --el-color-primary-dark-2: #1d5656;
+  --el-color-success: #4caf50;
+  --el-color-success-light-3: #82c784;
+  --el-color-success-light-5: #a6d7a8;
+  --el-color-success-light-7: #c9e7ca;
+  --el-color-success-light-8: #dbefdc;
+  --el-color-success-light-9: #edf7ee;
+  --el-color-success-dark-2: #3d8c40;
+  --el-color-warning: #e6a23c;
+  --el-color-warning-light-3: #eebe76;
+  --el-color-warning-light-5: #f2d09e;
+  --el-color-warning-light-7: #f8e3c4;
+  --el-color-warning-light-8: #faecd8;
+  --el-color-warning-light-9: #fcf6ec;
+  --el-color-warning-dark-2: #b88230;
+  --el-color-danger: #e05a5a;
+  --el-color-danger-light-3: #e98c8c;
+  --el-color-danger-light-5: #f0acac;
+  --el-color-danger-light-7: #f6cece;
+  --el-color-danger-light-8: #f9dede;
+  --el-color-danger-light-9: #fceeee;
+  --el-color-danger-dark-2: #b34848;
+  --el-color-error: #e05a5a;
+  --el-color-error-light-3: #e98c8c;
+  --el-color-error-light-5: #f0acac;
+  --el-color-error-light-7: #f6cece;
+  --el-color-error-light-8: #f9dede;
+  --el-color-error-light-9: #fceeee;
+  --el-color-error-dark-2: #b34848;
+  --el-color-info: #7f8c8c;
+  --el-color-info-light-3: #a5aeae;
+  --el-color-info-light-5: #bfc6c6;
+  --el-color-info-light-7: #d9dcdc;
+  --el-color-info-light-8: #e5e8e8;
+  --el-color-info-light-9: #f2f4f4;
+  --el-color-info-dark-2: #667070;
+
+  --el-bg-color: #fdfcfa;
+  --el-bg-color-page: #f7f5f2;
+  --el-bg-color-overlay: #fdfcfa;
+  --el-fill-color-blank: #ffffff;
+  --el-fill-color: #f0eee9;
+  --el-fill-color-light: #f4f2ee;
+  --el-fill-color-lighter: #f7f5f2;
+  --el-fill-color-extra-light: #faf9f6;
+  --el-fill-color-dark: #e9e6e0;
+  --el-text-color-primary: #2d3a3a;
+  --el-text-color-regular: #3f4d4d;
+  --el-text-color-secondary: #6b7b7b;
+  --el-text-color-placeholder: #a3adab;
+  --el-text-color-disabled: #b8c0be;
+  --el-border-color: #dcd9d2;
+  --el-border-color-light: #e4e1da;
+  --el-border-color-lighter: #eeebe5;
+  --el-border-color-extra-light: #f3f1ec;
+  --el-border-color-dark: #cfcbc3;
+  --el-border-radius-base: 5px;
+  --el-box-shadow-light: 0 2px 10px rgba(45, 58, 58, 0.08);
+  --el-box-shadow: 0 6px 20px rgba(45, 58, 58, 0.1);
+  --el-mask-color: rgba(253, 252, 250, 0.85);
+
+  /* 字体：西文先用系统 UI 字体（Windows 上是 Segoe UI，比微软雅黑自带的西文清楚），中文按平台取最好的黑体 */
+  --font-sans: 'Segoe UI Variable Text', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'HarmonyOS Sans SC',
+    'MiSans', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans CJK SC', 'Source Han Sans SC', sans-serif;
+  --font-mono: 'Cascadia Mono', 'JetBrains Mono', 'SF Mono', Consolas, 'Microsoft YaHei UI', monospace;
+  /* 字号层级：12 辅助 / 13 次要 / 14 正文 / 15 消息正文 / 16 区块标题 */
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-base: 14px;
+  --fs-msg: 15px;
+  --fs-lg: 16px;
+  --el-font-family: var(--font-sans);
+  --el-font-size-base: 14px;
+  --el-font-size-small: 13px;
+  --el-font-size-extra-small: 12px;
+
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+  line-height: 1.5;
   color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+textarea,
+select {
+  font-family: inherit;
+}
+
+/* 时间、数量、单号这类会上下对齐比较的数字统一等宽 */
+.el-table,
+.el-tag,
+.muted,
+.badge {
+  font-variant-numeric: tabular-nums;
 }
 
 html,
@@ -24,10 +148,29 @@ body,
   box-sizing: border-box;
 }
 
+::selection {
+  background: #cfe3e1;
+}
+
+a {
+  color: var(--accent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* 滚动条：细、浅，长时间看不扎眼 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #d6d2ca transparent;
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 6px;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -37,6 +180,8 @@ body,
   padding: 10px 14px;
   border-bottom: 1px solid var(--line);
   font-weight: 600;
+  font-size: var(--fs-base);
+  color: var(--text);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -52,12 +197,13 @@ body,
 
 .muted {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .mono {
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  letter-spacing: 0;
 }
 
 .row {
@@ -69,7 +215,8 @@ body,
 
 .section-title {
   font-weight: 600;
-  font-size: 13px;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
   margin: 14px 0 6px;
 }
 
@@ -78,23 +225,88 @@ body,
 }
 
 pre.json {
-  background: #f7f8fa;
-  border-radius: 6px;
+  background: var(--sunken);
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
   padding: 8px;
   margin: 6px 0 0;
   white-space: pre-wrap;
   word-break: break-all;
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.55;
   max-height: 260px;
   overflow: auto;
 }
 
 mark.block {
-  background: #ffd8d6;
-  border-bottom: 2px solid #e5484d;
+  background: #f8dcdc;
+  border-bottom: 2px solid var(--danger);
+  color: inherit;
 }
 
 mark.review {
-  background: #fff1c2;
-  border-bottom: 2px solid #e6a23c;
+  background: #f8ecd2;
+  border-bottom: 2px solid var(--warn);
+  color: inherit;
+}
+
+/* ---- Element Plus 细节收敛：去掉默认的蓝色光晕和过重的阴影 ---- */
+.el-table {
+  --el-table-header-bg-color: #f3f1ec;
+  --el-table-header-text-color: #4a5858;
+  --el-table-row-hover-bg-color: #eef4f2;
+  --el-table-current-row-bg-color: #e6f0ef;
+  --el-table-border-color: #e9e6e0;
+}
+
+.el-table th.el-table__cell {
+  font-weight: 600;
+}
+
+.el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell {
+  background: #faf9f6;
+}
+
+.el-tag {
+  border-radius: 3px;
+}
+
+.el-button {
+  font-weight: 500;
+}
+
+.el-card,
+.el-dialog,
+.el-drawer,
+.el-message-box {
+  --el-card-border-radius: 6px;
+  border-radius: 6px;
+}
+
+.el-dialog__title,
+.el-drawer__title {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.el-textarea__inner {
+  line-height: 1.65;
+}
+
+.el-form-item__label {
+  color: var(--text-2);
+}
+
+.el-tabs__item.is-active {
+  font-weight: 600;
+}
+
+.el-alert {
+  border-radius: 4px;
+}
+
+.el-empty {
+  --el-empty-description-margin-top: 12px;
 }

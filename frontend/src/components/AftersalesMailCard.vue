@@ -35,7 +35,7 @@ const MATCH_LABEL: Record<string, string> = {
       <el-tag v-else size="small" type="warning">未认出订单号</el-tag>
       <span v-if="storeName" class="muted">{{ storeName }}</span>
       <template v-if="mail.kind === 'upload'">
-        <el-tag size="small" type="primary" effect="dark">上传页</el-tag>
+        <el-tag size="small" type="primary">上传页</el-tag>
         <b>{{ mail.code }}</b>
         <el-tag size="small" type="warning">{{ mail.issue_label || '未选问题' }}</el-tag>
         <span class="subject">{{ mail.item_title || '' }}</span>
@@ -114,7 +114,7 @@ const MATCH_LABEL: Record<string, string> = {
   border-radius: 6px;
   padding: 8px 10px;
   margin-bottom: 8px;
-  background: #fff;
+  background: var(--panel);
 }
 .mail-head {
   display: flex;
@@ -134,8 +134,9 @@ const MATCH_LABEL: Record<string, string> = {
 }
 .body {
   white-space: pre-wrap;
-  font-size: 12px;
-  background: #f7f7f7;
+  font-size: var(--fs-xs);
+  background: var(--sunken);
+  border-radius: 4px;
   padding: 6px 8px;
   margin-bottom: 6px;
   max-height: 200px;
@@ -163,14 +164,14 @@ const MATCH_LABEL: Record<string, string> = {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #eef3fb;
-  color: #3a6ea5;
-  font-size: 12px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: var(--fs-xs);
   text-align: center;
 }
 .icon.gray {
-  background: #f2f2f2;
-  color: #888;
+  background: var(--sunken);
+  color: var(--muted);
   cursor: default;
 }
 .meta {
@@ -180,13 +181,13 @@ const MATCH_LABEL: Record<string, string> = {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 .small {
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 .warn {
-  color: #b26a00;
+  color: var(--warn-text);
 }
 .ml {
   margin-left: 8px;

@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import session_scope, utcnow
 from ..ingestion.service import _append_message, get_or_create_conversation, ingest_buyer_message
-from ..media.service import register_ebay_media
+from ..media.service import ensure_stored, register_ebay_media
 from ..models import AuditEvent, Conversation, EbayListing, EbaySyncState, Message, Store
 from ..read_state import INITIAL_READER, apply_platform_unread, mark_read
 from ..retention import cutoff_for, store_cutoff
@@ -328,6 +328,7 @@ class EbayMessageSync:
                 return
 
         meta, messages = client.get_conversation_messages(conv_id, ctype)
+        new_buyer: list[int] = []  # 新入库的买家消息：提交后交给自动翻译
         messages.sort(key=lambda m: (parse_time(m.get("createdDate")) or datetime.min, m.get("messageId") or ""))
         settings = get_settings()
 
@@ -380,14 +381,22 @@ class EbayMessageSync:
                 msg.sender_key = m.get("senderUsername")
                 msg.media = m.get("messageMedia") or None
                 msg.platform_read = m.get("readStatus")
+                if role == "BUYER":
+                    new_buyer.append(msg.id)
                 if msg.media and role in ("BUYER", "UNKNOWN"):
-                    register_ebay_media(db, msg, msg.media)  # 只登记，下载在 Agent 运行时按需进行
+                    atts = register_ebay_media(db, msg, msg.media)
+                    ensure_stored(db, atts)  # 拉到就下载（安全处理后存本地），审核员打开会话立刻能看到；按消息时间 30 天后清理
                     stats["attachments_registered"] += len(msg.media)
+                    stats["attachments_stored"] += sum(a.status == "STORED" for a in atts)
                 stats["messages_new"] += 1
                 stats[f"messages_{role.lower()}"] += 1
             db.flush()
             if apply_platform_unread(db, c, conv.get("unreadCount")):
                 stats["read_from_ebay"] += 1
+        if new_buyer:
+            from ..translation import translator
+
+            translator.enqueue(new_buyer)
 
 
 def _role(ctype: str, sender: str | None, seller: str | None) -> str:

@@ -2,20 +2,20 @@
 from __future__ import annotations
 
 import time
-from datetime import date, timedelta
+from datetime import date, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session, defer
 
 from ..config import get_settings
 from ..db import get_db, utcnow
 from ..guards.compliance import ComplianceChecker
 from ..knowledge.retriever import estimate_tokens, exclusion_reason
-from ..media.service import attachments_for_messages
+from ..media.service import attachments_for_messages, ensure_stored
 from ..media.service import file_path as media_file_path
 from ..models import (
     Aftersales,
@@ -45,7 +45,9 @@ from ..models import (
     WorkClaim,
     LogisticsTicket,
 )
-from ..logistics.followup import is_draft, reship_stock
+from ..logistics.followup import CLOSED as CLOSED_TICKET
+from ..logistics.followup import (DRAFT_PREFIX, TicketError, discard_draft, edit_draft, is_draft, is_local_draft,
+                                  reship_stock, submit_draft)
 from ..logistics.goodcang import GoodcangClient, GoodcangError
 from ..providers.chat import get_chat_provider
 from ..sending.service import AUTO_ACTOR, SIMULATED_PREFIX, SendError, request_send, simulate_send
@@ -193,8 +195,10 @@ def _like(text: str) -> str:
 @router.get("/conversations")
 def list_conversations(store_id: str | None = None, group: str = "pending", q: str | None = None,
                        unread_only: bool = False, kind: str | None = None, tag_id: int | None = None,
-                       db: Session = Depends(get_db)):
-    """kind：buyer 买家消息（含测试会话）/ system eBay 系统消息 / 空为全部。"""
+                       view: str = "all", db: Session = Depends(get_db)):
+    """kind：buyer 买家消息（含测试会话）/ system eBay 系统消息 / 空为全部。
+    view：买家消息列表顶部的页签——pending 待审核（当前任务需要人工审核，客服平时只看这个）/
+    auto 自动回复（AI 已自动发出，供抽查）/ all 全部；在此基础上再按 group、tag_id 细分。"""
     unread = unread_count_expr()
     query = select(Conversation, unread).order_by(Conversation.last_message_at.desc().nulls_last(),
                                                   Conversation.id.desc()).limit(300)
@@ -215,11 +219,16 @@ def list_conversations(store_id: str | None = None, group: str = "pending", q: s
                                                 .where(ConversationMark.tag_id == tag_id)))
     items = []
     now = utcnow()
+    store_names = dict(db.execute(select(Store.id, Store.name)).all())  # 卡片上显示店铺名
     for conv, unread_n in db.execute(query):
         job = _current_job(db, conv.id)
         auto_replied = bool(job and job.state == JobState.SENT and db.scalar(
             select(SendIntent.id).where(SendIntent.job_id == job.id, SendIntent.actor == AUTO_ACTOR)))
         inv_status = db.scalar(select(InvoiceRequest.status).where(InvoiceRequest.conversation_id == conv.id))
+        if view == "pending" and (job is None or job.state not in JobState.PENDING_REVIEW):
+            continue
+        if view == "auto" and not auto_replied:
+            continue
         if group == "handoff":
             if conv.handoff_state != "HUMAN":
                 continue
@@ -246,7 +255,8 @@ def list_conversations(store_id: str | None = None, group: str = "pending", q: s
                           .order_by(Draft.id.desc()).limit(1)) if job else None
         waiting = int((now - last_buyer.sent_at).total_seconds()) if last_buyer and job and job.state not in GROUPS["resolved"] else None
         items.append({
-            "id": conv.id, "store_id": conv.store_id, "marketplace_id": conv.marketplace_id,
+            "id": conv.id, "store_id": conv.store_id, "store_name": store_names.get(conv.store_id) or conv.store_id,
+            "marketplace_id": conv.marketplace_id,
             "buyer_key": conv.buyer_key, "item_id": conv.item_id, "handoff_state": conv.handoff_state,
             "channel_source": conv.channel_source, "conversation_type": conv.conversation_type,
             "conversation_title": conv.conversation_title,
@@ -257,18 +267,56 @@ def list_conversations(store_id: str | None = None, group: str = "pending", q: s
             "claim": _claim_dict(_active_claim(db, conv)),
             "auto_replied": auto_replied,
             "aftersales": _aftersales_dict(conv),
-            "mark": _conversation_mark(db, conv.id),
+            "mark": _conversation_mark(db, conv.id), "marks": _conversation_marks(db, conv.id),
             "invoice_status": inv_status,  # 发票申请：OPEN 待开票发送 / DONE 已发 / CANCELLED
             "item_url": _conv_item_url(db, conv),
             "unread_count": unread_n or 0, "platform_unread_count": conv.platform_unread_count,
             "read_by": conv.read_by, "read_at": iso(conv.read_at),
         })
     # 查询已按最后一条消息时间从新到旧；只有“待审核”按等待时长（越久越前）、其次风险等级排，先处理等得久的
-    if group == "pending":
+    if group == "pending" or view == "pending":
         risk_rank = {"L3": 0, "L2": 1, "L1": 2, "L0": 3, None: 4}
         items.sort(key=lambda i: (-(i["waiting_seconds"] or -1),
                                   risk_rank.get((i["job"] or {}).get("risk_level"), 4)))
     return items
+
+
+@router.get("/conversations/filter-counts")
+def conversation_filter_counts(store_id: str | None = None, q: str | None = None, unread_only: bool = False,
+                               view: str = "all", db: Session = Depends(get_db)):
+    """买家消息列表的会话数（按当前店铺、搜索词、只看未读统计；不受列表最多 300 条的限制）：
+    views 是顶部三个页签各自的数量；其余是下拉筛选每一项在当前页签（view）里的数量。"""
+    base = _scope(select(Conversation.id).where(Conversation.conversation_type != SYSTEM_TYPE), Conversation.store_id)
+    if store_id:
+        base = base.where(Conversation.store_id == store_id)
+    if q and q.strip():
+        base = base.where(Conversation.buyer_key.ilike(_like(q.strip()), escape="\\"))
+    if unread_only:
+        base = base.where(unread_count_expr() > 0)
+    # 每个会话的当前任务（最新一个没作废的）
+    latest = (select(ReplyJob.conversation_id.label("cid"), func.max(ReplyJob.id).label("jid"))
+              .where(ReplyJob.state != JobState.CANCELLED_STALE).group_by(ReplyJob.conversation_id).subquery())
+    current = select(latest.c.cid).join(ReplyJob, ReplyJob.id == latest.c.jid)
+    view_conds = {
+        "pending": Conversation.id.in_(current.where(ReplyJob.state.in_(JobState.PENDING_REVIEW))),
+        "auto": Conversation.id.in_(current.where(ReplyJob.state == JobState.SENT, ReplyJob.id.in_(
+            select(SendIntent.job_id).where(SendIntent.actor == AUTO_ACTOR)))),
+    }
+    views = {k: db.scalar(select(func.count()).select_from(base.where(c).subquery())) or 0 for k, c in view_conds.items()}
+    views["all"] = db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    if view in view_conds:
+        base = base.where(view_conds[view])
+
+    def count(*conds) -> int:
+        return db.scalar(select(func.count()).select_from(base.where(*conds).subquery())) or 0
+
+    open_invoice = select(InvoiceRequest.conversation_id).where(InvoiceRequest.status == "OPEN")
+    tags = dict(db.execute(select(ConversationMark.tag_id, func.count(ConversationMark.conversation_id))
+                           .where(ConversationMark.conversation_id.in_(base)).group_by(ConversationMark.tag_id)).all())
+    return {"all": count(), "invoice": count(Conversation.id.in_(open_invoice)),
+            "aftersales": count(Conversation.aftersales_status.in_((Aftersales.PENDING, Aftersales.IN_PROGRESS))),
+            "aftersales_done": count(Conversation.aftersales_status == Aftersales.DONE),
+            "tags": {str(k): v for k, v in tags.items()}, "views": views}
 
 
 def _observation_dict(o: ImageObservation | None) -> dict | None:
@@ -378,12 +426,25 @@ def conversation_listing(conv_id: int, db: Session = Depends(get_db)):
     return card
 
 
+PENDING_FETCH_LIMIT = 8
+
+
 @router.get("/conversations/{conv_id}")
 def conversation_detail(conv_id: int, db: Session = Depends(get_db)):
     conv = _load(db, Conversation, conv_id)
     messages = db.scalars(select(Message).where(Message.conversation_id == conv.id)
                           .options(defer(Message.body_html)).order_by(Message.conversation_seq)).all()
+    # 买家发的图片拉取时只登记：打开会话时把还没下载的下载下来（每次最多 PENDING_FETCH_LIMIT 张，下次刷新接着下）
+    pending = db.scalars(select(MessageAttachment).where(MessageAttachment.conversation_id == conv.id,
+                                                         MessageAttachment.status == AttachmentStatus.PENDING)
+                         .order_by(MessageAttachment.id.desc()).limit(PENDING_FETCH_LIMIT)).all()
+    if pending:
+        ensure_stored(db, list(pending))
     attachments = _attachments_by_message(db, [m.id for m in messages])
+    from ..translation import translator, untranslated_ids
+
+    translator.enqueue(untranslated_ids(db, conv.id))  # 还没翻译的买家来信：后台译成中文
+    translating = translator.pending([m.id for m in messages])
     with_html = set(db.scalars(select(Message.id).where(Message.conversation_id == conv.id,
                                                         Message.body_html.is_not(None))))
     events = db.scalars(select(ConversationEvent).where(ConversationEvent.conversation_id == conv.id)
@@ -401,6 +462,7 @@ def conversation_detail(conv_id: int, db: Session = Depends(get_db)):
     detail = {
         "conversation": {
             "id": conv.id, "store_id": conv.store_id, "ebay_conversation_id": conv.ebay_conversation_id,
+            "store_name": (db.get(Store, conv.store_id).name if db.get(Store, conv.store_id) else None) or conv.store_id,
             "conversation_type": conv.conversation_type, "marketplace_id": conv.marketplace_id,
             "marketplace_source": conv.marketplace_source, "buyer_key": conv.buyer_key, "item_id": conv.item_id,
             "handoff_state": conv.handoff_state, "row_version": conv.row_version,
@@ -408,18 +470,19 @@ def conversation_detail(conv_id: int, db: Session = Depends(get_db)):
             "platform_status": conv.platform_status,
             "read_seq": conv.read_seq, "read_by": conv.read_by, "read_at": iso(conv.read_at),
             "aftersales": _aftersales_dict(conv),
-            "mark": _conversation_mark(db, conv.id),
+            "mark": _conversation_mark(db, conv.id), "marks": _conversation_marks(db, conv.id),
             "item_url": _conv_item_url(db, conv),
             "unread_count": unread_count(db, conv), "platform_unread_count": conv.platform_unread_count,
         },
         "messages": [{"id": m.id, "ebay_message_id": m.ebay_message_id, "seq": m.conversation_seq,
                       "role": m.sender_role, "direction": m.direction, "body": m.body,
-                      "zh_translation": m.zh_translation, "sent_at": iso(m.sent_at),
+                      "zh_translation": m.zh_translation, "translating": m.id in translating, "sent_at": iso(m.sent_at),
                       "subject": m.subject, "sender_key": m.sender_key, "media": m.media or [],
                       "simulated": m.ebay_message_id.startswith(SIMULATED_PREFIX),
                       "has_html": m.id in with_html,
                       "trace": sent_from.get(m.ebay_message_id),
                       "attachments": attachments.get(m.id, [])} for m in messages],
+        "ticket_timeline": _ticket_timeline(db, conv.id),
         "events": [{"id": e.id, "event_type": e.event_type, "source": e.source, "case_id": e.case_id,
                     "detail": e.detail, "occurred_at": iso(e.occurred_at)} for e in events],
         "jobs": [{"id": j.id, "state": j.state, "run_generation": j.run_generation, "created_at": iso(j.created_at)}
@@ -537,17 +600,22 @@ def purge_test_conversations(body: PurgeTestBody, reviewer: str = Depends(review
 
 # ------------------------------------------------------------------ 会话标记（整段会话的当前状态 + 备注）
 def _tag_dict(t: MessageTag) -> dict:
-    return {"id": t.id, "name": t.name, "color": t.color, "sort": t.sort, "is_active": t.is_active}
+    return {"id": t.id, "name": t.name, "color": t.color, "sort": t.sort, "is_active": t.is_active,
+            "created_by": t.created_by}
+
+
+def _conversation_marks(db: Session, conv_id: int) -> list[dict]:
+    rows = db.execute(select(ConversationMark, MessageTag).join(MessageTag, MessageTag.id == ConversationMark.tag_id)
+                      .where(ConversationMark.conversation_id == conv_id)
+                      .order_by(MessageTag.sort, MessageTag.id)).all()
+    return [{"tag_id": t.id, "tag": t.name, "color": t.color, "note": m.note, "marked_by": m.marked_by,
+             "marked_at": iso(m.marked_at)} for m, t in rows]
 
 
 def _conversation_mark(db: Session, conv_id: int) -> dict | None:
-    row = db.execute(select(ConversationMark, MessageTag).join(MessageTag, MessageTag.id == ConversationMark.tag_id)
-                     .where(ConversationMark.conversation_id == conv_id)).first()
-    if row is None:
-        return None
-    m, t = row
-    return {"tag_id": t.id, "tag": t.name, "color": t.color, "note": m.note, "marked_by": m.marked_by,
-            "marked_at": iso(m.marked_at)}
+    """第一个标记（旧字段 mark，兼容）。"""
+    marks = _conversation_marks(db, conv_id)
+    return marks[0] if marks else None
 
 
 @router.get("/message-tags")
@@ -565,8 +633,9 @@ class TagBody(BaseModel):
     is_active: bool | None = None
 
 
-@router.post("/message-tags", dependencies=[Depends(require_admin)])
+@router.post("/message-tags")
 def create_message_tag(body: TagBody, reviewer: str = Depends(reviewer_name), db: Session = Depends(get_db)):
+    """新建标记项：所有账号都能建（在会话的标记弹窗里直接加）。"""
     if not body.name or not body.name.strip():
         raise HTTPException(422, "请填写标记名称")
     if db.scalar(select(MessageTag.id).where(MessageTag.name == body.name.strip())):
@@ -576,7 +645,19 @@ def create_message_tag(body: TagBody, reviewer: str = Depends(reviewer_name), db
                      created_by=reviewer)
     db.add(tag)
     db.flush()
+    db.add(AuditEvent(actor=reviewer, action="MESSAGE_TAG_CREATED", detail={"tag": tag.name}))
     return _tag_dict(tag)
+
+
+@router.delete("/message-tags/{tag_id}")
+def delete_message_tag(tag_id: int, reviewer: str = Depends(reviewer_name), db: Session = Depends(get_db)):
+    """删除标记项：所有账号都能删；所有会话上的这个标记一起去掉。"""
+    tag = _load(db, MessageTag, tag_id)
+    n = db.execute(delete(ConversationMark).where(ConversationMark.tag_id == tag.id)).rowcount or 0
+    db.add(AuditEvent(actor=reviewer, action="MESSAGE_TAG_DELETED", detail={"tag": tag.name, "removed_marks": n}))
+    db.delete(tag)
+    db.flush()
+    return {"removed_marks": n}
 
 
 @router.patch("/message-tags/{tag_id}", dependencies=[Depends(require_admin)])
@@ -601,31 +682,38 @@ class MarkBody(BaseModel):
 @router.put("/conversations/{conv_id}/mark")
 def mark_conversation(conv_id: int, body: MarkBody, reviewer: str = Depends(reviewer_name),
                       db: Session = Depends(get_db)):
-    """给会话打标记（如 查适配中）并写备注；已有标记就改成新的。"""
+    """给会话加一个标记（如 查适配中）并写备注；一个会话可以有多个标记，同一个标记再打一次就是改备注。返回会话的全部标记。"""
     conv = _load(db, Conversation, conv_id)
     tag = _load(db, MessageTag, body.tag_id)
-    mark = db.scalar(select(ConversationMark).where(ConversationMark.conversation_id == conv.id))
-    if not tag.is_active and (mark is None or mark.tag_id != tag.id):
+    mark = db.scalar(select(ConversationMark).where(ConversationMark.conversation_id == conv.id,
+                                                    ConversationMark.tag_id == tag.id))
+    if not tag.is_active and mark is None:
         raise HTTPException(422, "这个标记已停用")
     if mark is None:
-        mark = ConversationMark(conversation_id=conv.id, store_id=conv.store_id)
+        mark = ConversationMark(conversation_id=conv.id, store_id=conv.store_id, tag_id=tag.id)
         db.add(mark)
-    mark.tag_id, mark.note = tag.id, (body.note or "").strip() or None
+    mark.note = (body.note or "").strip() or None
     mark.marked_by, mark.marked_at = reviewer, utcnow()
     db.add(AuditEvent(actor=reviewer, action="CONVERSATION_MARKED", store_id=conv.store_id, conversation_id=conv.id,
                       detail={"tag": tag.name}))
     db.flush()
-    return _conversation_mark(db, conv.id)
+    return _conversation_marks(db, conv.id)
 
 
 @router.delete("/conversations/{conv_id}/mark")
-def unmark_conversation(conv_id: int, reviewer: str = Depends(reviewer_name), db: Session = Depends(get_db)):
+def unmark_conversation(conv_id: int, tag_id: int | None = None, reviewer: str = Depends(reviewer_name),
+                        db: Session = Depends(get_db)):
+    """去掉会话上的一个标记（tag_id），不传 tag_id 就全部去掉。"""
     conv = _load(db, Conversation, conv_id)
-    n = db.execute(delete(ConversationMark).where(ConversationMark.conversation_id == conv.id)).rowcount or 0
+    cond = [ConversationMark.conversation_id == conv.id]
+    if tag_id is not None:
+        cond.append(ConversationMark.tag_id == tag_id)
+    n = db.execute(delete(ConversationMark).where(*cond)).rowcount or 0
     if n:
         db.add(AuditEvent(actor=reviewer, action="CONVERSATION_UNMARKED", store_id=conv.store_id,
-                          conversation_id=conv.id, detail={}))
-    return {"removed": n}
+                          conversation_id=conv.id, detail={"tag_id": tag_id}))
+    db.flush()
+    return {"removed": n, "marks": _conversation_marks(db, conv.id)}
 
 
 # ------------------------------------------------------------------ 客服转售后 / 售后处理
@@ -1015,6 +1103,33 @@ def translate(body: TextBody, db: Session = Depends(get_db)):
     return {"translation": _translate(db, body.text, body.target_language)}
 
 
+LANG_NAMES = {"de": "德语", "en": "英语", "fr": "法语", "it": "意大利语", "es": "西班牙语", "nl": "荷兰语", "pl": "波兰语",
+              "zh": "中文"}
+_SITE_LANG = {"EBAY_DE": "de", "EBAY_AT": "de", "EBAY_FR": "fr", "EBAY_IT": "it", "EBAY_ES": "es", "EBAY_NL": "nl",
+              "EBAY_PL": "pl"}
+
+
+class ZhComposeBody(BaseModel):
+    text_zh: str = Field(min_length=1, max_length=3000)
+    language: str | None = Field(default=None, max_length=16)  # 不填：按本会话 AI 草稿的语言，再按站点
+
+
+@router.post("/conversations/{conv_id}/translate-from-zh")
+def translate_from_zh(conv_id: int, body: ZhComposeBody, db: Session = Depends(get_db)):
+    """审核员在“中文对照”里改稿：把中文译成买家语言，填回上方正式回复（发送前仍要审核）。"""
+    conv = _load(db, Conversation, conv_id)
+    lang = (body.language or "").lower().split("-")[0] or None
+    if not lang:
+        lang = db.scalar(select(Draft.language).join(ReplyJob, Draft.job_id == ReplyJob.id)
+                         .where(ReplyJob.conversation_id == conv.id, Draft.author == "agent", Draft.language.is_not(None))
+                         .order_by(Draft.id.desc()).limit(1))
+        lang = (lang or "").lower().split("-")[0] or _SITE_LANG.get(conv.marketplace_id or "", "en")
+    name = LANG_NAMES.get(lang, lang)
+    text = body.text_zh.strip() if lang == "zh" else _translate(
+        db, body.text_zh, f"{name}（发给 eBay 买家的客服回复，语气礼貌自然）", store_id=conv.store_id, conversation_id=conv.id)
+    return {"text": text, "language": lang, "language_name": name}
+
+
 @router.get("/messages/{message_id}/html")
 def message_html(message_id: int, db: Session = Depends(get_db)):
     """eBay 原始 HTML 邮件（系统通知）。工作台放进禁用脚本的沙箱 iframe 里显示。"""
@@ -1093,6 +1208,33 @@ def workbench_metrics(store_id: str | None = None, db: Session = Depends(get_db)
 
 
 # ------------------------------------------------------------------ 谷仓查件单（同步结果与回复建议）
+def _cn_iso(value: str | None) -> str | None:
+    """谷仓时间（北京时间、无时区）→ ISO UTC。"""
+    from ..logistics.assess import CN, parse_time
+
+    dt = parse_time(value, CN)
+    return dt.astimezone(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds") + "Z" if dt else None
+
+
+def _ticket_timeline(db: Session, conv_id: int) -> list[dict]:
+    """对话里的查件记录：发起查件（提交到谷仓 / 本系统起草 / 谷仓后台建的）和收到反馈，按时间插进聊天记录。"""
+    out = []
+    for t in db.scalars(select(LogisticsTicket).where(LogisticsTicket.conversation_id == conv_id)):
+        opened = iso(t.submitted_at) if t.submitted_at else (iso(t.created_at) if t.created_at else _cn_iso(t.added_at))
+        base = {"ticket_id": t.id, "io_code": t.io_code, "type": t.type_name, "tracking_no": t.tracking_no}
+        if opened:
+            out.append({**base, "kind": "opened", "key": f"o{t.id}", "at": opened, "desc": t.io_desc,
+                        "by": t.submitted_by or t.created_by or "谷仓后台", "status": t.io_status_text,
+                        "draft": is_local_draft(t)})
+        if t.reply or t.attachments:
+            out.append({**base, "kind": "replied", "key": f"r{t.id}", "at": _cn_iso(t.replied_at) or iso(t.synced_at),
+                        "reply": t.reply, "attachments": [{"name": a.get("name"), "file_id": a.get("file_id")}
+                                                          for a in t.attachments or []],
+                        "send_status": t.send_status, "send_error": t.send_error, "sent_at": iso(t.sent_at),
+                        "needs_human": t.needs_human})
+    return sorted(out, key=lambda x: x["at"] or "")
+
+
 def _ticket_dict(t: LogisticsTicket) -> dict:
     return {"id": t.id, "io_code": t.io_code, "order_id": t.reference_no, "tracking_no": t.tracking_no,
             "type": t.type_name, "status": t.io_status_text, "trail_status": t.trail_status_text, "sm_name": t.sm_name,
@@ -1101,7 +1243,54 @@ def _ticket_dict(t: LogisticsTicket) -> dict:
             "added_at": t.added_at, "replied_at": t.replied_at, "suggestion": t.suggestion,
             "suggestion_zh": t.suggestion_zh, "needs_human": t.needs_human, "suggested_at": iso(t.suggested_at),
             "handled_at": iso(t.handled_at), "handled_by": t.handled_by, "is_draft": is_draft(t), "origin": t.origin,
-            "io_desc": t.io_desc, "created_by": t.created_by, "created_at": iso(t.created_at)}
+            "io_desc": t.io_desc, "created_by": t.created_by, "created_at": iso(t.created_at),
+            "is_local_draft": is_local_draft(t), "it_type_id": t.it_type_id, "sm_code": t.sm_code,
+            "submitted_by": t.submitted_by, "submitted_at": iso(t.submitted_at),
+            "send_status": t.send_status, "sent_at": iso(t.sent_at), "sent_message_id": t.sent_message_id,
+            "send_error": t.send_error}
+
+
+def _ticket_view_cond(view: str):
+    T = LogisticsTicket
+    not_closed = or_(T.io_status.is_(None), T.io_status.not_in(CLOSED_TICKET))
+    draft = and_(not_closed, or_(T.io_code.like(DRAFT_PREFIX + "%"), T.io_status_text.like("%草稿%"),
+                                 T.io_status_text.like("%待提交%")))
+    return {
+        "draft": draft,  # 本系统草稿（或谷仓后台保存的草稿），等人工提交
+        "replied": or_(T.reply.is_not(None), T.replied_at.is_not(None)),  # 谷仓已回复（含附件），附发给买家的结果
+        "reply": and_(T.suggestion.is_not(None), T.handled_at.is_(None)),  # 谷仓已回复、AI 起草了给买家的回复
+        "human": and_(T.needs_human.is_(True), T.handled_at.is_(None)),
+        "open": and_(T.handled_at.is_(None), not_closed, ~draft),  # 已提交，谷仓处理中
+        "done": or_(T.handled_at.is_not(None), T.io_status.in_(CLOSED_TICKET)),
+    }.get(view)
+
+
+@router.get("/logistics-tickets")
+def list_tickets(view: str = "draft", store_id: str | None = None, q: str | None = None, limit: int = 200,
+                 db: Session = Depends(get_db)):
+    """查件单总表：draft 草稿待提交 / replied 谷仓已回复（含是否已发给买家）/ reply 有新回复待回买家 / human 需人工 /
+    open 谷仓处理中 / done 已处理或已完结 / all。
+    按负责店铺；没匹配到店铺的（非 eBay 订单）只有管理员和全部店铺账号看得到。附各分类数量。"""
+    base = _scope(select(LogisticsTicket), LogisticsTicket.store_id)
+    if store_id:
+        base = base.where(LogisticsTicket.store_id == store_id)
+    if q and q.strip():
+        like = _like(q.strip())
+        base = base.where(or_(*(c.ilike(like, escape="\\") for c in (
+            LogisticsTicket.io_code, LogisticsTicket.reference_no, LogisticsTicket.tracking_no, LogisticsTicket.buyer_key))))
+    counts = {v: db.scalar(select(func.count()).select_from(base.where(_ticket_view_cond(v)).subquery())) or 0
+              for v in ("draft", "replied", "reply", "human", "open", "done")}
+    counts["all"] = db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    cond = _ticket_view_cond(view)
+    rows = db.scalars((base.where(cond) if cond is not None else base)
+                      .order_by(func.coalesce(LogisticsTicket.replied_at, LogisticsTicket.added_at).desc().nulls_first(),
+                                LogisticsTicket.id.desc()).limit(min(max(limit, 1), 500))).all()
+    names = dict(db.execute(select(Store.id, Store.name)).all())
+    conv_ids = {t.conversation_id for t in rows if t.conversation_id}
+    buyers = dict(db.execute(select(Conversation.id, Conversation.buyer_key).where(Conversation.id.in_(conv_ids))).all())         if conv_ids else {}
+    return {"counts": counts, "items": [{**_ticket_dict(t), "store_id": t.store_id, "store_name": names.get(t.store_id),
+                                         "buyer_key": buyers.get(t.conversation_id) or t.buyer_key,
+                                         "conversation_id": t.conversation_id} for t in rows]}
 
 
 @router.get("/conversations/{conv_id}/logistics-tickets")
@@ -1121,6 +1310,60 @@ def ticket_handled(ticket_id: int, request: Request, db: Session = Depends(get_d
     t.handled_at, t.handled_by = utcnow(), user.display_name
     db.add(AuditEvent(actor=user.display_name, action="LOGISTICS_TICKET_HANDLED", store_id=t.store_id,
                       conversation_id=t.conversation_id, detail={"io_code": t.io_code}))
+    return _ticket_dict(t)
+
+
+class TicketDraftEdit(BaseModel):
+    it_type_id: int | None = None
+    type_name: str | None = Field(default=None, max_length=40)
+    io_desc: str | None = Field(default=None, max_length=300)
+
+
+@router.get("/logistics-tickets/{ticket_id}/types")
+def ticket_types(ticket_id: int, db: Session = Depends(get_db)):
+    """这张查件单的物流方式支持的查件类型（谷仓实时查询，只读）。"""
+    t = _load(db, LogisticsTicket, ticket_id)
+    try:
+        return [{"value": x.get("value"), "name": x.get("name")} for x in GoodcangClient().ticket_types(t.sm_code)]
+    except GoodcangError as e:
+        raise HTTPException(502, str(e)) from None
+
+
+@router.patch("/logistics-tickets/{ticket_id}")
+def ticket_edit(ticket_id: int, body: TicketDraftEdit, request: Request, db: Session = Depends(get_db)):
+    """修改本系统草稿的查件类型、查件需求（提交前）。"""
+    t = _load(db, LogisticsTicket, ticket_id)
+    try:
+        edit_draft(t, it_type_id=body.it_type_id, type_name=body.type_name, io_desc=body.io_desc)
+    except TicketError as e:
+        raise HTTPException(409, str(e)) from None
+    db.add(AuditEvent(actor=current_user(request).display_name, action="LOGISTICS_TICKET_EDITED", store_id=t.store_id,
+                      conversation_id=t.conversation_id, detail={"io_code": t.io_code, "type": t.type_name}))
+    return _ticket_dict(t)
+
+
+@router.post("/logistics-tickets/{ticket_id}/submit")
+def ticket_submit(ticket_id: int, body: TicketDraftEdit, request: Request, db: Session = Depends(get_db)):
+    """（可先带上修改）把本系统草稿提交到谷仓：真正在谷仓建查件单，之后买家回复里才能说已联系承运商。"""
+    t = _load(db, LogisticsTicket, ticket_id)
+    try:
+        edit_draft(t, it_type_id=body.it_type_id, type_name=body.type_name, io_desc=body.io_desc)
+        submit_draft(db, t, GoodcangClient(), current_user(request).display_name)
+    except TicketError as e:
+        raise HTTPException(409, str(e)) from None
+    except GoodcangError as e:
+        raise HTTPException(502, str(e)) from None
+    return _ticket_dict(t)
+
+
+@router.post("/logistics-tickets/{ticket_id}/discard")
+def ticket_discard(ticket_id: int, request: Request, db: Session = Depends(get_db)):
+    """废弃本系统草稿（建错了、不需要查件）：不会发到谷仓。"""
+    t = _load(db, LogisticsTicket, ticket_id)
+    try:
+        discard_draft(db, t, current_user(request).display_name)
+    except TicketError as e:
+        raise HTTPException(409, str(e)) from None
     return _ticket_dict(t)
 
 

@@ -187,7 +187,7 @@ onMounted(async () => {
   margin-bottom: 10px;
 }
 .small {
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 .group h4 {
   margin: 12px 0 6px;

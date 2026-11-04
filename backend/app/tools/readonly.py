@@ -176,11 +176,14 @@ def _tickets_for(db, order_id: str, numbers: list[str]) -> list[dict]:
     from ..models import LogisticsTicket
 
     conds = [LogisticsTicket.reference_no == order_id] + ([LogisticsTicket.tracking_no.in_(numbers)] if numbers else [])
-    from ..logistics.followup import is_draft
+    from ..logistics.followup import DRAFT_PREFIX, is_draft
 
     rows = db.scalars(select(LogisticsTicket).where(or_(*conds)).order_by(LogisticsTicket.id.desc()).limit(10))
-    # submitted=false：系统刚保存的草稿，还没在谷仓提交，不能对买家说“已联系承运商”
-    return [{"io_code": r.io_code, "type": r.type_name, "status": r.io_status_text, "submitted": not is_draft(r),
+
+    def submitted(r) -> bool:  # 草稿、从没提交过的、废弃的都不算：不能对买家说“已联系承运商”
+        return not (is_draft(r) or (r.io_code or "").startswith(DRAFT_PREFIX) or r.io_status == 10)
+
+    return [{"io_code": r.io_code, "type": r.type_name, "status": r.io_status_text, "submitted": submitted(r),
              "created": r.added_at, "replied": r.replied_at, "reply": (r.reply or "")[:300] or None} for r in rows]
 
 

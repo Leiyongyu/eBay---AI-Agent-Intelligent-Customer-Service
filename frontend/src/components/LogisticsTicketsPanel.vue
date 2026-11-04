@@ -1,11 +1,12 @@
 <script setup lang="ts">
 // 会话里的谷仓查件单：每天同步（含客服在谷仓后台手动建的）；谷仓回复后 AI 起草了给买家的回复建议，
 // 客服可一键填进回复框，处理完点“已处理”。谷仓回复是内部信息，不直接发给买家。
-// 系统按物流规则建的是草稿（只保存未提交），要在谷仓后台核对、可修改后提交；补发前可查原发货仓库存。
+// 系统按物流规则起草的查件单只存在本系统，客服核对、可修改后点“修改并提交”发到谷仓；补发前可查原发货仓库存。
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { get, post } from '../api'
 import { errorText, fmtTime } from '../format'
+import TicketDraftDialog from './TicketDraftDialog.vue'
 import type { LogisticsTicketItem, ReshipStock } from '../types'
 
 const props = defineProps<{ convId: number; refreshKey?: string }>()
@@ -25,6 +26,7 @@ async function load() {
 
 const stock = ref<Record<number, ReshipStock | string>>({})
 const stockLoading = ref<number | null>(null)
+const editing = ref<LogisticsTicketItem | null>(null)
 
 async function loadStock(t: LogisticsTicketItem) {
   stockLoading.value = t.id
@@ -52,7 +54,7 @@ watch(() => [props.convId, props.refreshKey], load, { immediate: true })
 <template>
   <div v-if="items.length" class="lt-box">
     <div class="lt-head">
-      <el-tag size="small" type="warning" effect="dark">谷仓查件单</el-tag>
+      <el-tag size="small" type="warning">谷仓查件单</el-tag>
       <span>{{ items.length }} 张</span>
       <span v-if="pending" class="warn">· {{ pending }} 张有新结果待回复买家</span>
       <span class="spacer" />
@@ -68,9 +70,11 @@ watch(() => [props.convId, props.refreshKey], load, { immediate: true })
           <el-tag v-if="t.needs_human" size="small" type="danger" effect="plain">需人工处理</el-tag>
           <el-tag v-if="t.handled_at" size="small" type="success" effect="plain">{{ t.handled_by }} 已处理</el-tag>
         </div>
-        <div v-if="t.is_draft" class="reply warn">
-          {{ t.created_by || '系统' }}已在谷仓保存草稿（未提交）：请到谷仓后台“查件单”核对、可修改后提交，提交后才算已联系承运商。
+        <div v-if="t.is_local_draft" class="reply warn">
+          {{ t.created_by || '系统' }}起草了查件单（还没发到谷仓），提交后才算已联系承运商。
+          <el-button size="small" type="warning" plain @click="editing = t">修改并提交</el-button>
         </div>
+        <div v-else-if="t.is_draft" class="reply warn">这是在谷仓后台保存的草稿，请在谷仓后台提交。</div>
         <div v-if="t.io_desc" class="reply muted">查件需求：{{ t.io_desc }}</div>
         <div v-if="t.reply" class="reply"><span class="muted">谷仓回复（内部信息，不要原样发给买家）：</span>{{ t.reply }}</div>
         <div v-if="t.reject_reason" class="reply warn">驳回原因：{{ t.reject_reason }}</div>
@@ -102,29 +106,30 @@ watch(() => [props.convId, props.refreshKey], load, { immediate: true })
         </div>
       </div>
     </div>
+    <TicketDraftDialog :ticket="editing" @close="editing = null" @changed="load" />
   </div>
 </template>
 
 <style scoped>
 .lt-box {
   border-bottom: 1px solid var(--line);
-  background: #fffaf0;
+  background: var(--warn-soft);
   padding: 6px 12px;
 }
 .lt-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 .spacer {
   flex: 1;
 }
 .warn {
-  color: #d97706;
+  color: var(--warn-text);
 }
 .ok {
-  color: #16a34a;
+  color: var(--ok-text);
 }
 .lt-body {
   margin-top: 6px;
@@ -132,22 +137,22 @@ watch(() => [props.convId, props.refreshKey], load, { immediate: true })
   overflow: auto;
 }
 .lt-item {
-  border-left: 3px solid #e6a23c;
+  border-left: 3px solid var(--warn);
   padding: 4px 8px;
   margin-bottom: 8px;
-  font-size: 13px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
 }
 .lt-item.done {
-  border-left-color: #c0c4cc;
+  border-left-color: #c9cfcd;
   opacity: 0.8;
 }
 .reply {
   white-space: pre-wrap;
 }
 .sugg {
-  background: #fff;
-  border: 1px dashed #e6a23c;
+  background: var(--panel);
+  border: 1px dashed var(--warn);
   border-radius: 6px;
   padding: 6px 8px;
   margin-top: 4px;

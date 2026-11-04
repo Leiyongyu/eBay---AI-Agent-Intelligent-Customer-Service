@@ -51,6 +51,22 @@ def test_tracking_and_order_numbers_are_not_phone_numbers(checker, text):
     assert checker.check(text).result == "PASS", checker.check(text).to_dict()
 
 
+@pytest.mark.parametrize("text", [
+    # 2026-11-03 物流测试：德式“日.月.年 时:分”被当成电话拦下
+    "Aktueller Status (03.11.2026 03:59, DE): Die Sendung befindet sich im Transport.",
+    "- 02.11.2026 21:25, DE: Die Sendung wurde vom Absender eingeliefert.",
+    "- 02.11.2026, um 21:25 Uhr: Die Sendung wurde eingeliefert.",
+    "- 30/10/2026 15:51 (DE): La spedizione è stata elaborata.",
+])
+def test_day_first_dates_are_not_phone_numbers(checker, text):
+    assert checker.check(text).result == "PASS", checker.check(text).to_dict()
+
+
+def test_phone_after_day_first_date_still_blocked(checker):
+    assert checker.check("Stand 03.11.2026 03:59 – rufen Sie uns an: +49 1511 1121404").result == "BLOCK"
+    assert checker.check("Am 03.11.2026 erreichen Sie uns unter 0151 11214040").result == "BLOCK"
+
+
 def test_real_phone_still_blocked_next_to_letters(checker):
     assert checker.check("Rufen Sie uns an: +49 1511 1121404").result == "BLOCK"
     assert checker.check("Call 415 555 0132 now").result == "BLOCK"

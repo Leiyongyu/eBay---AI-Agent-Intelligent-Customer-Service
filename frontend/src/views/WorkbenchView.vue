@@ -35,12 +35,33 @@ async function loadTags() {
 const kind = ref<'buyer' | 'system'>('buyer')
 // 售后默认看“售后待处理”，其他角色默认看“待审核”
 const filter = ref(session.user?.role === 'AFTERSALES' ? 'aftersales' : 'all') // all / invoice / aftersales / aftersales_done / tag:ID
+// 买家消息顶部三个页签：客服平时只看“待审核”（需要人工审核的会自动进来）；AI 已自动发出的在“自动回复”里抽查；人工已回复、生成中的在“全部”
+type View = 'pending' | 'auto' | 'all'
+const view = ref<View>(session.user?.role === 'AFTERSALES' ? 'all' : 'pending')
+const VIEWS: { value: View; label: string }[] = [
+  { value: 'pending', label: '待审核' }, { value: 'auto', label: '自动回复' }, { value: 'all', label: '全部' },
+]
 const storeId = ref<string>('')
 const stores = ref<Store[]>([])
 const items = ref<ConversationItem[]>([])
 const loading = ref(false)
 const keyword = ref('') // 按买家名模糊搜索
 const unreadOnly = ref(false)
+// 下拉筛选每项的会话数（按当前店铺、搜索词、只看未读统计）
+type FilterCounts = {
+  all: number; invoice: number; aftersales: number; aftersales_done: number; tags: Record<string, number>
+  views?: Record<View, number>
+}
+const counts = ref<FilterCounts | null>(null)
+function withCount(label: string, n: number | undefined) {
+  return n === undefined ? label : `${label}（${n}）`
+}
+const filterTotal = computed(() => {
+  const c = counts.value
+  if (!c || kind.value !== 'buyer') return undefined
+  const f = filter.value
+  return f.startsWith('tag:') ? c.tags[f.slice(4)] || 0 : (c as unknown as Record<string, number>)[f]
+})
 
 // AI 自动回复：店铺开关 + 全局总开关（.env AUTO_SEND_ENABLED，只读）
 const autoSettings = ref<{ auto_send_enabled: boolean; intents: string[]; clarify_intents: string[] } | null>(null)
@@ -82,26 +103,32 @@ const BASE_TITLE = document.title
 
 async function refresh() {
   loading.value = true
+  loadTags() // 标记项可能刚在会话弹窗里新建或删除
   try {
     // 系统消息没有回复任务，不分待审核等分组
     const f = kind.value === 'system' ? 'all' : filter.value
     const q = new URLSearchParams({ group: f.startsWith('tag:') ? 'all' : f, kind: kind.value })
     if (f.startsWith('tag:')) q.set('tag_id', f.slice(4))
+    if (kind.value === 'buyer') q.set('view', view.value)
     if (storeId.value) q.set('store_id', storeId.value)
     if (keyword.value.trim()) q.set('q', keyword.value.trim())
     if (unreadOnly.value) q.set('unread_only', 'true')
-    const [list, storeList] = await Promise.all([
+    const cq = new URLSearchParams()
+    for (const k of ['store_id', 'q', 'unread_only', 'view']) if (q.has(k)) cq.set(k, q.get(k)!)
+    const [list, storeList, c] = await Promise.all([
       get<ConversationItem[]>(`/internal/conversations?${q}`),
       get<Store[]>('/internal/stores'),
+      kind.value === 'buyer' ? get<FilterCounts>(`/internal/conversations/filter-counts?${cq}`).catch(() => null) : null,
     ])
     items.value = list
     stores.value = storeList
+    counts.value = c
   } finally {
     loading.value = false
   }
 }
 
-watch([filter, storeId, unreadOnly, kind], refresh)
+watch([filter, storeId, unreadOnly, kind, view], refresh)
 
 // 管理标记项（只有管理员）
 const tagDialog = ref(false)
@@ -188,7 +215,10 @@ watch(
 let timer: number | undefined
 onMounted(async () => {
   // 从其他页面跳转过来的会话可能不在“待审核”里（还在生成），切到“全部”方便看到
-  if (props.focus) filter.value = 'all'
+  if (props.focus) {
+    filter.value = 'all'
+    view.value = 'all'
+  }
   loadTags()
   get('/internal/auto-reply/settings').then((r) => (autoSettings.value = r))
   await refresh()
@@ -213,6 +243,11 @@ onUnmounted(() => {
           eBay 系统消息<span v-if="systemUnread" class="badge muted-badge">{{ systemUnread }}</span>
         </button>
       </div>
+      <div v-if="kind === 'buyer'" class="views">
+        <button v-for="v in VIEWS" :key="v.value" :class="{ active: view === v.value }" @click="view = v.value">
+          {{ v.label }}<span v-if="counts?.views" class="badge" :class="{ 'muted-badge': v.value !== 'pending' }">{{ counts.views[v.value] }}</span>
+        </button>
+      </div>
       <div class="panel-head">
         <el-select v-model="storeId" placeholder="全部店铺" clearable filterable size="small" style="width: 210px">
           <el-option
@@ -222,7 +257,9 @@ onUnmounted(() => {
             :value="s.id"
           />
         </el-select>
-        <span class="muted" style="margin-left: auto">{{ items.length }} 个会话</span>
+        <span class="muted" style="margin-left: auto">
+          {{ filterTotal !== undefined && filterTotal > items.length ? `显示 ${items.length} / 共 ${filterTotal}` : items.length }} 个会话
+        </span>
       </div>
       <div v-if="currentStore && session.user?.role === 'ADMIN'" class="auto-bar">
         <el-switch
@@ -242,14 +279,16 @@ onUnmounted(() => {
       </div>
       <div v-if="kind === 'buyer'" class="filter-bar">
         <el-select v-model="filter" size="small" style="flex: 1">
-          <el-option label="全部会话" value="all" />
-          <el-option label="待审核发票（买家已给邮箱）" value="invoice" />
+          <el-option :label="withCount(view === 'all' ? '全部会话' : `全部${VIEWS.find((v) => v.value === view)?.label}`, counts?.all)" value="all" />
+          <el-option :label="withCount('待审核发票（买家已给邮箱）', counts?.invoice)" value="invoice" />
           <el-option-group label="售后">
-            <el-option label="待售后处理" value="aftersales" />
-            <el-option label="售后已完成" value="aftersales_done" />
+            <el-option :label="withCount('待售后处理', counts?.aftersales)" value="aftersales" />
+            <el-option :label="withCount('售后已完成', counts?.aftersales_done)" value="aftersales_done" />
           </el-option-group>
           <el-option-group label="会话标记">
-            <el-option v-for="t in tags" :key="t.id" :label="t.is_active ? t.name : `${t.name}（已停用）`" :value="`tag:${t.id}`" />
+            <el-option v-for="t in tags" :key="t.id"
+                       :label="withCount(t.is_active ? t.name : `${t.name}（已停用）`, counts ? counts.tags[String(t.id)] || 0 : undefined)"
+                       :value="`tag:${t.id}`" />
           </el-option-group>
         </el-select>
         <el-button v-if="session.user?.role === 'ADMIN'" link size="small" @click="tagDialog = true">管理标记</el-button>
@@ -298,16 +337,17 @@ onUnmounted(() => {
             <b v-if="kind === 'system'" class="buyer sys-title">{{ c.conversation_title || 'eBay 通知' }}</b>
             <b v-else class="buyer">{{ c.buyer_key }}</b>
             <span v-if="c.unread_count" class="badge" :title="`${c.unread_count} 条未读`">{{ c.unread_count }}</span>
-            <el-tag v-if="c.channel_source === 'ebay'" size="small" type="primary" effect="dark">eBay</el-tag>
-            <span class="muted">{{ c.store_id }} · {{ c.marketplace_id }}</span>
+            <el-tag v-if="c.channel_source === 'ebay'" size="small" type="primary">eBay</el-tag>
+            <span class="muted" :title="`店铺 ID：${c.store_id}`">{{ c.store_name || c.store_id }} · {{ c.marketplace_id }}</span>
             <el-tag v-if="c.job?.risk_level" :type="riskTag(c.job.risk_level)" size="small">{{ c.job.risk_level }}</el-tag>
             <el-tag v-if="c.job" :type="stateTag(c.job.state)" size="small" effect="plain">
               {{ STATE_LABELS[c.job.state] || c.job.state }}
             </el-tag>
             <el-tag v-if="c.handoff_state === 'HUMAN'" type="danger" size="small" effect="plain">已接管</el-tag>
-            <el-tag v-if="c.auto_replied" type="success" size="small" effect="dark">AI 自动回复</el-tag>
-            <el-tag v-if="c.mark" size="small" :type="c.mark.color" effect="dark" :title="c.mark.note || ''">{{ c.mark.tag }}</el-tag>
-            <el-tag v-if="c.invoice_status === 'OPEN'" size="small" type="warning" effect="dark">待发发票</el-tag>
+            <el-tag v-if="c.auto_replied" type="success" size="small">AI 自动回复</el-tag>
+            <el-tag v-for="m in c.marks || (c.mark ? [c.mark] : [])" :key="m.tag_id" size="small" :type="m.color"
+                    :title="m.note || ''">{{ m.tag }}</el-tag>
+            <el-tag v-if="c.invoice_status === 'OPEN'" size="small" type="warning">待发发票</el-tag>
             <el-tag v-if="c.aftersales" size="small" effect="plain"
                     :type="c.aftersales.status === 'DONE' ? 'success' : c.aftersales.status === 'IN_PROGRESS' ? 'primary' : 'warning'">
               {{ c.aftersales.status === 'DONE' ? '售后已完成' : c.aftersales.status === 'IN_PROGRESS' ? '售后处理中' : '待售后' }} · {{ c.aftersales.type }}
@@ -326,7 +366,7 @@ onUnmounted(() => {
             <span v-if="c.waiting_seconds != null" class="wait" :class="{ late: c.waiting_seconds > 900 }">
               已等待 {{ fmtWaiting(c.waiting_seconds) }}
             </span>
-            <span v-if="c.claim" class="claim">🔒 {{ c.claim.claimed_by }}</span>
+            <span v-if="c.claim" class="claim">{{ c.claim.claimed_by }} 认领</span>
             <el-button
               class="read-toggle"
               link
@@ -352,8 +392,8 @@ onUnmounted(() => {
 <style scoped>
 .wb {
   display: grid;
-  grid-template-columns: 340px 1fr;
-  gap: 12px;
+  grid-template-columns: 348px 1fr;
+  gap: 14px;
   height: 100%;
 }
 .queue {
@@ -371,6 +411,39 @@ onUnmounted(() => {
   gap: 10px;
   margin-bottom: 8px;
 }
+/* 待审核 / 自动回复 / 全部：分段按钮，和上面的“买家消息 / 系统消息”区分开 */
+.views {
+  display: flex;
+  gap: 2px;
+  margin: 8px 10px 0;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--panel-soft, #eef2f1);
+}
+.views button {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  padding: 5px 0;
+  font-size: var(--fs-sm);
+  font-family: inherit;
+  cursor: pointer;
+}
+.views button:hover {
+  color: var(--text);
+}
+.views button.active {
+  background: var(--panel, #fff);
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
 .groups {
   display: flex;
   flex-wrap: wrap;
@@ -380,10 +453,11 @@ onUnmounted(() => {
 }
 .groups button {
   border: 1px solid var(--line);
-  background: #fff;
+  background: var(--panel);
+  color: var(--text-2);
   border-radius: 14px;
   padding: 3px 10px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   cursor: pointer;
 }
 .auto-bar {
@@ -393,8 +467,8 @@ onUnmounted(() => {
   padding: 8px 10px 0;
 }
 .warn-text {
-  color: #b7791f;
-  font-size: 12px;
+  color: var(--warn-text);
+  font-size: var(--fs-xs);
 }
 .kinds {
   display: flex;
@@ -406,13 +480,18 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 8px 0;
+  padding: 10px 0 9px;
   border: none;
   border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
   background: none;
-  font-size: 13px;
+  font-size: var(--fs-sm);
+  font-family: inherit;
   cursor: pointer;
   color: var(--muted);
+}
+.kinds button:hover {
+  color: var(--text);
 }
 .kinds button.active {
   color: var(--accent);
@@ -420,7 +499,7 @@ onUnmounted(() => {
   font-weight: 600;
 }
 .badge.muted-badge {
-  background: #8a94a6;
+  background: #9aa6a4;
 }
 .sys-title {
   max-width: 220px;
@@ -446,15 +525,17 @@ onUnmounted(() => {
   height: 18px;
   padding: 0 5px;
   border-radius: 9px;
-  background: #e5484d;
+  background: var(--danger);
   color: #fff;
   font-size: 11px;
   line-height: 18px;
   text-align: center;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 .item.unread .preview {
   font-weight: 600;
+  color: var(--text);
 }
 .read-toggle {
   margin-left: auto;
@@ -472,57 +553,71 @@ onUnmounted(() => {
   color: #fff;
 }
 .list {
-  padding: 6px;
+  padding: 4px 0;
 }
+/* 会话条目：分隔线排成清单，选中时左侧一条深青竖线，不用整块描边 */
 .item {
-  padding: 9px 10px;
-  border-radius: 6px;
+  position: relative;
+  padding: 10px 12px 10px 14px;
   cursor: pointer;
-  border: 1px solid transparent;
+  border-bottom: 1px solid var(--line-soft);
   display: flex;
   flex-direction: column;
   gap: 4px;
+  transition: background-color 0.12s;
 }
-.item {
-  position: relative;
+.item::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: transparent;
 }
 .when {
   position: absolute;
   top: 9px;
   right: 10px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--muted);
   white-space: nowrap;
 }
 .item.unread .when {
-  color: #e5484d;
+  color: var(--danger-text);
   font-weight: 600;
 }
 .first-row {
   padding-right: 72px;
 }
 .item:hover {
-  background: #f5f7fa;
+  background: #f4f2ed;
 }
 .item.selected {
-  border-color: var(--accent);
-  background: #eef4ff;
+  background: var(--accent-soft);
+}
+.item.selected::before {
+  background: var(--accent);
+}
+.item.unread:not(.selected)::before {
+  background: var(--aqua);
 }
 .title-line {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .preview {
-  font-size: 13px;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .wait.late {
-  color: #e5484d;
+  color: var(--danger-text);
   font-weight: 600;
 }
 .claim {
@@ -538,7 +633,7 @@ onUnmounted(() => {
 }
 @media (max-width: 1100px) {
   .wb {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     height: auto;
   }
   .queue {

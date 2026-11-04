@@ -255,3 +255,30 @@ def test_real_ebay_conversation_cannot_be_sent(ebay_env, client):
     r = client.post(f"/internal/jobs/{job_id}/manual-reply", json={
         "text": "Hi", "expected_conversation_version": version, "idempotency_key": uuid.uuid4().hex})
     assert r.status_code == 409 and "只读" in r.json()["detail"]["message"]
+
+
+def test_buyer_images_downloaded_on_sync_and_expire_by_message_time(ebay_env, monkeypatch):
+    """买家发的图片拉到就下载（像真实聊天一样马上能看），保留期按买家发图时间算（MEDIA_RETENTION_DAYS）。"""
+    import io
+
+    from PIL import Image
+    from sqlalchemy import select
+
+    from app.db import session_scope
+    from app.media import service as media
+    from app.models import Message, MessageAttachment
+
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 48), (10, 120, 200)).save(buf, "JPEG")
+    monkeypatch.setattr(media, "download", lambda url, client=None, settings=None: buf.getvalue())
+    m3 = dict(MESSAGES["C2"][0], messageMedia=[{"mediaName": "image", "mediaType": "IMAGE",
+                                                "mediaUrl": "https://i.ebayimg.com/images/g/x/s-l1600.jpg"}])
+    monkeypatch.setitem(MESSAGES, "C2", [m3])
+    result = make_sync(FakeEbay()).run()
+    assert result["types"]["FROM_MEMBERS"]["attachments_stored"] == 1
+    with session_scope() as db:
+        att = db.scalar(select(MessageAttachment))
+        msg = db.get(Message, att.message_id)
+        assert att.status == "STORED" and att.local_path
+        days = config.get_settings().media_retention_days
+        assert abs((att.expires_at - (msg.sent_at + timedelta(days=days))).total_seconds()) < 1

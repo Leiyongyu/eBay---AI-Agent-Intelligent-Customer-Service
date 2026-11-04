@@ -16,13 +16,13 @@ const RANGES = [
   { key: 0, label: '自定义' },
 ]
 const PURPOSE_COLORS: Record<string, string> = {
-  reply: '#2f6fde',
-  repair: '#7c5cff',
-  vision: '#e5484d',
-  translate: '#12a594',
-  embedding_query: '#f5a524',
-  embedding_docs: '#b7791f',
-  check: '#98a2b3',
+  reply: '#246b6b',
+  repair: '#5b7fa6',
+  vision: '#c9776b',
+  translate: '#8fbc8f',
+  embedding_query: '#d9a85b',
+  embedding_docs: '#a8dadc',
+  check: '#b4bcb9',
 }
 
 const range = ref(7)
@@ -289,19 +289,20 @@ onMounted(async () => {
   gap: 2px;
 }
 .k-label {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   color: var(--muted);
 }
 .k-value {
   font-size: 24px;
   font-weight: 600;
+  color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 .bad {
-  color: #e5484d;
+  color: var(--danger-text);
 }
 .legend {
-  font-size: 12px;
+  font-size: var(--fs-xs);
   font-weight: 400;
   color: var(--muted);
   display: inline-flex;
