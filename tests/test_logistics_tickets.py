@@ -14,7 +14,8 @@ def test_assess_days_without_update():
     from app.logistics.assess import assess
 
     now = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
-    s = get_settings().model_copy(update={"logistics_stall_days": 4, "logistics_reship_days": 7})
+    s = get_settings().model_copy(update={"logistics_stall_days": 4, "logistics_reship_days": 7,
+                                          "logistics_skip_sundays": False})  # 周日规则见 test_logistics_rule_fixes
 
     def pkg(status="InTransit", last="2026-11-08T12:00:00Z"):
         events = [{"time": last, "time_utc": last}] if last else []
@@ -33,12 +34,46 @@ def test_assess_days_without_update():
     assert stage({"tracking_number": None})["stage"] == "NO_TRACKING"
     assert stage(pkg(), on=False)["stage"] == "UNKNOWN"
     # 到了取件柜 / ParcelShop：等买家去取，轨迹不再更新也不算断更（CJ202611034689 误判）
-    pickup = stage(pkg(status="AvailableForPickup", last="2026-10-30T10:03:42+00:00"))
+    pickup = stage(pkg(status="AvailableForPickup", last="2026-11-07T10:03:42+00:00"))
     assert (pickup["stage"], pickup["needs_human"], pickup["reason_code"]) == ("PICKUP", False, None)
     # 没有轨迹节点时用谷仓揽收时间（东八区）：11-05 20:00 北京 = 11-05 12:00 UTC → 5 天
     a = stage({"tracking_number": "N1", "tracking": {"status": "InTransit", "events": []},
                "warehouse": {"ascan_time": "2026-11-05 20:00:00"}})
     assert (a["stage"], a["days_without_update"]) == ("STALLED", 5.0)
+
+
+def test_assess_uses_goodcang_delivery_scan():
+    """17TRACK 查不到（USPS、Royal Mail 不支持注册）但谷仓有承运商回传的妥投时间：算已签收，不算断更
+    （CJ202611042350 / CJ202611042353 误判）。轨迹本身显示异常、丢失的不被妥投时间盖掉。"""
+    from app.logistics.assess import assess
+
+    now = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
+    s = get_settings().model_copy(update={"logistics_stall_days": 4, "logistics_reship_days": 7,
+                                          "logistics_skip_sundays": False})
+    wh = {"ascan_time": "2026-10-28 10:00:00", "dscan_time": "2026-10-29 18:30:00"}
+
+    def stage(tracking, on=True, w=wh):
+        return assess({"tracking_number": "RM1", "tracking": tracking, "warehouse": w}, tracking_enabled=on, now=now, settings=s)
+
+    for tracking, on in (({}, True), ({"status": "NotFound", "events": []}, True), (None, False),
+                         ({"status": "InTransit", "events": [{"time_utc": "2026-10-28T03:00:00Z"}]}, True)):
+        a = stage(tracking, on)
+        assert (a["stage"], a["needs_human"], a["reason_code"]) == ("DELIVERED", False, None), tracking
+        assert a["delivered_at"] == "2026-10-29T10:30+00:00" and a["stage_label"].startswith("已签收")
+    assert stage({"status": "Exception", "sub_status": "Exception_Lost", "events": []})["stage"] == "LOST_DAMAGED"
+    assert stage({"status": "DeliveryFailure", "events": []})["stage"] == "EXCEPTION"
+    # 没有妥投时间：照旧按揽收时间算（10-28 揽收到 11-04 已 7 天 → 需判断补发）
+    assert stage({}, w={"ascan_time": "2026-10-28 10:00:00"})["stage"] == "RESHIP_REVIEW"
+
+
+def test_delivered_by_scan_and_not_received_triggers_pod_ticket():
+    from app.agent.nodes import _tracking_problems
+
+    pkg = {"tracking_number": "RM1", "tracking": {}, "warehouse": {"dscan_time": "2026-10-29 18:30:00"},
+           "assessment": {"stage": "DELIVERED", "needs_human": False, "delivered_at": "2026-10-29T10:30+00:00"}}
+    state = {"observations": [{"tool_name": "get_package_status", "status": "FOUND", "data": pkg}]}
+    assert _tracking_problems(state, "It says delivered but I have not received it.") == ["TRACKING_DELIVERED_NOT_RECEIVED"]
+    assert _tracking_problems(state, "Thanks!") == []
 
 
 def test_tool_hides_delivery_dates_and_gives_full_events(logistics_on, monkeypatch):  # noqa: F811
@@ -303,7 +338,11 @@ def test_after_reply_drafts_locally_then_submit(client, monkeypatch):
         assert "可以补发" in note and "已起草查件单（断更）" in note
         out = followup.after_reply(db, job, db.get(Conversation, conv_id), state, reasons, client=gc)
         ticket_id = t.id
-    assert out["tickets"][0]["skipped"] == "已有未完结的查件单"
+    # 已有草稿：不重复起草，但草稿没提交不算在跟（L08 误报“已联系承运商”），即使开了自动提交也不算已处理
+    assert (out["tickets"][0]["skipped"], out["tickets"][0]["existing"]) == (followup.DRAFT_SKIP, draft_code)
+    monkeypatch.setattr(s, "logistics_ticket_auto_submit", True)
+    assert followup.auto_handled(out) == set()
+    monkeypatch.setattr(s, "logistics_ticket_auto_submit", False)
 
     # 工作台：改查件需求后提交到谷仓 → 换成谷仓单号；再提交、再改、废弃都不行
     from app.api import workbench
@@ -316,6 +355,13 @@ def test_after_reply_drafts_locally_then_submit(client, monkeypatch):
     assert (r["io_code"], r["type"], r["is_local_draft"], r["is_draft"], r["submitted_by"]) == (
         "CJTEST1", "留言", False, False, "tester")
     assert gc.created[0]["it_type_id"] == 13 and gc.created[0]["emails"] == ["a@example.com"]
+    assert r["notice"] == "SENT" and r["notice_status"] == "SENT"  # 工作台提交后马上安抚买家（德国站 → 德语）
+    with session_scope() as db:
+        sent = db.scalars(select(Conversation).where(Conversation.id == conv_id)).one()
+        from app.models import Message
+
+        body = db.scalars(select(Message.body).where(Message.conversation_id == sent.id, Message.sender_role == "SELLER")).one()
+        assert body.startswith("Vielen Dank")
     assert client.post(f"/internal/logistics-tickets/{ticket_id}/submit", json={}).status_code == 409
     assert client.post(f"/internal/logistics-tickets/{ticket_id}/discard").status_code == 409
     with session_scope() as db:
@@ -460,6 +506,7 @@ def test_auto_submit_and_no_review_for_inquiry(client, monkeypatch):
     gc = FakeGC()
     with session_scope() as db:
         conv = get_or_create_conversation(db, "STORE_A", "C-AUTO", "buyer_auto", None, "EBAY_DE", None)
+        conv.channel_source = "ebay"  # 真实会话才会自动提交到谷仓（测试会话只起草）
         job = SimpleNamespace(conversation_id=conv.id, id=999, decision_reasons=["TRACKING_STALLED"],
                               state=JobState.REVIEW_REQUIRED)
         out = followup.after_reply(db, job, conv, state, ["TRACKING_STALLED"], client=gc)
@@ -479,8 +526,58 @@ def test_auto_submit_and_no_review_for_inquiry(client, monkeypatch):
         out2 = followup.after_reply(db, job, conv, state, ["TRACKING_STALLED"], client=gc)
         assert out2["tickets"][0]["skipped"] == "已有未完结的查件单" and len(gc.created) == 1
         assert followup.auto_handled(out2) == {"TRACKING_STALLED"}
+        # 回复流程末尾：本次自动提交了查件单 → 发安抚消息（德国站 → 德语），只发一次
+        from app.agent.nodes import _submit_notice
+
+        assert _submit_notice(db, out) == "SENT" and t.notice_status == "SENT"
+        assert _submit_notice(db, out) == "已发过" and _submit_notice(db, out2) is None
     monkeypatch.setattr(s, "logistics_ticket_auto_submit", False)  # 关掉：照旧要人工
     assert followup.auto_handled(out) == set()
+
+
+class AscanGC(FakeGC):
+    def ticket_types(self, sm_code=None):
+        return [{"value": 7, "name": "无Ascan"}] + super().ticket_types(sm_code)
+
+
+def test_no_ascan_type_only_without_ascan_time_and_note_after_marking(client, monkeypatch):
+    """没轨迹时：谷仓也没有揽收时间才查“无Ascan”，有揽收时间查“断更”（followup.py 误选无Ascan）。
+    回复流程先跑 after_reply 再标售后：标完要把补发库存、查件单补进备注（之前第一次标的备注里没有）。"""
+    from types import SimpleNamespace
+
+    from app.agent.nodes import _mark_logistics_aftersales
+    from app.db import session_scope
+    from app.ingestion.service import get_or_create_conversation
+    from app.logistics import followup
+    from app.models import Conversation
+
+    s = get_settings()
+    for k, v in {"logistics_ticket_auto_draft": True, "goodcang_app_token": "t", "goodcang_app_key": "k"}.items():
+        monkeypatch.setattr(s, k, v)
+
+    def state(order_id, tn, wh_extra):
+        pkg = {"order_id": order_id, "carrier": "Royal Mail", "tracking_number": tn,
+               "warehouse": {"order_code": f"G-{tn}", "shipping_method": "UKRM", "warehouse_code": "DE", **wh_extra},
+               "tracking": {"status": "NotFound", "events": []},
+               "assessment": {"stage": "RESHIP_REVIEW", "reason_code": "TRACKING_RESHIP_REVIEW", "needs_human": True,
+                              "stage_label": "发货后多天查不到轨迹，需判断补发", "days_without_update": 7.2}}
+        return {"observations": [{"tool_name": "get_package_status", "status": "FOUND", "data": pkg}]}
+
+    reasons = ["TRACKING_RESHIP_REVIEW"]
+    with session_scope() as db:
+        conv = get_or_create_conversation(db, "STORE_A", "C-ASCAN", "buyer_ascan", None, "EBAY_DE", None)
+        job = SimpleNamespace(conversation_id=conv.id, id=1)
+        st = state("19-00000-00001", "RM-A", {"ascan_time": "2026-10-28 10:00:00"})
+        out = followup.after_reply(db, job, conv, st, reasons, client=AscanGC())
+        assert out["tickets"][0]["type"] == "断更"
+        assert _mark_logistics_aftersales(db, job, st, reasons)
+        followup.append_note(conv, out)
+        note = db.get(Conversation, conv.id).aftersales_note
+        assert "可以补发" in note and "已起草查件单（断更）" in note
+        followup.append_note(conv, out)  # 再调一次不重复追加
+        assert db.get(Conversation, conv.id).aftersales_note == note
+        out = followup.after_reply(db, job, None, state("19-00000-00002", "RM-B", {}), reasons, client=AscanGC())
+        assert out["tickets"][0]["type"] == "无Ascan"
 
 
 def test_needs_human_result_also_replied_and_timeline(client, monkeypatch, tmp_path):
@@ -571,10 +668,165 @@ def test_empty_parcel_and_reship_marking(app_env):
             assert db.get(Conversation, conv.id).aftersales_type == "物流问题需判断补发"
 
 
-def test_ticket_reply_reship_words():
-    from app.logistics.tickets import HUMAN_WORDS, RESHIP_WORDS
+def test_classify_goodcang_replies():
+    """谷仓回复归类（样本取自真实查件单）：催派/在途、POD、已妥投、自取点 → 自动回复；丢失、退回、破损 → 需判断补发；
+    地址问题、妥投未收到、看不懂 → 需人工审核。"""
+    from types import SimpleNamespace
 
-    for reply in ("包裹已丢失", "包裹已退回仓库", "外箱破损", "买家反馈空包", "轨迹仍未更新", "轨迹久未更新"):
-        assert RESHIP_WORDS.search(reply) and HUMAN_WORDS.search(reply), reply
-    assert not RESHIP_WORDS.search("您好，已尝试帮您催促，请留意后续轨迹更新")
-    assert HUMAN_WORDS.search("需要核实地址") and not RESHIP_WORDS.search("需要核实地址")  # 地址问题：转人工但不算补发
+    from app.logistics.tickets import AUTO, RESHIP, REVIEW, classify, handling
+
+    cases = [
+        ("断更", "您好，已尝试帮您催促，请留意后续轨迹更新", None, "IN_TRANSIT"),
+        ("无Ascan", "您好，该订单已尝试催派，轨迹久未更新可能存在服务商漏扫描的情况，您可留意后续轨迹更新，谢谢", None, "IN_TRANSIT"),
+        ("断更", "您好 该订单尝试反馈服务商催派，后续留意轨迹更新，如您的包裹需要理赔 且符合服务商理赔规范 先按丢件要求申请索赔开查",
+         None, "IN_TRANSIT"),  # 附带的理赔建议不算丢件
+        ("断更", "您好，10.8日轨迹有更新，包裹正在运输途中，请关注后续轨迹。", None, "IN_TRANSIT"),
+        ("申请POD", "获取成功", [{"url": "u"}], "POD"),
+        ("申请POD", "", [{"url": "u"}], "POD"),
+        ("断更", "您好，轨迹显示已妥投，麻烦与收件人核实是否收到包裹", None, "DELIVERED"),
+        ("查自取地址", "您好，轨迹显示已妥投，无自取地址，麻烦与收件人核实是否收到包裹", None, "DELIVERED"),
+        ("查自取地址", "您好，无自取地址，已尝试帮您催促，请留意后续轨迹更新", None, "IN_TRANSIT"),
+        ("查自取地址", "您好，未退回，轨迹显示包裹等待自取，地址：Ely Delivery Office, Cresswells Lane", None, "PICKUP"),
+        ("断更", "您好，轨迹久未更新，未收到请考虑包裹丢失，这票可以提交理赔申请", None, "LOST"),
+        ("断更", "您好，经核实反馈由于该包裹久未更新，收件人如未收货可考虑丢件。", None, "LOST"),
+        ("断更", "包裹已丢失", None, "LOST"),
+        ("退回原因", "您好 包裹10.15退回无法再派", None, "RETURNED"),
+        ("退回原因", "您好，官网显示在货件地址处找不到收件人，派件失败，包裹已退回寄件人", None, "RETURNED"),
+        ("断更", "外箱破损", None, "DAMAGED"),
+        ("退回原因", "您好，轨迹显示未退回，地址错误/信息不完整，无法继续派送，请指示处理意见，谢谢", None, "ADDRESS"),
+        ("断更", "您好，派送无人接收", None, "ADDRESS"),
+        ("妥投未收到", "您好，pod已提供，请查收", [{"url": "u"}], "DELIVERED_DISPUTE"),
+        ("妥投未收到", "您好，投递地址：97 first avenue，GPS定位显示在收件地址附近", None, "DELIVERED_DISPUTE"),
+        ("改派", "您好，已尝试帮您催促", None, "ACTION"),
+        ("退回原因", "您好，服务商仓库操作超期，但未告知具体原因", None, "UNKNOWN"),
+    ]
+    for type_name, reply, files, want in cases:
+        assert classify(SimpleNamespace(type_name=type_name, reply=reply, attachments=files)) == want, reply
+    assert (handling("POD"), handling("LOST"), handling("ADDRESS"), handling(None)) == (AUTO, RESHIP, REVIEW, REVIEW)
+
+
+def test_ticket_result_auto_reply_rereply_tags_and_unknown(client, monkeypatch, tmp_path):
+    """已催派 → 自动回复，已在售后的会话把结果补进备注；谷仓再次回复（说丢件）→ 按新回复重新处理：
+    需判断补发、打“需判断补发”标记、售后类型升级；看不懂的回复不发给买家，打“需人工审核”。"""
+    from sqlalchemy import select
+
+    from app.aftersales_mail.service import Located
+    from app.db import session_scope
+    from app.ingestion.service import _append_message, get_or_create_conversation
+    from app.logistics import tickets
+    from app.logistics.assess import CN
+    from app.models import Conversation, ConversationMark, LogisticsTicket, MessageTag
+
+    s = get_settings()
+    for k, v in {"aftersales_files_dir": str(tmp_path / "files"), "aftersales_virus_scan": False,
+                 "logistics_ticket_auto_send": True, "logistics_ticket_send_needs_human": True}.items():
+        monkeypatch.setattr(s, k, v)
+    recent = (datetime.now(CN) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+
+    def row(code, ref, reply, type_name="断更"):
+        return {"io_code": code, "reference_no": ref, "tracking_no": "T" + code, "it_type_name": type_name, "io_status": 7,
+                "io_status_text": "已回复待完结", "customer_service_reply": reply, "add_time": recent, "reply_time": recent}
+
+    with session_scope() as db:
+        convs = {}
+        for key in ("A", "B"):
+            c = get_or_create_conversation(db, "STORE_A", f"C-RE{key}", f"buyer_re{key}", None, "EBAY_GB", None)
+            _append_message(db, c, f"MRE{key}", "BUYER", "IN", "Where is my parcel?", None)
+            convs[key] = c.id
+        a = db.get(Conversation, convs["A"])  # 物流规则已标过待售后（断更）
+        a.aftersales_status, a.aftersales_type, a.aftersales_note = "PENDING", "物流异常/未收到", "轨迹多天未更新"
+        a.aftersales_marked_by = "AI（物流规则）"
+    refs = {"09-15357-80001": convs["A"], "09-15357-80002": convs["B"]}
+    loc = lambda db, ref: Located(ref, "STORE_A", "buyer", refs[ref], "order_api")  # noqa: E731
+    http = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(404)))
+    rows = [row("CJR1", "09-15357-80001", "您好，已尝试帮您催促，请留意后续轨迹更新"),
+            row("CJR2", "09-15357-80002", "您好，服务商仓库操作超期，但未告知具体原因", "退回原因")]
+    prov = PodProvider()
+    with session_scope() as db:
+        stats = tickets.sync(db, client=FakeTickets(rows), provider=prov, locate=loc, http=http)
+    assert (stats["sent"], stats["needs_human"]) == (1, 1)
+    assert "已催派 / 运输中" in prov.prompts[0] and "不需要人工" in prov.prompts[0]
+
+    def tags(db, conv_id):
+        return {db.get(MessageTag, m.tag_id).name for m in
+                db.scalars(select(ConversationMark).where(ConversationMark.conversation_id == conv_id))}
+
+    with session_scope() as db:
+        t1 = db.scalar(select(LogisticsTicket).where(LogisticsTicket.io_code == "CJR1"))
+        assert (t1.outcome, t1.needs_human, t1.send_status) == ("IN_TRANSIT", False, "SENT")
+        a = db.get(Conversation, convs["A"])
+        assert "【已催派 / 运输中，请留意轨迹】" in a.aftersales_note and "已自动回复买家" in a.aftersales_note
+        assert "需判断补发" not in tags(db, a.id)
+        t2 = db.scalar(select(LogisticsTicket).where(LogisticsTicket.io_code == "CJR2"))
+        assert (t2.outcome, t2.send_status, t2.sent_message_id) == ("UNKNOWN", "NEEDS_HUMAN", None)  # 看不懂：不发
+        b = db.get(Conversation, convs["B"])
+        assert (b.aftersales_status, b.aftersales_type) == ("PENDING", "物流异常/未收到")
+        assert "需人工审核" in tags(db, b.id)
+        first_msg = t1.sent_message_id
+
+    rows[0] = row("CJR1", "09-15357-80001", "您好，轨迹久未更新，未收到请考虑包裹丢失")  # 谷仓第二次回复
+    with session_scope() as db:
+        stats = tickets.sync(db, client=FakeTickets(rows), provider=prov, locate=loc, http=http)
+    assert (stats["suggested"], stats["needs_human"], stats["sent"]) == (1, 1, 1)  # 只重做变了的那张
+    with session_scope() as db:
+        t1 = db.scalar(select(LogisticsTicket).where(LogisticsTicket.io_code == "CJR1"))
+        assert (t1.outcome, t1.needs_human, t1.send_status) == ("LOST", True, "SENT") and t1.sent_message_id != first_msg
+        a = db.get(Conversation, convs["A"])
+        assert a.aftersales_type == "物流问题需判断补发" and a.aftersales_note.startswith("谷仓查件单 CJR1（断更）已回复【包裹疑似丢失")
+        assert "补发库存" in a.aftersales_note and "需判断补发" in tags(db, a.id)
+    row1 = next(x for x in client.get(f"/internal/conversations/{convs['A']}/logistics-tickets").json()
+                if x["io_code"] == "CJR1")
+    assert (row1["outcome"], row1["handling"]) == ("LOST", "需判断补发")
+
+
+def test_submit_notice_reassures_buyer_and_closes_pending_job(client, monkeypatch):
+    """查件单提交到谷仓后马上给买家发安抚消息（买家语言，固定话术），会话里待审的 AI 草稿一并结案；
+    买家还问了别的、或有其他需人工的原因时不发，留给人工。谷仓回复后再由查件单同步发结果。"""
+    from sqlalchemy import select
+
+    from app.db import session_scope, utcnow
+    from app.ingestion.service import _append_message, get_or_create_conversation
+    from app.logistics import followup
+    from app.models import Draft, JobState, LogisticsTicket, Message, ReplyJob
+
+    def setup(key, site, intents, reasons, language="de"):
+        conv = get_or_create_conversation(db, "STORE_A", f"C-N{key}", f"buyer_n{key}", None, site, None)
+        m = _append_message(db, conv, f"MN{key}", "BUYER", "IN", "Wo ist mein Paket?", None)
+        job = ReplyJob(store_id="STORE_A", conversation_id=conv.id, anchor_source_message_id=m.ebay_message_id,
+                       state=JobState.REVIEW_REQUIRED, decision_reasons=reasons)
+        db.add(job)
+        db.flush()
+        db.add(Draft(job_id=job.id, run_generation=1, conversation_row_version=conv.row_version, text="Entwurf",
+                     language=language, intents=intents, review_reasons=reasons))
+        t = LogisticsTicket(io_code=f"CJN{key}", reference_no=f"03-00000-0000{key}", tracking_no=f"N{key}",
+                            conversation_id=conv.id, store_id="STORE_A", submitted_at=utcnow())
+        db.add(t)
+        db.flush()
+        return conv, job, t
+
+    with session_scope() as db:
+        conv, job, t = setup("1", "EBAY_DE", ["shipping_status"], ["MODEL_REQUESTED_HUMAN", "TRACKING_STALLED"])
+        assert followup.send_submit_notice(db, [t]) == "SENT"
+        msg = db.scalars(select(Message).where(Message.conversation_id == conv.id, Message.sender_role == "SELLER")).one()
+        assert msg.body.startswith("Vielen Dank") and "Logistik-Team" in msg.body and msg.zh_translation.startswith("感谢")
+        assert job.state == JobState.SENT and t.notice_status == "SENT" and t.notice_sent_at
+        assert followup.send_submit_notice(db, [t]) == "已发过"  # 不重复发
+
+        _, job2, t2 = setup("2", "EBAY_GB", ["shipping_status", "fitment"], ["MODEL_REQUESTED_HUMAN"], language="en")
+        assert followup.send_submit_notice(db, [t2]).startswith("买家还问了其他问题")
+        assert job2.state == JobState.REVIEW_REQUIRED and t2.notice_sent_at is None
+
+        _, job3, t3 = setup("3", "EBAY_GB", ["shipping_status"], ["INVOICE_EMAIL_RECEIVED"], language="en")
+        assert followup.send_submit_notice(db, [t3]).startswith("还有其他需人工的原因")
+
+        conv4, _, t4 = setup("4", "EBAY_FR", ["delivery_delay"], ["TRACKING_RESHIP_REVIEW"], language=None)
+        assert followup.send_submit_notice(db, [t4]) == "SENT"  # 草稿没写语言：按站点用法语
+        body = db.scalars(select(Message.body).where(Message.conversation_id == conv4.id, Message.sender_role == "SELLER")).one()
+        assert body.startswith("Merci")
+        monkeypatch.setattr(get_settings(), "logistics_ticket_submit_notice", False)
+        _, _, t5 = setup("5", "EBAY_IT", ["shipping_status"], [], language="it")
+        assert followup.send_submit_notice(db, [t5]).startswith("未开启")
+    for lang, text in followup.NOTICE_TEXT.items():  # 固定话术本身要能通过合规检查
+        from app.guards.compliance import ComplianceChecker
+
+        assert ComplianceChecker().check(text).result != "BLOCK", lang

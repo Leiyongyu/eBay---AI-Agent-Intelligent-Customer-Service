@@ -52,7 +52,12 @@ def apply(db: Session, conv: Conversation, intents: list[str]) -> list[str]:
     if not get_settings().auto_tag_enabled or conv is None:
         return []
     wanted = list(dict.fromkeys(INTENT_TAGS[i] for i in intents or [] if i in INTENT_TAGS))
-    if not wanted:
+    return apply_names(db, conv, wanted, {"intents": intents})
+
+
+def apply_names(db: Session, conv: Conversation, wanted: list[tuple[str, str]], why: dict | None = None) -> list[str]:
+    """按标记名（和颜色）打标记，规则同 apply：开关、手动去掉过的不再打、删掉过的标记项不再建。"""
+    if not get_settings().auto_tag_enabled or conv is None or not wanted:
         return []
     removed = {(d or {}).get("tag_id") for d in db.scalars(select(AuditEvent.detail).where(
         AuditEvent.action == "CONVERSATION_UNMARKED", AuditEvent.conversation_id == conv.id))}
@@ -68,6 +73,6 @@ def apply(db: Session, conv: Conversation, intents: list[str]) -> list[str]:
         added.append(name)
     if added:
         db.add(AuditEvent(actor=ACTOR, action="CONVERSATION_AUTO_TAGGED", store_id=conv.store_id,
-                          conversation_id=conv.id, detail={"tags": added, "intents": intents}))
+                          conversation_id=conv.id, detail={"tags": added, **(why or {})}))
         db.flush()
     return added

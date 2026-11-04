@@ -86,3 +86,22 @@ def test_auto_tags_switch_off(client, monkeypatch):
     config.get_settings.cache_clear()
     with session_scope() as db:
         assert auto_tags.apply(db, db.get(Conversation, conv("STORE_A", "T4")), ["fitment"]) == []
+
+
+def test_situation_label_from_draft(client):
+    """AI 起草时给出的会话阶段和一句话概括存到会话上，列表、详情里显示，可按阶段筛选和计数。"""
+    from test_generate_draft import make_conversation
+    from test_pipeline import draft_json, use_fake_llm
+    from app.worker import worker
+
+    cid = make_conversation(["BUYER"])
+    use_fake_llm(draft_json(situation_stage="aftersales", situation_zh="收到破损件，  要求补发，等买家发照片确认破损位置"))
+    assert client.post(f"/internal/conversations/{cid}/generate-draft").status_code == 200
+    worker.run_once()
+    s = client.get(f"/internal/conversations/{cid}").json()["conversation"]["situation"]
+    assert s["stage"] == "aftersales" and s["label"] == "收到破损件， 要求补发，等买家发照片确认破损位置"[:24]
+    ids = lambda stage: {i["id"] for i in client.get("/internal/conversations", params={"group": "all", "stage": stage}).json()}
+    assert cid in ids("aftersales") and cid not in ids("presale")
+    card = next(i for i in client.get("/internal/conversations", params={"group": "all"}).json() if i["id"] == cid)
+    assert card["situation"]["stage"] == "aftersales"
+    assert client.get("/internal/conversations/filter-counts").json()["stages"]["aftersales"] == 1

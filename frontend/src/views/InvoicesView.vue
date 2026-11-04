@@ -274,7 +274,7 @@ onUnmounted(() => window.removeEventListener('hashchange', fromHash))
             <el-table-column label="订单" min-width="130">
               <template #default="{ row }">
                 {{ row.order_id || '待选' }}
-                <div class="muted small">{{ row.invoice_type === 'VAT' ? '要增值税发票' : row.invoice_type === 'NORMAL' ? '要普通发票' : '种类未问清' }}</div>
+                <div class="muted small">{{ row.invoice_type === 'VAT' ? '要增值税发票（转人工）' : '普通发票' }}</div>
               </template>
             </el-table-column>
             <el-table-column label="发票" min-width="180">

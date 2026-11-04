@@ -310,3 +310,11 @@ mark.review {
 .el-empty {
   --el-empty-description-margin-top: 12px;
 }
+
+/* 会话卡片和会话头部需要人工审核的状态：深红实底白字，一眼看到 */
+.el-tag.el-tag.review-hot {
+  --el-tag-bg-color: #a8071a;
+  --el-tag-border-color: #a8071a;
+  --el-tag-text-color: #fff;
+  font-weight: 600;
+}

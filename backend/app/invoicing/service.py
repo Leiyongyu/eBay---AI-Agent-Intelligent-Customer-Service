@@ -2,7 +2,9 @@
 
 - 每次生成的 PDF 都写进 INVOICE_DIR/<店铺>/<年份>/<发票号>.pdf 并记 SHA-256，开出后不改；开错了作废，号码和文件保留。
 - 订单数据只从 eBay 读取；真实 eBay 会话只能给本会话买家自己的订单开票。
-- 发给买家前必须人工审核（工作台“审核并发送”）；INVOICE_MAIL_ENABLED=false 时只记为模拟发送。
+- 只开普通发票（和 eBay 订单单据一样）；买家要增值税发票的转人工，系统不生成。
+- INVOICE_AUTO_SEND=true 时普通发票不审核：买家给了邮箱、订单能确定就自动生成并直接发出；否则在发票页审核后发送。
+- INVOICE_MAIL_ENABLED=false 时只记为模拟发送；INVOICE_TEST_RECIPIENT 填了时所有发票邮件改发到测试邮箱。
 """
 from __future__ import annotations
 
@@ -37,6 +39,10 @@ KIND_LABELS = {"NORMAL": "普通发票", "VAT": "增值税发票"}
 # 买家提到这些词时，建议开增值税发票（公司买家、要税号、要列明增值税）
 VAT_WORDS = re.compile(r"\b(mwst|ust|ust-?id\w*|umsatzsteuer\w*|mehrwertsteuer\w*|steuer\s*nummer|steuersatz|vat|iva|tva|"
                        r"firma|company|gewerbe|b2b|netto)\b|增值税|税号|税率|公司", re.I)
+
+
+AUTO_ACTOR = "AI（自动开票）"
+VAT_NOTE = "买家要增值税发票：系统不开增值税发票，请人工开具后发给买家"
 
 
 def suggest_type(texts: list[str]) -> str | None:
@@ -131,7 +137,7 @@ def seller_info(db: Session, store_id: str, kind: str) -> tuple[dict, int, list[
         notes.append(f"读取店铺 eBay 注册资料失败（{e}），抬头用开票主体里填的")
     if reg and (reg.get("name") or reg.get("contact")):
         info.update(name=reg.get("name") or reg.get("contact"), contact=reg.get("contact"),
-                    address=reg.get("address") or "", postcode=reg.get("postcode"))
+                    address=reg.get("address") or "", postcode=reg.get("postcode"), store_url=reg.get("store_url"))
     elif not info.get("name") or not info.get("address"):
         raise InvoiceError(502, "读不到店铺的 eBay 注册资料，开票主体里也没填公司名和地址，无法确定发票抬头")
     return info, issuer.id if issuer else 0, notes
@@ -140,9 +146,10 @@ def seller_info(db: Session, store_id: str, kind: str) -> tuple[dict, int, list[
 def issue(db: Session, *, store_id: str, order_id: str, actor: str, conversation: Conversation | None = None,
           request: InvoiceRequest | None = None, language: str | None = None, buyer_company: str | None = None,
           buyer_vat: str | None = None, order: dict | None = None, kind: str | None = None) -> Invoice:
-    """生成发票并留底。kind：NORMAL 普通发票 / VAT 增值税发票；不填按申请里买家要的，再不行开普通发票。
-    order 只给测试注入；正式从 eBay 读。"""
-    kind = kind or (request.invoice_type if request is not None else None) or "NORMAL"
+    """生成普通发票并留底。增值税发票系统不再生成（转人工开具）。order 只给测试注入；正式从 eBay 读。"""
+    kind = kind or "NORMAL"
+    if kind == "VAT":
+        raise InvoiceError(409, "系统不再生成增值税发票：买家要增值税发票的请人工开具后发给买家")
     order_id = (order_id or "").strip()
     if not order_id:
         raise InvoiceError(422, "请填写订单号")
@@ -220,12 +227,14 @@ def send(db: Session, inv: Invoice, email: str, actor: str) -> Invoice:
     if hashlib.sha256(pdf).hexdigest() != inv.sha256:
         raise InvoiceError(409, "留底的 PDF 文件不见了或被改动过，请重新生成")
     s = get_settings()
-    msg = mailer.compose(to=email, number=inv.number, order_id=inv.order_id, language=inv.language,
+    test_to = (s.invoice_test_recipient or "").strip()
+    to = test_to if test_to and mailer.valid_email(test_to) else email  # 测试期改发到测试邮箱
+    msg = mailer.compose(to=to, number=inv.number, order_id=inv.order_id, language=inv.language,
                          sign=s.invoice_mail_from_name or ((inv.snapshot or {}).get("seller") or {}).get("name") or "",
                          pdf=pdf,
                          show_number=inv.kind == "VAT")
     simulated = bool(s.invoice_mail_not_ready_reasons())
-    inv.sent_to, inv.sent_by = email[:200], actor[:64]
+    inv.sent_to, inv.sent_by = to[:200], actor[:64]
     if simulated:
         inv.status, inv.sent_at, inv.send_error = InvoiceStatus.SIMULATED, utcnow(), None
     else:
@@ -240,8 +249,9 @@ def send(db: Session, inv: Invoice, email: str, actor: str) -> Invoice:
             req.status, req.updated_at = InvoiceRequestStatus.DONE, utcnow()
     db.add(AuditEvent(actor=actor[:64], action="INVOICE_SENT" if inv.status != InvoiceStatus.SEND_FAILED
                       else "INVOICE_SEND_FAILED", store_id=inv.store_id, conversation_id=inv.conversation_id,
-                      detail={"number": inv.number, "to": mask_email(email), "simulated": simulated,
-                              "error": inv.send_error}))
+                      detail={"number": inv.number, "to": mask_email(to), "simulated": simulated,
+                              "error": inv.send_error,
+                              **({"buyer_email": mask_email(email)} if to != email else {})}))
     db.flush()
     return inv
 
@@ -278,6 +288,8 @@ def ensure_waiting(db: Session, conv: Conversation, *, order_candidates: list[st
                          status=InvoiceRequestStatus.WAITING_EMAIL,
                          order_id=order_candidates[0] if len(order_candidates) == 1 else None,
                          invoice_type=suggest_type(list(buyer_texts)))
+    if req.invoice_type == "VAT":
+        req.note = VAT_NOTE
     db.add(req)
     db.add(AuditEvent(actor="agent", action="INVOICE_REQUESTED", store_id=conv.store_id, conversation_id=conv.id,
                       detail={"status": req.status, "orders": len(order_candidates)}))
@@ -286,12 +298,17 @@ def ensure_waiting(db: Session, conv: Conversation, *, order_candidates: list[st
 
 
 def record_request(db: Session, conv: Conversation, email: str, *, order_candidates: list[str],
-                   source: str = "agent", buyer_texts: list[str] = ()) -> InvoiceRequest:
-    """登记（或更新）会话的发票申请；只有一笔订单且开启自动生成时，先把发票生成好等人工审核。"""
+                   source: str = "agent", buyer_texts: list[str] = (), trigger: str | None = None) -> InvoiceRequest:
+    """登记（或更新）会话的发票申请；只有一笔订单且开启自动生成时，先把发票生成好等人工审核。
+    发票可以重复开：买家每要一次（trigger = 这次的买家消息）就开一张新的并发出；同一条消息重跑（重新生成草稿等）不重复开、不重复发。"""
     req = db.scalar(select(InvoiceRequest).where(InvoiceRequest.conversation_id == conv.id))
     if req is None:
         req = InvoiceRequest(conversation_id=conv.id, store_id=conv.store_id, source=source)
         db.add(req)
+    elif trigger and req.trigger_message_id == trigger and req.status == InvoiceRequestStatus.DONE:
+        return req  # 这条买家消息已经开票发出过了
+    new_ask = not trigger or req.trigger_message_id != trigger
+    req.trigger_message_id = trigger or req.trigger_message_id
     req.email, req.status, req.updated_at = email[:200], InvoiceRequestStatus.OPEN, utcnow()
     req.invoice_type = req.invoice_type or suggest_type(list(buyer_texts))
     db.add(AuditEvent(actor=source, action="INVOICE_REQUESTED", store_id=conv.store_id, conversation_id=conv.id,
@@ -301,9 +318,15 @@ def record_request(db: Session, conv: Conversation, email: str, *, order_candida
         req.order_id = order_candidates[0]
     elif len(order_candidates) > 1:
         req.note = "买家有多笔订单，请选择要开票的订单"
-    if req.order_id and get_settings().invoice_auto_generate:
+    s = get_settings()
+    if req.invoice_type == "VAT":  # 增值税发票：系统不开，交人工
+        req.note = VAT_NOTE
+        db.flush()
+        return req
+    if req.order_id and (s.invoice_auto_generate or s.invoice_auto_send):
         has = db.scalar(select(Invoice.id).where(Invoice.request_id == req.id, Invoice.status != InvoiceStatus.VOID))
-        if not has:
+        pending = db.scalar(select(Invoice.id).where(Invoice.request_id == req.id, Invoice.status == InvoiceStatus.ISSUED))
+        if pending is None and (new_ask or not has):  # 已有生成好没发出的就用它；买家再要一次就再开一张
             try:
                 with db.begin_nested():
                     issue(db, store_id=conv.store_id, order_id=req.order_id, actor="agent", conversation=conv,
@@ -314,6 +337,16 @@ def record_request(db: Session, conv: Conversation, email: str, *, order_candida
             except Exception as e:  # noqa: BLE001 — 自动开票失败不能影响回复流程
                 log.exception("自动生成发票失败")
                 req.note = f"自动生成发票失败：{type(e).__name__}"
+    if s.invoice_auto_send and req.status == InvoiceRequestStatus.OPEN:
+        inv = db.scalar(select(Invoice).where(Invoice.request_id == req.id, Invoice.status == InvoiceStatus.ISSUED)
+                        .order_by(Invoice.id.desc()).limit(1))
+        if inv is not None:  # 普通发票不审核：直接发到买家邮箱（AI 的回复里会告诉买家已发出，请查收）
+            try:
+                send(db, inv, email, AUTO_ACTOR)
+            except InvoiceError as e:
+                req.note = f"自动发送发票失败：{e.message}"
+            if inv.status == InvoiceStatus.SEND_FAILED:
+                req.note = f"自动发送发票失败：{inv.send_error}"
     db.flush()
     return req
 

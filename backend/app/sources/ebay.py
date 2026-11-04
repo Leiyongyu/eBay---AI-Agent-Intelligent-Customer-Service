@@ -243,7 +243,9 @@ class EbaySource(BusinessSource):
             raise SourceNotAvailable("eBay 没有返回店铺注册地址")
         street = list(dict.fromkeys(x.strip() for x in (_t(a, "e:Street1"), _t(a, "e:Street2"), _t(a, "e:Street")) if x and x.strip()))  # Street 常与 Street1 重复
         city = ", ".join(x for x in (_t(a, "e:CityName"), _t(a, "e:StateOrProvince")) if x)
+        si = u.find("e:SellerInfo", NS)
         return {"name": _t(a, "e:CompanyName") or _t(a, "e:Name"), "contact": _t(a, "e:Name"),
+                "store_url": _t(si, "e:StoreURL") if si is not None else None,  # 发票上的店铺链接和二维码
                 "address": "\n".join([*street, city, _t(a, "e:CountryName") or _t(a, "e:Country") or ""]).strip(),
                 "postcode": _t(a, "e:PostalCode"), "phone": _t(a, "e:Phone"),
                 "ebay_user_id": _t(u, "e:UserID")}
@@ -266,6 +268,23 @@ class EbaySource(BusinessSource):
             self._api(store_id).get(f"/post-order/v2/{path}", {"limit": 200}, auth="IAF", marketplace=mk) or {}
         ).get(key) or [])
 
+    def _return_tracking(self, store_id: str, return_id, mk: str | None) -> dict:
+        """买家寄回的退货包裹：承运商、跟踪号、eBay 记录的投递状态（退货详情 FULL，只读）。没寄出时返回空。"""
+        if not return_id:
+            return {}
+        try:
+            d = self._api(store_id).get(f"/post-order/v2/return/{return_id}", {"fieldgroups": "FULL"},
+                                        auth="IAF", marketplace=mk) or {}
+        except SourceNotAvailable:
+            return {}
+        trk = ((d.get("detail") or {}).get("returnShipmentInfo") or {}).get("shipmentTracking") or {}
+        if not trk.get("trackingNumber"):
+            return {}
+        return {"return_tracking": {"carrier": trk.get("carrierName") or trk.get("carrierEnum"),
+                                    "tracking_number": trk.get("trackingNumber"),
+                                    "delivery_status": trk.get("deliveryStatus"),
+                                    "delivered_at": _v(trk.get("actualDeliveryDate"))}}
+
     def find_cases(self, store_id, order_ids):
         out = []
         for order_id in order_ids:
@@ -282,7 +301,8 @@ class EbaySource(BusinessSource):
                             "status": "CLOSED" if _closed(r.get("state"), r.get("status")) else "OPEN",
                             "opened_at": _v((r.get("creationInfo") or {}).get("creationDate")),
                             "due_by": _v((r.get("sellerResponseDue") or {}).get("respondByDate")),
-                            "last_action": f"{r.get('state')}/{r.get('status')}"})
+                            "last_action": f"{r.get('state')}/{r.get('status')}",
+                            **self._return_tracking(store_id, r.get("returnId"), mk)})
             for path, key, ctype, status_key, id_key in (
                     ("inquiry/search", "members", "INR", "inquiryStatusEnum", "inquiryId"),
                     ("casemanagement/search", "members", "CASE", "caseStatusEnum", "caseId")):

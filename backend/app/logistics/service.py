@@ -4,7 +4,10 @@
 - 只在“查包裹”工具被调用（买家问物流）时才注册，不批量注册订单；
 - 同一个物流号只注册一次（tracking_numbers.number 唯一），轨迹在缓存时长内直接复用；
 - 每天新注册数量有上限（TRACK17_REGISTER_DAILY_LIMIT），超了只返回 eBay/谷仓的基本信息；
-- 承运商名称能精确对上 17TRACK 运输商代码时明确传入，避免识别错白扣一单。
+- 承运商名称能精确对上 17TRACK 运输商代码时明确传入，避免识别错白扣一单；
+- 谷仓已回传妥投时间的包裹不注册（已签收，不用查轨迹）；
+- 剩余额度低于 TRACK17_MIN_QUOTA 时不再注册新物流号（额度每小时查一次，已注册的照常免费查）。
+没查成轨迹的包裹带上 tracking_unsupported（承运商不支持）/ tracking_limited（额度或当天上限），判断时不算断更。
 """
 from __future__ import annotations
 
@@ -23,6 +26,19 @@ from .track17 import ALREADY_REGISTERED, Track17Client, Track17Error, carrier_co
 
 log = logging.getLogger(__name__)
 NOT_YET = (None, "NotFound")  # 刚注册还没结果：只缓存 5 分钟
+LIMIT_NOTE = "暂不查轨迹"
+_quota: dict = {"remain": None, "at": 0.0}
+
+
+def _quota_remain(client: Track17Client) -> int | None:
+    """17TRACK 剩余额度（每小时查一次，查额度不扣费）；查不到返回 None（不拦）。"""
+    if time.monotonic() - _quota["at"] > 3600:
+        try:
+            _quota["remain"] = int((client.quota() or {}).get("quota_remain"))
+        except Exception:  # noqa: BLE001  查不到额度就不拦
+            _quota["remain"] = None
+        _quota["at"] = time.monotonic()
+    return _quota["remain"]
 
 
 def _clean(number: str | None) -> str:
@@ -62,7 +78,10 @@ def refresh(db: Session, rec: TrackingNumber, *, client: Track17Client, s: Setti
         if rec.register_error:
             return f"17TRACK 无法跟踪该物流号：{rec.register_error}"
         if _registered_today(db, now) >= s.track17_register_daily_limit:
-            return f"今天新查询的物流号已达上限（{s.track17_register_daily_limit} 个），暂不查轨迹"
+            return f"今天新查询的物流号已达上限（{s.track17_register_daily_limit} 个），{LIMIT_NOTE}"
+        remain = _quota_remain(client)
+        if remain is not None and remain < s.track17_min_quota:
+            return f"17TRACK 剩余额度 {remain} 单，低于 {s.track17_min_quota}，{LIMIT_NOTE}（请到 17TRACK 充值）"
         reg = dict(item, auto_detection=True, **({"order_no": order_id} if order_id else {}),
                    **({"ship_date": ship_date} if ship_date else {}))
         accepted, rejected = client.register([reg])
@@ -131,9 +150,14 @@ def lookup(db: Session, store_id: str, order_id: str, ebay_packages: list[dict],
     if not use_17:
         return {"packages": pkgs, "warehouse": whs, "notes": notes}
     client = track or Track17Client(s)
+    by_code = {w.get("order_code"): w for w in whs}
     for p in tracked:
         n = p["tracking_number"]
         rec = db.scalar(select(TrackingNumber).where(TrackingNumber.number == n))
+        wh = by_code.get(p.get("warehouse_order"))
+        if (rec is None or not rec.registered_at) and wh and wh.get("dscan_time"):
+            p["tracking_note"] = "承运商已回传妥投时间，没有再查 17TRACK 轨迹（省额度）"
+            continue
         if rec is None:
             rec = TrackingNumber(number=n, store_id=store_id, order_id=order_id, source=p["source"],
                                  carrier_name=p.get("carrier"), carrier_code=carrier_code(p.get("carrier")))
@@ -147,6 +171,10 @@ def lookup(db: Session, store_id: str, order_id: str, ebay_packages: list[dict],
                 note = f"17TRACK 查询失败：{e}"
             if note:
                 p["tracking_note"] = note
+        if rec.register_error and not rec.registered_at:
+            p["tracking_unsupported"] = True  # 17TRACK 不支持这个承运商：只能请买家到承运商官网查
+        elif not rec.registered_at and LIMIT_NOTE in (p.get("tracking_note") or ""):
+            p["tracking_limited"] = True
         p["tracking"] = rec.track
         p["tracking_fetched_at"] = rec.fetched_at.isoformat(timespec="seconds") + "Z" if rec.fetched_at else None
     return {"packages": pkgs, "warehouse": whs, "notes": notes}

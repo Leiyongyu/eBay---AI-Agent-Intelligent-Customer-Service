@@ -27,7 +27,7 @@ from ..guards.claims import check_claims
 from ..guards.compliance import ComplianceChecker
 from ..guards.language import language_mismatch, reply_language_hint
 from ..intents import intent_catalog_text
-from ..invoicing.service import detect_invoice_email, ensure_waiting, record_request
+from ..invoicing.service import INVOICE_WORDS, detect_invoice_email, ensure_waiting, record_request, suggest_type
 from ..knowledge.retriever import estimate_tokens, load_full_context, render_clause, retrieve
 from ..knowledge.vector_index import RagNotReady
 from ..memory.service import build_recent
@@ -41,8 +41,10 @@ from ..models import (
     Conversation,
     Draft,
     ImageObservation,
+    InvoiceRequestStatus,
     JobState,
     KnowledgeChunk,
+    LogisticsTicket,
     Message,
     MessageAttachment,
     ReplyJob,
@@ -390,6 +392,7 @@ def build_messages(state: AgentState, deps: AgentDeps) -> list[BaseMessage]:
         *(["物流查件：包裹轨迹多天未更新、轨迹异常、或已签收但买家说没收到时，系统会自动向仓库和承运商发起查件。"
            "这时告诉买家我们已经联系承运商核实包裹情况，有结果会第一时间通知；不给具体时间，不承诺退款、补发或赔偿"]
           if deps.settings.logistics_ticket_auto_submit and deps.settings.goodcang_ready else []),
+        *_invoice_context(state, deps),
         "</runtime_context>",
         "<tool_observations>",
         json.dumps(observations, ensure_ascii=False, default=str),
@@ -591,7 +594,8 @@ RESHIP_TYPE = "物流问题需判断补发"
 _LOGISTICS_HUMAN = {"TRACKING_RESHIP_REVIEW": RESHIP_TYPE, "RESHIP_REQUESTED": RESHIP_TYPE, "TRACKING_STALLED": RESHIP_TYPE,
                     "TRACKING_LOST_DAMAGED": RESHIP_TYPE, "EMPTY_PARCEL": RESHIP_TYPE,
                     "TRACKING_NOT_FOUND": "物流异常/未收到", "TRACKING_EXCEPTION": "物流异常/未收到",
-                    "TRACKING_DELIVERED_NOT_RECEIVED": "物流异常/未收到"}
+                    "TRACKING_DELIVERED_NOT_RECEIVED": "物流异常/未收到", "TRACKING_PICKUP_OVERDUE": "物流异常/未收到",
+                    "SHIP_LATE": "延迟发货"}
 
 
 def _mark_logistics_aftersales(db, job, state: AgentState, reasons: list[str]) -> str | None:
@@ -633,6 +637,27 @@ _EMPTY_PARCEL = re.compile(
     r"colis\s+vide|carton\s+vide|pacco\s+vuoto|scatola\s+vuota|paquete\s+vac[ií]o|caja\s+vac[ií]a|空包|空箱|空盒|里面没有东西|什么都没有", re.I)
 
 
+def _ship_late(state: AgentState) -> bool:
+    """超过 eBay 承诺的最晚发货日还没发货（订单未发货/部分发货，且查包裹没有任何跟踪号或谷仓还在待发货）。"""
+    order = next((o["data"] for o in state["observations"] if o["tool_name"] == "get_authorized_order_context"
+                  and o["status"] == "FOUND" and isinstance(o.get("data"), dict)), None)
+    if not order or order.get("order_status") not in ("NOT_STARTED", "IN_PROGRESS") or not order.get("ship_by_date"):
+        return False
+    try:
+        due = datetime.fromisoformat(order["ship_by_date"].replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if due >= datetime.now(timezone.utc):
+        return False
+    for o in state["observations"]:
+        if o["tool_name"] == "get_package_status" and isinstance(o.get("data"), (dict, list)):
+            rows = o["data"] if isinstance(o["data"], list) else [o["data"]]
+            if any(isinstance(r, dict) and r.get("tracking_number") and (r.get("assessment") or {}).get("stage") != "NOT_SHIPPED"
+                   for r in rows):
+                return False  # 已经有在途的包裹（eBay 还没同步发货状态）
+    return True
+
+
 def _tracking_problems(state: AgentState, buyer_text: str) -> list[str]:
     """物流需要人工的情况（规则见 logistics/assess.py）：查不到、异常、断更、超时需判断补发、已签收但买家说没收到；
     买家自己提出补发、重发、换货也交人工。"""
@@ -641,6 +666,8 @@ def _tracking_problems(state: AgentState, buyer_text: str) -> list[str]:
         out.append("RESHIP_REQUESTED")
     if _EMPTY_PARCEL.search(buyer_text or ""):
         out.append("EMPTY_PARCEL")
+    if _ship_late(state):
+        out.append("SHIP_LATE")
     for o in state["observations"]:
         if o["tool_name"] != "get_package_status" or not isinstance(o.get("data"), (dict, list)):
             continue
@@ -651,7 +678,8 @@ def _tracking_problems(state: AgentState, buyer_text: str) -> list[str]:
                 out.append(a["reason_code"])
             elif t.get("status") in TRACK_RISKY_STATUS:
                 out.append("TRACKING_EXCEPTION")
-            if t.get("status") == "Delivered" and _NOT_RECEIVED.search(buyer_text or ""):
+            delivered = t.get("status") == "Delivered" or a.get("stage") == "DELIVERED"  # 含谷仓回传妥投
+            if delivered and _NOT_RECEIVED.search(buyer_text or ""):
                 out.append("TRACKING_DELIVERED_NOT_RECEIVED")
     return list(dict.fromkeys(out))
 
@@ -673,11 +701,24 @@ def validate_output(state: AgentState, deps: AgentDeps):
     other_cited: set[str] = set()
     if parsed and language_mismatch((snap["buyer_texts"] or [""])[-1], parsed["reply_text"]):
         problems.append("LANGUAGE_MISMATCH")
-    # 发票场景里买家发来了邮箱：登记发票申请，这次回复交人工（开票、审核后发邮件）
-    invoice_email = detect_invoice_email(
-        snap["buyer_texts"], [m["text"] or "" for m in state["memory"]["messages"] if not m["in_task"]],
-        parsed["intents"] if parsed else [])
-    if invoice_email:
+    # 发票：买家要增值税发票的转人工；普通发票买家给了邮箱时，开了自动发送就自动开票发出（提示词里已告诉模型），否则交人工
+    fresh_texts, other_texts = _invoice_texts(state, deps)  # 已经开票发出过的来信不再触发开票
+    invoice_email = detect_invoice_email(fresh_texts, other_texts, parsed["intents"] if parsed else [])
+    inv_mode = _invoice_mode(state, deps, parsed["intents"] if parsed else [])
+    if not invoice_email and inv_mode == "AUTO_SEND" and parsed and _asks_invoice_again(state, deps, parsed["intents"]):
+        invoice_email = _remembered_invoice_email(state)  # 买家再要一次发票、这次没写邮箱：发到他之前给过的邮箱
+    # 订单唯一才会真的自动开票发出；多笔订单或查不到订单时回复是请买家给订单号（提示词里已说明），不算失败
+    invoice_orders = len(_order_candidates(state))
+    invoice_auto = bool(invoice_email) and inv_mode == "AUTO_SEND" and invoice_orders == 1
+    if inv_mode == "VAT":
+        problems.append("INVOICE_VAT_HUMAN")
+    elif invoice_auto:
+        pass  # 订单唯一：落库时自动开票发出，不用审核
+    elif invoice_email and inv_mode == "AUTO_SEND":
+        # 订单不唯一：发票申请照样登记（备注“请选择订单”）。回复应是追问订单号（clarify）；模型没照做（比如说成“已发出”）就交人工
+        if not parsed or parsed["action"] != "clarify":
+            problems.append("INVOICE_NEEDS_ORDER")
+    elif invoice_email:
         problems.append("INVOICE_EMAIL_RECEIVED")
     problems += _tracking_problems(state, "\n".join(snap["buyer_texts"]))
     if parsed:
@@ -730,6 +771,8 @@ def validate_output(state: AgentState, deps: AgentDeps):
         "reasons": gate.reasons,
         "rule_version": gate.rule_version,
         "invoice_email": invoice_email,
+        "invoice_auto": invoice_auto,
+        "invoice_vat": inv_mode == "VAT",
     }
     return {"route": "persist", "result": result, "problems": problems,
             "_detail": {"decision": gate.decision, "risk": gate.risk_level, "reasons": gate.reasons}}
@@ -790,7 +833,11 @@ def persist_candidate(state: AgentState, deps: AgentDeps):
     detail = {"has_draft": res["has_draft"]}
     if res.get("invoice_email"):
         detail["invoice_request"] = _invoice_request(db, job, state, res["invoice_email"])
-    elif res["has_draft"] and "invoice_vat" in (res["draft"].get("intents") or []):
+        if res.get("invoice_auto") and detail["invoice_request"] != "AUTO_SENT":
+            _force_review(db, job, run, res, "INVOICE_AUTO_FAILED")  # 回复里说了“已发出”，没发成就不能自动发
+        elif detail["invoice_request"] == "AUTO_SENT":
+            _invoice_grounded(db, job, run, res)
+    elif res["has_draft"] and ("invoice_vat" in (res["draft"].get("intents") or []) or res.get("invoice_vat")):
         detail["invoice_request"] = _invoice_waiting(db, job, state)
     try:  # 谷仓查件单（起草、按配置直接提交）、补发库存：失败只记录，不影响草稿落库
         with db.begin_nested():
@@ -800,6 +847,11 @@ def persist_candidate(state: AgentState, deps: AgentDeps):
         follow = {"error": type(e).__name__}
     if follow:
         detail["logistics_followup"] = follow
+    if res["has_draft"]:  # 会话情况标签：AI 看整段会话给出的阶段和一句话概括，列表里醒目显示
+        conv = db.get(Conversation, job.conversation_id)
+        stage, label = res["draft"].get("situation_stage"), (res["draft"].get("situation_zh") or "").strip()
+        if conv is not None and (label or stage not in (None, "other")):
+            conv.situation_stage, conv.situation_label, conv.situation_at = stage or "other", label or None, utcnow()
     if res["has_draft"]:  # 按问题类型自动打标记：失败不影响草稿落库
         try:
             with db.begin_nested():
@@ -814,11 +866,27 @@ def persist_candidate(state: AgentState, deps: AgentDeps):
     marked = _mark_logistics_aftersales(db, job, state, [r for r in res["reasons"] if r not in handled])
     if marked:
         detail["aftersales_marked"] = marked
+        logistics_followup.append_note(db.get(Conversation, job.conversation_id), follow)  # 补发库存、查件单写进备注
+    notice = _submit_notice(db, follow)
+    if notice:
+        detail["submit_notice"] = notice
+        if notice == "SENT":  # 本次自动提交了查件单：安抚消息就是这次的回复，任务已结案
+            return {"_status": "AUTO_SENT", "_detail": detail}
     if job.state == JobState.AUTO_ELIGIBLE and res["has_draft"]:
         detail["auto_send"] = _auto_send(db, job)
         if detail["auto_send"] == "SENT":
             return {"_status": "AUTO_SENT", "_detail": detail}
     return {"_status": job.state, "_detail": detail}
+
+
+def _submit_notice(db, follow: dict | None) -> str | None:
+    """本次回复流程里自动提交了查件单：给买家发固定的安抚消息（已转物流同事、已向承运商查询、有结果马上通知），
+    代替 AI 草稿作为这次的回复；买家还问了别的或有其他需人工的原因时不发（见 followup.send_submit_notice）。"""
+    codes = [t["io_code"] for t in (follow or {}).get("tickets") or [] if t.get("submitted")]
+    if not codes:
+        return None
+    rows = db.scalars(select(LogisticsTicket).where(LogisticsTicket.io_code.in_(codes))).all()
+    return logistics_followup.send_submit_notice(db, list(rows), respect_claim=True)
 
 
 def _apply_logistics_auto(db, job: ReplyJob, generation: int, res: dict, follow: dict | None) -> set[str]:
@@ -855,11 +923,154 @@ def _invoice_request(db, job: ReplyJob, state: AgentState, email: str) -> str:
     try:
         with db.begin_nested():
             req = record_request(db, db.get(Conversation, job.conversation_id), email,
-                                 order_candidates=_order_candidates(state), buyer_texts=state["snapshot"]["buyer_texts"])
+                                 order_candidates=_order_candidates(state), buyer_texts=state["snapshot"]["buyer_texts"],
+                                 trigger=job.anchor_source_message_id)
+        if req.status == InvoiceRequestStatus.DONE:
+            return "AUTO_SENT"
+        if req.invoice_type == "VAT":
+            return "VAT_HUMAN"
         return "INVOICE_READY" if req.order_id and not req.note else "NEEDS_ORDER"
     except Exception:  # noqa: BLE001 — 登记失败不影响草稿落库，人工仍可在会话里手动开票
         log.exception("登记发票申请失败")
         return "FAILED"
+
+
+def _fresh_buyer_texts(state: AgentState, deps: AgentDeps | None) -> list[str]:
+    """本次任务的买家来信里还没开过票的那些。之前没回复的消息会并进这次任务，其中已经触发开票发出的那条（及更早的）
+    不再算，免得“谢谢，收到了”又把旧邮箱拿出来再开一张。同一条消息重跑（最后一条就是上次触发的）不截，落库时按已发过处理。"""
+    from ..models import InvoiceRequest
+
+    snap = state["snapshot"]
+    ids, texts = snap.get("source_message_ids") or [], snap["buyer_texts"]
+    conv_id = getattr(getattr(deps, "run", None), "conversation_id", None)
+    if not ids or conv_id is None or getattr(deps, "db", None) is None:
+        return texts
+    row = deps.db.execute(select(InvoiceRequest.trigger_message_id, InvoiceRequest.status)
+                          .where(InvoiceRequest.conversation_id == conv_id)).first()
+    if row and row[1] == "DONE" and row[0] in ids and row[0] != ids[-1]:
+        return texts[ids.index(row[0]) + 1:]
+    return texts
+
+
+def _invoice_texts(state: AgentState, deps: AgentDeps | None = None) -> tuple[list[str], list[str]]:
+    """（本次还没开过票的买家来信，其余全部消息：之前的聊天含店铺回复 + 本次里已开过票的那些）。"""
+    msgs = state["memory"]["messages"]
+    fresh = _fresh_buyer_texts(state, deps)
+    used = state["snapshot"]["buyer_texts"][:len(state["snapshot"]["buyer_texts"]) - len(fresh)]
+    return fresh, [m["text"] or "" for m in msgs if not m["in_task"]] + list(used)
+
+
+def _invoice_mode(state: AgentState, deps: AgentDeps, intents: list[str]) -> str | None:
+    """发票场景怎么处理：VAT 买家要增值税发票（转人工）/ AUTO_SEND 普通发票，买家给了邮箱就自动开票发出 / None 其他。
+    生成前（intents 为空，只看发票相关词）和校验时各算一次，两次结果一致才会自动发（提示词和实际动作对得上）。"""
+    buyer, history = _invoice_texts(state)
+    scene = any(INVOICE_WORDS.search(t or "") for t in [*buyer, *history])
+    if not scene:
+        return None
+    history_buyer = [m["text"] or "" for m in state["memory"]["messages"] if not m["in_task"] and m["role"] == "BUYER"]
+    if suggest_type([*buyer, *history_buyer]) == "VAT":
+        return "VAT"
+    return "AUTO_SEND" if deps.settings.invoice_auto_send else None
+
+
+def _remembered_invoice_email(state: AgentState) -> str | None:
+    """买家之前在这个会话里给过的邮箱（最近一个；含本次任务里已开过票的那些来信）。"""
+    from ..invoicing.mailer import EMAIL_RE
+
+    texts = [m["text"] or "" for m in state["memory"]["messages"] if not m["in_task"] and m["role"] == "BUYER"]
+    found = [m.group(0) for t in [*texts, *state["snapshot"]["buyer_texts"]] for m in EMAIL_RE.finditer(t or "")]
+    return found[-1] if found else None
+
+
+def _asks_invoice_again(state: AgentState, deps: AgentDeps | None, intents: list[str] | None) -> bool:
+    """这次是在（再）要发票：本次还没开过票的来信提到发票；校验时还要模型也判成发票意图、不是单纯道谢
+    （“谢谢，发票收到了”不再发）。"""
+    if any(INVOICE_WORDS.search(t or "") for t in _fresh_buyer_texts(state, deps)):
+        return intents is None or ("invoice_vat" in intents and "thanks_closing" not in intents)
+    if _waiting_order_choice(state, deps):  # 之前请买家选订单，这次买家回了订单号（来信里可能不再提“发票”）
+        return intents is None or set(intents) != {"thanks_closing"}
+    return False
+
+
+def _waiting_order_choice(state: AgentState, deps: AgentDeps | None) -> bool:
+    """会话里有发票申请在等买家选订单（给过邮箱、还没定订单、没发出）。"""
+    from ..models import InvoiceRequest
+
+    conv_id = getattr(getattr(deps, "run", None), "conversation_id", None)
+    if conv_id is None or getattr(deps, "db", None) is None:
+        return False
+    req = deps.db.scalar(select(InvoiceRequest).where(InvoiceRequest.conversation_id == conv_id))
+    return bool(req and req.status == "OPEN" and req.email and not req.order_id and req.invoice_type != "VAT")
+
+
+def _invoice_context(state: AgentState, deps: AgentDeps) -> list[str]:
+    """运行上下文里的发票做法（以此为准，知识库里“先问要哪种发票”的做法已停用）。"""
+    lines = ["发票：本店只开普通发票（和 eBay 订单单据一样，列明 eBay 代收代缴的增值税）。买家要发票时只请买家在 eBay 消息里回复接收发票的邮箱，"
+             "不用问要哪种发票（以此为准，知识库里“先问要普通发票还是含增值税发票”的做法已停用）。"
+             "买家明确要含增值税的发票（公司抬头、税号、单独列明增值税）时，告诉买家已转交同事开具，会通过邮件发送，不承诺具体时间。"
+             "发票可以重复开：买家再要发票就照常开具发出。回复里不要说“已经开过/之前已经发过”，也不要说“重新开具/补开/再开一张”，"
+             "只说发票已发到邮箱请查收"]
+    buyer, history = _invoice_texts(state, deps)
+    mode = _invoice_mode(state, deps, [])
+    if mode == "AUTO_SEND" and detect_invoice_email(buyer, history, []):
+        orders = _order_candidates(state)
+        if len(orders) == 1:  # 订单唯一：系统真的会开票发出，回复才能说“已发出”
+            sender = deps.settings.invoice_smtp_user
+            lines.append("买家这次发来了接收发票的邮箱：系统会自动开具普通发票并马上发到这个邮箱"
+                         + (f"（发件邮箱 {sender}）" if sender else "")
+                         + "。回复里告诉买家发票已经发到他提供的邮箱，请查收，找不到的话看一下垃圾邮件；不要复述买家的邮箱地址")
+        elif orders:
+            lines.append(f"买家这次发来了接收发票的邮箱，但买家有 {len(orders)} 笔订单（{'、'.join(orders[:5])}），"
+                         "系统不知道要开哪一笔，这次不会开票发出。回复里不要说发票已发出，请买家回复要开发票的订单号"
+                         "（可以列出这些订单号让买家选），收到后马上发到他提供的邮箱")
+        else:
+            lines.append("买家这次发来了接收发票的邮箱，但查不到买家的订单，这次不会开票发出。回复里不要说发票已发出，"
+                         "请买家回复要开发票的 eBay 订单号，收到后马上发到他提供的邮箱")
+    elif (mode == "AUTO_SEND" and _asks_invoice_again(state, deps, None) and _remembered_invoice_email(state)
+          and len(_order_candidates(state)) == 1):
+        lines.append("买家这次要发票（或回了之前请他选的订单号）没写邮箱，但之前在这个会话里给过接收邮箱："
+                     "如果买家这次是在要发票或回了订单号（不是道谢或确认收到），"
+                     "系统会马上开具普通发票发到他之前提供的邮箱，回复里说发票已发到他之前提供的邮箱，请查收，找不到看一下垃圾邮件，"
+                     "intents 要包含 invoice_vat；如果只是道谢或确认收到，系统不会再发，正常回复即可，不要说已发出")
+    elif mode == "AUTO_SEND" and any(INVOICE_WORDS.search(t or "") for t in buyer):
+        lines.append("买家要发票还没给邮箱：请买家回复接收发票的邮箱，收到后系统马上开具并发出（不要说同事开具、不要说无法保证时间）")
+    elif mode == "VAT":
+        lines.append("这位买家要的是含增值税的发票：系统不开，已转交同事人工开具。回复里告诉买家同事会开具并通过邮件发送；"
+                     "买家还没给接收邮箱的，请买家回复邮箱")
+    return lines
+
+
+def _invoice_grounded(db, job: ReplyJob, run, res: dict) -> None:
+    """发票已经真实发出：“已发到您的邮箱”这句话的依据就是这张发票（记进草稿依据），不再因“没引用知识库/查询结果”
+    （NO_KB_EVIDENCE）卡在审核。其他原因照旧。"""
+    from ..models import Invoice
+
+    inv = db.scalar(select(Invoice).where(Invoice.conversation_id == job.conversation_id, Invoice.sent_at.is_not(None))
+                    .order_by(Invoice.id.desc()).limit(1))
+    draft = db.scalar(select(Draft).where(Draft.job_id == job.id, Draft.run_generation == run.run_generation))
+    if inv is not None and draft is not None:
+        draft.evidence_ids = list(dict.fromkeys([*(draft.evidence_ids or []), f"invoice:{inv.number}"]))
+    if "NO_KB_EVIDENCE" not in res["reasons"]:
+        return
+    res["reasons"] = [r for r in res["reasons"] if r != "NO_KB_EVIDENCE"]
+    job.decision_reasons = res["reasons"]
+    if draft is not None:
+        draft.review_reasons = res["reasons"]
+    if not res["reasons"] and res["has_draft"]:
+        job.state, res["decision"] = JobState.AUTO_ELIGIBLE, "AUTO_ELIGIBLE"
+        if draft is not None:
+            draft.decision = "AUTO_ELIGIBLE"
+
+
+def _force_review(db, job: ReplyJob, run, res: dict, reason: str) -> None:
+    """落库后才发现要人工（如普通发票没能自动发出）：改回待审核。"""
+    res["reasons"] = [*res["reasons"], reason]
+    job.decision_reasons = res["reasons"]
+    job.state = JobState.REVIEW_REQUIRED
+    res["decision"] = "REVIEW_REQUIRED"
+    draft = db.scalar(select(Draft).where(Draft.job_id == job.id, Draft.run_generation == run.run_generation))
+    if draft is not None:
+        draft.review_reasons, draft.decision = res["reasons"], "REVIEW_REQUIRED"
 
 
 def _invoice_waiting(db, job: ReplyJob, state: AgentState) -> str:

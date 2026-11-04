@@ -231,6 +231,14 @@ def get_package_status(ctx: RuntimeContext, src: BusinessSource, args: OrderIdAr
         if wh:
             row["warehouse"] = wh
         row["assessment"] = assess({**p, "warehouse": wh}, tracking_enabled=tracking_on)
+        if row["assessment"].get("delivered_at") and (t or {}).get("status") != "Delivered":
+            # 17TRACK 查不到（USPS、Royal Mail 等）但承运商已向谷仓回传妥投：状态以妥投为准，别让模型按旧动态说“运输中”
+            row.update(tracking_status="已签收（承运商回传）", latest_event="Delivered（承运商回传的妥投扫描）",
+                       event_time=row["assessment"]["delivered_at"])
+        if row.get("tracking_number") and row.get("carrier"):  # 承运商官网：17TRACK 查不到时请买家自己到官网查
+            from ..ship_notices import carrier_link
+
+            row["carrier_website"] = carrier_link(row["carrier"], row["tracking_number"], ctx.marketplace_id)[1]
         if tickets:
             row["tickets"] = [x for x in tickets if x.get("io_code")]
         rows.append({k: v for k, v in row.items() if v not in (None, "", [])})
@@ -245,8 +253,14 @@ def get_case_status(ctx: RuntimeContext, src: BusinessSource, args: OrderIdArgs)
     cases = src.find_cases(ctx.store_id, [args.order_id])
     if not cases:
         return "NOT_FOUND", [], None, "该订单没有售后 case"
-    fields = ("case_type", "case_id", "order_id", "status", "opened_at", "due_by", "last_action")
-    rows = [{k: c.get(k) for k in fields} for c in cases]
+    fields = ("case_type", "case_id", "order_id", "status", "opened_at", "due_by", "last_action", "return_tracking")
+    rows = [{k: c.get(k) for k in fields if c.get(k) is not None} for c in cases]
+    for r in rows:  # 买家寄回的退货包裹：附承运商官网，买家问退货寄到没有时用
+        rt = r.get("return_tracking")
+        if rt and rt.get("carrier"):
+            from ..ship_notices import carrier_link
+
+            rt["carrier_website"] = carrier_link(rt["carrier"], rt["tracking_number"], ctx.marketplace_id)[1]
     return "FOUND", rows, "cases:" + ",".join(r["case_id"] for r in rows), None
 
 

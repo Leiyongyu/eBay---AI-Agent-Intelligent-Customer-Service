@@ -175,9 +175,9 @@ def test_issue_review_send_and_archive_permissions(inv_env, tmp_path):
 def test_issue_requires_issuer_and_own_order_for_ebay_conversation(inv_env):
     client = inv_env
     b = conv(store="STORE_B")
-    # 没有开票主体：增值税发票不行（缺税号）；普通发票读不到 eBay 注册资料（测试店铺不是 eBay 店）也定不了抬头
+    # 系统不再生成增值税发票；普通发票读不到 eBay 注册资料（测试店铺不是 eBay 店）也定不了抬头
     r = client.post(f"/internal/conversations/{b}/invoices", json={"order_id": "24-14589-32244", "kind": "VAT"})
-    assert r.status_code == 409 and "开票主体" in r.json()["detail"]
+    assert r.status_code == 409 and "不再生成增值税发票" in r.json()["detail"]
     r = client.post(f"/internal/conversations/{b}/invoices", json={"order_id": "24-14589-32244"})
     assert r.status_code == 502 and "抬头" in r.json()["detail"]
     real = conv(buyer="someone_else", channel="ebay")
@@ -321,8 +321,8 @@ def test_invoice_page_flow_waiting_review_send_and_notify(inv_env, monkeypatch):
     assert cs.get(f"/internal/invoice-requests/{rid}").status_code == 404
 
 
-def test_vat_invoice_type_from_buyer_words_and_kind(inv_env):
-    """买家提到增值税、公司、税号时，申请默认“增值税发票”；按申请开出 VAT 发票，提醒消息带发票号。"""
+def test_vat_invoice_goes_to_human(inv_env):
+    """买家提到增值税、公司、税号时转人工：申请记为“要增值税发票”并备注人工开具，回复带转人工原因；系统只开普通发票。"""
     from app.worker import worker
 
     monkeypatch_env = pytest.MonkeyPatch()
@@ -335,15 +335,14 @@ def test_vat_invoice_type_from_buyer_words_and_kind(inv_env):
         sent = send_buyer(client, "I need an invoice with VAT for my company", buyer="buyer_us_001")
         worker.run_once()
         row = client.get("/internal/invoice-requests").json()["items"][0]
-        assert (row["status"], row["invoice_type"]) == ("WAITING_EMAIL", "VAT")
+        assert (row["status"], row["invoice_type"]) == ("WAITING_EMAIL", "VAT") and "人工开具" in row["note"]
+        assert "INVOICE_VAT_HUMAN" in detail(client, sent["conversation_id"])["job"]["decision_reasons"]
         rid = row["id"]
         client.put(f"/internal/invoice-requests/{rid}", json={"email": "tom.k@example.com", "order_id": "24-14589-32244"})
-        inv = client.post(f"/internal/invoice-requests/{rid}/invoices", json={"order_id": "24-14589-32244"}).json()
-        assert (inv["kind"], inv["kind_label"]) == ("VAT", "增值税发票")
-        assert inv["number"] in client.get(f"/internal/invoices/{inv['id']}/notice").json()["text"]
-        normal = client.post(f"/internal/invoice-requests/{rid}/invoices",
-                             json={"order_id": "24-14589-32244", "kind": "NORMAL"}).json()
-        assert normal["kind"] == "NORMAL" and not any("已经开过" in w for w in normal["warnings"])  # 不同种类不算重复
+        r = client.post(f"/internal/invoice-requests/{rid}/invoices", json={"order_id": "24-14589-32244", "kind": "VAT"})
+        assert r.status_code == 409  # 系统不开增值税发票
+        normal = client.post(f"/internal/invoice-requests/{rid}/invoices", json={"order_id": "24-14589-32244"}).json()
+        assert normal["kind"] == "NORMAL"  # 申请上写着要增值税的，人工点生成也只出普通发票
         assert sent["conversation_id"] == row["conversation_id"]
     finally:
         monkeypatch_env.undo()
@@ -374,12 +373,248 @@ def test_seller_header_from_ebay_registration(inv_env, monkeypatch):
             "STORE_B": {"name": None, "contact": "黎力 方", "address": "锦江区东大街\n成都市, 四川省\nChina", "postcode": "610011"}}
     monkeypatch.setattr(service, "registration", lambda store_id: regs.get(store_id))
     client = inv_env
-    a = client.post(f"/internal/conversations/{conv()}/invoices", json={"order_id": "24-14589-32244", "kind": "VAT"}).json()
+    a = client.post(f"/internal/conversations/{conv()}/invoices", json={"order_id": "24-14589-32244"}).json()
     snap = client.get(f"/api/invoices/{a['id']}").json()["snapshot"]["seller"]
-    assert (snap["name"], snap["contact"], snap["postcode"], snap["vat_number"]) == (
-        "CHENGDU XIANGYAN WANGLUO KEJI YOUXIAN GONGSI", "chi huang", "610041", "DE329615047")
+    assert (snap["name"], snap["contact"], snap["postcode"]) == (
+        "CHENGDU XIANGYAN WANGLUO KEJI YOUXIAN GONGSI", "chi huang", "610041")
     b = client.post(f"/internal/conversations/{conv(store='STORE_B')}/invoices", json={"order_id": "24-14589-32244"})
     assert b.status_code == 200, b.text  # 店铺没有开票主体：普通发票照样开，抬头是注册人
     bs = client.get(f"/api/invoices/{b.json()['id']}").json()["snapshot"]["seller"]
     assert (bs["name"], bs["address"].splitlines()[0]) == ("黎力 方", "锦江区东大街")
     assert client.get(f"/internal/invoices/{b.json()['id']}/pdf").content.startswith(b"%PDF")
+
+
+def test_normal_invoice_auto_send_to_test_recipient_and_timeline(inv_env, monkeypatch):
+    """开了 INVOICE_AUTO_SEND：买家给了邮箱就自动生成普通发票并直接发出（不审核），测试期改发到测试邮箱；
+    提示词里告诉模型已发出；发票按时间显示在对话里，管理员能点开 PDF。订单定不下来时回复转人工。"""
+    from app.agent import nodes
+    from app.worker import worker
+
+    monkeypatch.setenv("INVOICE_AUTO_SEND", "true")
+    monkeypatch.setenv("INVOICE_TEST_RECIPIENT", "tester@qq.example")
+    monkeypatch.setenv("INVOICE_SMTP_USER", "invoice@shop.example")
+    config.get_settings.cache_clear()
+    monkeypatch.setattr(nodes, "_order_candidates", lambda state: ["24-14589-32244"])
+    client = inv_env
+    use_fake_llm(draft_json(intent="invoice_vat", intents=["invoice_vat"], action="clarify", claims=[],
+                            reply_text="Please reply with your email for the invoice.", reply_zh="请回复接收发票的邮箱。"))
+    first = send_buyer(client, "Can I get an invoice please?", buyer="buyer_us_001")
+    worker.run_once()
+    cid = first["conversation_id"]
+    use_fake_llm(draft_json(intent="invoice_vat", intents=["invoice_vat"], action="answer", claims=[],
+                            reply_text="We have emailed the invoice to you.", reply_zh="发票已发到您的邮箱。"))
+    send_buyer(client, "my email: tom.k@example.com", buyer="buyer_us_001")
+    worker.run_once()
+    d = detail(client, cid)
+    assert "INVOICE_EMAIL_RECEIVED" not in (d["job"]["decision_reasons"] or [])  # 普通发票不用审核
+    req = client.get("/internal/invoice-requests", params={"status": "all"}).json()["items"][0]
+    assert req["status"] == "DONE"
+    tl = client.get(f"/internal/conversations/{cid}").json()["invoice_timeline"]
+    assert len(tl) == 1 and tl[0]["status"] == "SIMULATED" and tl[0]["invoice_kind"] == "NORMAL"
+    assert (tl[0]["sent_to"], tl[0]["buyer_email"], tl[0]["sent_by"]) == ("tester@qq.example", "tom.k@example.com", "AI（自动开票）")
+    assert client.get(tl[0]["pdf_url"]).content.startswith(b"%PDF")
+
+    # 发票真的发出了：模型那句“已发出”没引用依据也不卡 NO_KB_EVIDENCE（I01 误拦），依据记成这张发票
+    use_fake_llm(draft_json(intent="invoice_vat", intents=["invoice_vat"], action="answer",
+                            claims=[{"text": "The invoice has been sent to your email.", "evidence_ids": []}],
+                            reply_text="The invoice has been sent to your email.", reply_zh="发票已发到您的邮箱。"))
+    g = send_buyer(client, "Invoice please, my email: gina@example.com", buyer="buyer_gb_004")
+    worker.run_once()
+    dg = detail(client, g["conversation_id"])
+    assert not {"NO_KB_EVIDENCE", "INVOICE_NEEDS_ORDER", "INVOICE_AUTO_FAILED"} & set(dg["job"]["decision_reasons"] or []), \
+        dg["job"]["decision_reasons"]
+    from sqlalchemy import select
+
+    from app.db import session_scope
+    from app.models import Draft
+
+    with session_scope() as db:
+        ev = db.scalar(select(Draft.evidence_ids).where(Draft.job_id == dg["job"]["id"]).order_by(Draft.id.desc()).limit(1))
+    assert any(e.startswith("invoice:") for e in ev)
+
+    # 订单定不下来（多笔）：没法自动发；模型没照提示词追问、说成“已发出”的要人工改
+    monkeypatch.setattr(nodes, "_order_candidates", lambda state: ["1-1", "2-2"])
+    use_fake_llm(draft_json(intent="invoice_vat", intents=["invoice_vat"], action="answer", claims=[],
+                            reply_text="We have emailed the invoice to you.", reply_zh="发票已发到您的邮箱。"))
+    other = send_buyer(client, "Invoice please, my email: anna@example.com", buyer="buyer_de_002")
+    worker.run_once()
+    d2 = detail(client, other["conversation_id"])
+    assert d2["job"]["state"] == "REVIEW_REQUIRED" and "INVOICE_NEEDS_ORDER" in d2["job"]["decision_reasons"]
+    # 照提示词追问订单号（clarify）：不因发票原因转人工
+    use_fake_llm(draft_json(intent="invoice_vat", intents=["invoice_vat"], action="clarify", claims=[],
+                            reply_text="Which order should the invoice be for? 1-1 or 2-2?", reply_zh="要开哪个订单？"))
+    third = send_buyer(client, "Invoice please, my email: ben@example.com", buyer="buyer_de_003")
+    worker.run_once()
+    reasons = detail(client, third["conversation_id"])["job"]["decision_reasons"] or []
+    assert not {"INVOICE_NEEDS_ORDER", "INVOICE_AUTO_FAILED", "INVOICE_EMAIL_RECEIVED"} & set(reasons)
+
+
+def test_invoice_prompt_context(monkeypatch):
+    """提示词运行上下文：只开普通发票、不问种类；给了邮箱时告诉模型已自动发出；要增值税的告诉模型已转人工。"""
+    from types import SimpleNamespace
+
+    from app.agent import nodes
+
+    def state(buyer, history=(), orders=("24-14589-32244",)):
+        msgs = [{"text": t, "in_task": False, "role": "BUYER"} for t in history]
+        obs = ([{"tool_name": "get_authorized_order_context", "status": "FOUND", "data": {"order_id": orders[0]}}]
+               if len(orders) == 1 else
+               [{"tool_name": "get_authorized_order_context", "status": "AMBIGUOUS", "data": [{"order_id": o} for o in orders]}]
+               if orders else [])
+        return {"snapshot": {"buyer_texts": buyer}, "memory": {"messages": msgs}, "observations": obs}
+
+    deps = SimpleNamespace(settings=SimpleNamespace(invoice_auto_send=True, invoice_smtp_user="invoice@shop.example"))
+    base = nodes._invoice_context(state(["Hello"]), deps)
+    assert len(base) == 1 and "只开普通发票" in base[0] and "不用问要哪种发票" in base[0]
+    lines = nodes._invoice_context(state(["my email: a@b.de"], ["I need an invoice"]), deps)
+    assert "系统会自动开具普通发票" in lines[1] and "invoice@shop.example" in lines[1]
+    # 多笔订单 / 查不到订单：不会发出，不能说已发出，请买家给订单号
+    multi = nodes._invoice_context(state(["my email: a@b.de"], ["I need an invoice"], orders=("1-1", "2-2")), deps)
+    assert "不会开票发出" in multi[1] and "1-1、2-2" in multi[1] and "不要说发票已发出" in multi[1]
+    none = nodes._invoice_context(state(["my email: a@b.de"], ["I need an invoice"], orders=()), deps)
+    assert "查不到买家的订单" in none[1]
+    # 要发票还没给邮箱：请买家给邮箱，收到马上发（不说同事开具、不说无法保证时间）
+    ask = nodes._invoice_context(state(["Can I get an invoice please?"]), deps)
+    assert "收到后系统马上开具并发出" in ask[1]
+    lines = nodes._invoice_context(state(["Rechnung mit MwSt für meine Firma bitte"]), deps)
+    assert "已转交同事人工开具" in lines[1]
+    deps.settings.invoice_auto_send = False  # 关了自动发送：给了邮箱也不说已发出
+    assert len(nodes._invoice_context(state(["my email: a@b.de"], ["I need an invoice"]), deps)) == 1
+
+
+def test_normal_invoice_matches_ebay_order_document_and_site_language():
+    """普通发票照 eBay 订单单据：店铺链接和二维码、买家电话和 eBay 转发邮箱、卖家留言、“Sonstige”配送服务；
+    语言按站点（不按收货国家）；发票邮件正文不带落款。"""
+    import copy
+
+    from app.invoicing import mailer
+    from app.invoicing.builder import build, pick_language
+    from app.invoicing.pdf import _service_label, NORMAL, render
+
+    assert (pick_language("DE", "EBAY_GB"), pick_language("GB", "EBAY_DE"), pick_language("FR", "EBAY_FR"),
+            pick_language("AT", None), pick_language("US", "EBAY_US")) == ("en", "de", "fr", "de", "en")
+    o = order()
+    ship = o["fulfillmentStartInstructions"][0]["shippingStep"]
+    ship["shipTo"].update(primaryPhone={"phoneNumber": "+49 173 3568392"}, email="127ba0a6d74222e42162@members.ebay.com")
+    ship["shippingServiceCode"] = "DE_SonstigeDomestic"
+    issuer = {**ISSUER, "contact": "li fang", "store_url": "https://www.ebay.de/str/piecessaleshop"}
+    doc = build(o, issuer=issuer, seller_account="pieces_saleshop", issue_date="2026-11-04", store_name="pieces_saleshop")
+    assert (doc["language"], doc["buyer_phone"], doc["buyer_email"], doc["store_url"]) == (
+        "de", "+49 173 3568392", "127ba0a6d74222e42162@members.ebay.com", "https://www.ebay.de/str/piecessaleshop")
+    gb = copy.deepcopy(o)
+    gb["lineItems"][0]["purchaseMarketplaceId"] = "EBAY_GB"  # 英国站卖到德国：按站点用英语
+    assert build(gb, issuer=issuer, seller_account="x", issue_date="2026-11-04")["language"] == "en"
+    assert _service_label("DE_SonstigeDomestic", NORMAL["de"]) == "Sonstige"
+    assert _service_label("UK_OtherCourier48", NORMAL["en"]) == "Other"
+    assert render(doc, "N1").startswith(b"%PDF")  # 带二维码也能生成
+    no_url = build(o, issuer=ISSUER, seller_account="x", issue_date="2026-11-04")
+    assert no_url["store_url"] is None and render(no_url, "N2").startswith(b"%PDF")
+
+    for lang in ("de", "en", "fr", "it", "es"):
+        msg = mailer.compose(to="a@example.com", number="N1", order_id="24-14589-32244", language=lang,
+                             sign="Chengdu Xiangyan Wangluo Keji Youxiangongsi", pdf=b"%PDF-1.4", show_number=False)
+        body = msg.get_body(("plain",)).get_content()
+        assert "Chengdu" not in body and "Kind regards" not in body and "Grüßen" not in body, lang
+        assert "24-14589-32244" in body
+
+
+def test_invoice_can_be_issued_again_and_wording(inv_env, monkeypatch):
+    """发票可以重复开：买家每要一次就开一张新的并发出（同一条买家消息重跑不重复）；再要时没写邮箱就发到之前给的邮箱；
+    “谢谢，发票收到了”不再发。提示词要求回复里不说“已经开过 / 重新开具”。"""
+    from sqlalchemy import select
+
+    from app.agent import nodes
+    from app.db import session_scope
+    from app.models import Invoice, InvoiceRequest
+    from app.worker import worker
+
+    monkeypatch.setenv("INVOICE_AUTO_SEND", "true")
+    monkeypatch.setenv("INVOICE_TEST_RECIPIENT", "tester@qq.example")
+    config.get_settings.cache_clear()
+    monkeypatch.setattr(nodes, "_order_candidates", lambda state: ["24-14589-32244"])
+    client = inv_env
+    sent = lambda reply: draft_json(intent="invoice_vat", intents=["invoice_vat"], action="answer", claims=[],  # noqa: E731
+                                    reply_text=reply, reply_zh="发票已发到您的邮箱。")
+
+    use_fake_llm(sent("The invoice has been sent to your email."))
+    first = send_buyer(client, "Invoice please, my email: rita@example.com", buyer="buyer_again")
+    worker.run_once()
+    cid = first["conversation_id"]
+
+    def invoices():
+        with session_scope() as db:
+            return [(i.number, i.sent_to) for i in db.scalars(select(Invoice).where(Invoice.conversation_id == cid)
+                                                              .order_by(Invoice.id))]
+
+    assert len(invoices()) == 1
+    with session_scope() as db:  # 同一条买家消息重跑：不重复开、不重复发
+        from app.invoicing.service import record_request
+        from app.models import Conversation
+
+        req = db.scalar(select(InvoiceRequest).where(InvoiceRequest.conversation_id == cid))
+        record_request(db, db.get(Conversation, cid), "rita@example.com", order_candidates=["24-14589-32244"],
+                       trigger=req.trigger_message_id)
+    assert len(invoices()) == 1
+
+    # 买家再要一次（没写邮箱）：再开一张新的，发到之前给的邮箱；提示词里告诉模型会发、且不说“已开过/重新开”
+    use_fake_llm(sent("The invoice has been sent to the email you gave us before."))
+    send_buyer(client, "Could you send me the invoice again please?", buyer="buyer_again")
+    worker.run_once()
+    got = invoices()
+    assert len(got) == 2 and got[1][0] == got[0][0] + "-2" and got[1][1] == "tester@qq.example"
+    d = detail(client, cid)
+    assert not {"INVOICE_AUTO_FAILED", "INVOICE_NEEDS_ORDER", "INVOICE_EMAIL_RECEIVED"} & set(d["job"]["decision_reasons"] or [])
+
+    # 只是道谢：不再发
+    use_fake_llm(draft_json(intent="thanks_closing", intents=["thanks_closing"], action="answer", claims=[],
+                            reply_text="You're welcome!", reply_zh="不客气！"))
+    send_buyer(client, "Thanks, I got the invoice!", buyer="buyer_again")
+    worker.run_once()
+    assert len(invoices()) == 2
+
+    def state(buyer, history):
+        return {"snapshot": {"buyer_texts": buyer}, "observations": [
+            {"tool_name": "get_authorized_order_context", "status": "FOUND", "data": {"order_id": "24-14589-32244"}}],
+            "memory": {"messages": [{"text": t, "in_task": False, "role": "BUYER"} for t in history]}}
+
+    deps = type("D", (), {"settings": config.get_settings()})()
+    lines = nodes._invoice_context(state(["Send the invoice again please"], ["invoice to rita@example.com"]), deps)
+    assert "不要说“已经开过" in lines[0] and "重新开具" in lines[0]
+    assert "发到他之前提供的邮箱" in lines[1]
+
+
+def test_buyer_picks_order_then_invoice_sent(inv_env, monkeypatch):
+    """多笔订单时先请买家选订单；买家只回了订单号（不再提“发票”、不写邮箱）也要马上开票发到之前给的邮箱。"""
+    from sqlalchemy import select
+
+    from app.agent import nodes
+    from app.db import session_scope
+    from app.models import Invoice, InvoiceRequest
+    from app.worker import worker
+
+    monkeypatch.setenv("INVOICE_AUTO_SEND", "true")
+    monkeypatch.setenv("INVOICE_TEST_RECIPIENT", "tester@qq.example")
+    config.get_settings.cache_clear()
+    client = inv_env
+    monkeypatch.setattr(nodes, "_order_candidates", lambda state: ["1-1", "24-14589-32244"])
+    use_fake_llm(draft_json(intent="invoice_vat", intents=["invoice_vat"], action="clarify", claims=[],
+                            reply_text="Which order is the invoice for: 1-1 or 24-14589-32244?", reply_zh="要开哪个订单？"))
+    first = send_buyer(client, "Invoice please, my email: omar@example.com", buyer="buyer_pick")
+    worker.run_once()
+    cid = first["conversation_id"]
+    with session_scope() as db:
+        req = db.scalar(select(InvoiceRequest).where(InvoiceRequest.conversation_id == cid))
+        assert (req.status, req.order_id) == ("OPEN", None)
+
+    monkeypatch.setattr(nodes, "_order_candidates", lambda state: ["24-14589-32244"])  # 买家报了订单号：只剩这一笔
+    use_fake_llm(draft_json(intent="invoice_vat", intents=["invoice_vat"], action="answer", claims=[],
+                            reply_text="The invoice has been sent to the email you gave us before.", reply_zh="已发到邮箱。"))
+    send_buyer(client, "24-14589-32244", buyer="buyer_pick")
+    worker.run_once()
+    with session_scope() as db:
+        req = db.scalar(select(InvoiceRequest).where(InvoiceRequest.conversation_id == cid))
+        invs = db.scalars(select(Invoice).where(Invoice.conversation_id == cid)).all()
+        assert req.status == "DONE" and req.order_id == "24-14589-32244"
+        assert [(i.order_id, i.sent_to) for i in invs] == [("24-14589-32244", "tester@qq.example")]
+    reasons = detail(client, cid)["job"]["decision_reasons"] or []
+    assert not {"INVOICE_AUTO_FAILED", "INVOICE_NEEDS_ORDER"} & set(reasons)

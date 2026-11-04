@@ -16,7 +16,7 @@ interface Notice {
 }
 interface ListResp {
   date: string; counts: Record<string, number>; items: Notice[]; collecting: boolean
-  last: { date: string; stores: number; orders: number; new: number; skipped: number; errors: string[] } | null
+  last: { date: string; stores: number; orders: number; new: number; skipped: number; waiting?: number; errors: string[] } | null
   last_at: string | null; auto: boolean
 }
 
@@ -103,6 +103,13 @@ async function sendSelected() {
   }
 }
 
+async function sendAllPending() {
+  const ids = (data.value?.items || []).filter((n) => n.status === 'PENDING').map((n) => n.id)
+  if (!ids.length) return
+  selected.value = (data.value?.items || []).filter((n) => n.status === 'PENDING')
+  await sendSelected()
+}
+
 async function skip(n: Notice) {
   let reason = '审核员跳过'
   try {
@@ -171,6 +178,9 @@ onUnmounted(() => {
       <el-button size="small" :loading="data?.collecting" @click="collect">{{ data?.collecting ? '汇总中…' : '立即汇总' }}</el-button>
       <el-button size="small" :loading="loading" @click="load">刷新</el-button>
       <span class="spacer" />
+      <el-button size="small" :disabled="!data?.items.some((n) => n.status === 'PENDING')" :loading="busy" @click="sendAllPending">
+        全部发送（{{ data?.items.filter((n) => n.status === 'PENDING').length || 0 }}）
+      </el-button>
       <el-button size="small" type="primary" :disabled="!selected.some((n) => n.status === 'PENDING')" :loading="busy" @click="sendSelected">
         发送选中（{{ selected.filter((n) => n.status === 'PENDING').length }}）
       </el-button>
@@ -178,7 +188,7 @@ onUnmounted(() => {
     <el-alert type="info" :closable="false" show-icon class="hint"
       :title="`当天（北京时间）在 eBay 标记已发货的订单，${data?.auto ? '每小时自动汇总一次' : '自动汇总未开启（.env SHIP_NOTICE_ENABLED）'}，也可点“立即汇总”。按站点语言写好订单号、承运商、跟踪号和承运商官网（买家自己在官网输入单号查），不写送达日期；审核后发送（目前为模拟发送，只记在本系统会话里，买家收不到）。有取消申请或退款的订单自动标“不发”。`" />
     <div v-if="data?.last" class="muted last">
-      最近汇总 {{ data.last_at ? fmtTime(data.last_at) : '' }}（{{ data.last.date }}）：{{ data.last.stores }} 个店铺，当天发货 {{ data.last.orders }} 单，新增 {{ data.last.new }} 条
+      最近汇总 {{ data.last_at ? fmtTime(data.last_at) : '' }}（{{ data.last.date }}）：{{ data.last.stores }} 个店铺，当天发货 {{ data.last.orders }} 单，新增 {{ data.last.new }} 条<template v-if="data.last.waiting">，{{ data.last.waiting }} 单仓库还没实际发出（下次再看）</template>
       <span v-if="data.last.errors.length" class="warn">；{{ data.last.errors.length }} 个店铺失败：{{ data.last.errors.join('；') }}</span>
     </div>
     <el-table :data="data?.items || []" v-loading="loading" size="small" row-key="id" class="tbl" empty-text="当天还没有已发货的订单"

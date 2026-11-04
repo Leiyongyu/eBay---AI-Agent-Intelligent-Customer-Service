@@ -1,7 +1,10 @@
 """谷仓查件单同步（只读拉取）：每隔 LOGISTICS_TICKET_SYNC_INTERVAL_MINUTES 分钟拉最近 LOGISTICS_TICKET_SYNC_DAYS 天的查件单
 （含客服在谷仓后台手动建的），按订单号定位店铺、买家和会话。谷仓新回复的：附件（如 POD）一律存进售后附件，
-AI 按买家语言起草给买家的消息；开了 LOGISTICS_TICKET_AUTO_SEND 时，不需要人工的直接连同附件发给买家
-（目前为模拟发送；买家还没有会话的新建一个），需要人工的（妥投未收到、退回、丢失、可能补发等）不发，把会话标成待售后。
+按规则把回复归类（OUTCOMES：已催派、已给 POD、已妥投、在自取点 → 自动回复；丢失、退回、破损 → 需判断补发；
+地址问题、妥投未收到、看不懂 → 需人工审核），AI 按买家语言起草消息。开了 LOGISTICS_TICKET_AUTO_SEND 时自动回复的
+直接连同附件发给买家（目前为模拟发送；买家还没有会话的新建一个）；要人工的把会话标成待售后、打“需判断补发”或
+“需人工审核”标记（需补发的附上补发库存），开了 LOGISTICS_TICKET_SEND_NEEDS_HUMAN 时也照样告诉买家查件结果，
+看不懂的不发。谷仓对同一张查件单再次回复时按新回复重新处理。
 """
 from __future__ import annotations
 
@@ -30,13 +33,58 @@ from .goodcang import GoodcangClient, GoodcangError
 
 log = logging.getLogger(__name__)
 ACTOR = "logistics_tickets"
-# 这些查件类型的结果多半要人工决定（退款、补发、改派等）
-HUMAN_TYPES = {"妥投未收到", "退回原因", "拦截", "改派", "查妥投地址"}
 EBAY_ORDER = re.compile(r"\d{2}-\d{5}-\d{5}")
-# 查件结果里这些说法 = 包裹到不了买家手里，需判断补发（转人工、查补发库存）
-RESHIP_WORDS = re.compile(r"丢|遗失|退回|退件|破损|损坏|补发|重发|销毁|空包|空箱|空盒|未更新|久未|断更|无轨迹|没有轨迹|无更新|没有更新")
-HUMAN_WORDS = re.compile(RESHIP_WORDS.pattern + r"|赔|无法派送|地址|拒收|扣")
 SEND_ACTOR = "AI（查件结果）"
+
+# ---------------------------------------------------------------- 谷仓回复归类（规则判定；模型只负责写给买家的话）
+RESHIP, REVIEW, AUTO = "需判断补发", "需人工审核", "自动回复"
+OUTCOMES = {  # 类别 → (中文说明, 处理方式)
+    "LOST": ("包裹疑似丢失 / 可理赔", RESHIP),
+    "DAMAGED": ("包裹破损 / 空包", RESHIP),
+    "RETURNED": ("包裹已退回或无法再派", RESHIP),
+    "ADDRESS": ("地址有问题 / 无法派送，需要给处理意见", REVIEW),
+    "DELIVERED_DISPUTE": ("承运商确认妥投（或已给 POD），买家反馈没收到", REVIEW),
+    "ACTION": ("拦截 / 改派类查件，需要人工决定", REVIEW),
+    "POD_MISSING": ("回复说已提供 POD，但附件没存下来", REVIEW),
+    "POD": ("已提供签收证明（POD）", AUTO),
+    "DELIVERED": ("承运商确认已妥投，请买家核实", AUTO),
+    "PICKUP": ("包裹在自取点等待领取", AUTO),
+    "IN_TRANSIT": ("已催派 / 运输中，请留意轨迹", AUTO),
+    "UNKNOWN": ("回复看不懂或没有对应处理办法", REVIEW),
+    "MODEL_FLAGGED": ("AI 认为规则判定与回复不符", REVIEW),
+}
+NO_SEND = {"UNKNOWN", "MODEL_FLAGGED"}  # 拿不准怎么回的：不发给买家，直接转人工
+DISPUTE_TYPES = {"妥投未收到", "查妥投地址"}  # 买家已经说过“显示妥投但没收到”的查件
+ACTION_TYPES = {"拦截", "改派"}
+_NEGATED = re.compile(r"(未|没有|没|并未|不是)(退回|退件|丢失|丢件|破损|损坏)|(无|没有)(自取|自提)(地址|点)?")
+_RULES = [  # 按顺序取第一个命中的；“如需理赔……”这类附带的条件句不算丢件，所以弱的丢件说法排在催派之后
+    ("LOST", re.compile(r"考虑.{0,6}丢|确认.{0,4}丢|已丢|丢失了|遗失|可以?(提交|申请)理赔|销毁")),
+    ("DAMAGED", re.compile(r"破损|损坏|空包|空箱|空盒")),
+    ("RETURNED", re.compile(r"退回|退件|返回发件|无法再派")),
+    ("ADDRESS", re.compile(r"地址(错误|有误|不全|不完整|不详|无效)|信息不(完整|全)|无法(继续)?派送|派送失败|无人(接收|签收|在家)|找不到收件人|拒收|请指示|处理意见|扣关|清关|海关")),
+    ("PICKUP", re.compile(r"自取|自提|取件点|待取|等待领取|快递柜|包裹柜")),
+    ("POD", re.compile(r"pod|签收证明|获取成功", re.I)),
+    ("DELIVERED", re.compile(r"妥投|已签收|已送达|派送完毕")),
+    ("IN_TRANSIT", re.compile(r"催|在途|运输中|运输途中|轨迹(有|已)更新|更新到|留意.{0,6}轨迹|关注.{0,6}轨迹|再等")),
+    ("LOST", re.compile(r"丢|理赔|索赔|赔偿|久未更新")),
+]
+
+
+def classify(t: LogisticsTicket) -> str:
+    """谷仓回复 → 结果类别（见 OUTCOMES）。"""
+    text = _NEGATED.sub("", t.reply or "")
+    outcome = next((k for k, rx in _RULES if rx.search(text)), None)
+    if outcome is None:
+        outcome = "POD" if t.attachments and t.type_name in ({"申请POD"} | DISPUTE_TYPES) else "UNKNOWN"
+    if t.type_name in ACTION_TYPES and OUTCOMES[outcome][1] == AUTO:
+        return "ACTION"
+    if t.type_name in DISPUTE_TYPES and outcome in ("POD", "DELIVERED", "UNKNOWN"):
+        return "DELIVERED_DISPUTE"
+    return outcome
+
+
+def handling(outcome: str | None) -> str:
+    return OUTCOMES.get(outcome or "UNKNOWN", OUTCOMES["UNKNOWN"])[1]
 SITE_LANG = {"EBAY_DE": "德语", "EBAY_AT": "德语", "EBAY_FR": "法语", "EBAY_IT": "意大利语", "EBAY_ES": "西班牙语",
              "EBAY_GB": "英语", "EBAY_US": "英语"}
 
@@ -63,13 +111,18 @@ def _upsert(db: Session, row: dict, now: datetime) -> tuple[LogisticsTicket, boo
     t.tracking_no = (row.get("tracking_no") or "").strip() or None
     t.type_name, t.io_status, t.io_status_text = row.get("it_type_name"), row.get("io_status"), row.get("io_status_text")
     t.trail_status_text, t.sm_name, t.warehouse_code = row.get("trail_status_text"), row.get("sm_name"), row.get("warehouse_code")
+    old_reply, old = t.reply, {a.get("url"): a for a in (t.attachments or [])}
     t.reply = (row.get("customer_service_reply") or "").strip() or None
     t.reject_reason = (row.get("reject_reason") or "").strip() or None
-    old = {a.get("url"): a for a in (t.attachments or [])}
     t.attachments = [{**old.get(a.get("url"), {}), "name": a.get("name"), "url": a.get("url")}
                      for a in row.get("replay_attachment_file_list") or [] if a.get("url")] or None
     t.added_at, t.replied_at = row.get("add_time") or None, row.get("reply_time") or row.get("last_handle_time") or None
     t.synced_at = now
+    changed = t.reply != old_reply or any(a["url"] not in old for a in t.attachments or [])
+    if not new and changed and (t.suggested_at or t.handled_at):
+        # 谷仓又回复了（如先“已催派”，后来给了 POD / 说丢件）：按新回复重新判断、重新回复买家
+        t.suggestion = t.suggestion_zh = t.needs_human = t.suggested_at = t.outcome = None
+        t.handled_at = t.handled_by = t.send_status = t.send_error = None
     return t, new
 
 
@@ -91,6 +144,25 @@ def _locate(db: Session, t: LogisticsTicket, locate=None, cache: dict | None = N
             t.store_id, t.buyer_key, t.conversation_id = cache[t.reference_no]
     elif not t.conversation_id:
         t.conversation_id = _conversation(db, t.store_id, t.buyer_key)
+
+
+def _pick_conversation(db: Session, t: LogisticsTicket, client: GoodcangClient, cache: dict) -> None:
+    """买家有多个会话时，把查件结果发到这笔订单商品的会话里（订单商品来自谷仓出库单，每个订单只查一次）。"""
+    from ..aftersales_mail.service import order_conversation
+
+    n = db.scalar(select(func.count()).select_from(Conversation).where(
+        Conversation.store_id == t.store_id, func.lower(Conversation.buyer_key) == t.buyer_key.lower()))
+    if n <= 1 and t.conversation_id:
+        return
+    key = ("items", t.reference_no)
+    if key not in cache:
+        try:
+            cache[key] = [i.get("item_id") for w in client.orders_by_reference(t.reference_no) for i in w.get("items") or []]
+        except Exception:  # noqa: BLE001  查不到商品就按原来的会话
+            cache[key] = []
+    cid = order_conversation(db, t.store_id, t.buyer_key, t.reference_no, cache[key])
+    if cid:
+        t.conversation_id = cid
 
 
 def _replied_recently(t: LogisticsTicket, days: int) -> bool:
@@ -163,26 +235,43 @@ def _context(db: Session, t: LogisticsTicket) -> tuple[str, str]:
     return conv, str(tracking)
 
 
+def _stored_files(db: Session, t: LogisticsTicket) -> list[AftersalesFile]:
+    files = [db.get(AftersalesFile, a["file_id"]) for a in t.attachments or [] if a.get("file_id")]
+    return [f for f in files if f is not None and f.status == "STORED"]
+
+
+def _decide(db: Session, t: LogisticsTicket) -> None:
+    """按规则给谷仓回复归类，定下要不要人工；模型的判断不能把规则判成要人工的改成不要。"""
+    outcome = classify(t)
+    if outcome == "POD" and not _stored_files(db, t):
+        outcome = "POD_MISSING"  # 说了附上 POD 却发不出附件：不能自动发
+    t.outcome, t.needs_human = outcome, handling(outcome) != AUTO
+
+
 def _suggest(db: Session, t: LogisticsTicket, provider) -> None:
     conv_text, tracking = _context(db, t)
-    files = [a.get("name") for a in t.attachments or []]
+    files = [f.original_name for f in _stored_files(db, t)]
+    label, how = OUTCOMES[t.outcome]
     ticket = (f"查件类型：{t.type_name}\n谷仓状态：{t.io_status_text}\n物流状态：{t.trail_status_text}\n"
-              f"服务商回复：{t.reply or '（无文字）'}\n回复附件：{'、'.join(files) or '无'}")
+              f"服务商回复：{t.reply or '（无文字）'}\n随消息发给买家的附件：{'、'.join(files) or '无'}")
+    decision = (f"结果类别：{label}\n处理方式：" +
+                ("不需要人工，这条消息就是最终答复" if how == AUTO else f"{how}：同事会跟进，消息里只说同事会尽快处理，不承诺补发、退款"))
     msgs = [SystemMessage(content=load_prompt("logistics_ticket_reply")),
             HumanMessage(content=f"<conversation>\n{conv_text}\n</conversation>\n<ticket>\n{ticket}\n</ticket>\n"
-                                 f"<tracking>\n{tracking}\n</tracking>")]
+                                 f"<decision>\n{decision}\n</decision>\n<tracking>\n{tracking}\n</tracking>")]
     provider_name, model = usage_log.chat_model(get_settings())
     started = time.perf_counter()
     r = provider.structured(msgs, TicketReply)
     usage_log.record(db, "ticket_reply", provider=provider_name, model=model, usage=r.usage, ok=r.parsed is not None,
                      error=r.error, duration_ms=int((time.perf_counter() - started) * 1000), store_id=t.store_id,
                      conversation_id=t.conversation_id)
-    rule_human = t.type_name in HUMAN_TYPES or bool(HUMAN_WORDS.search(t.reply or ""))
     if r.parsed:
         t.suggestion, t.suggestion_zh = r.parsed.reply_text.strip(), r.parsed.reply_zh.strip() or None
-        t.needs_human = rule_human or r.parsed.needs_human
+        if r.parsed.needs_human and not t.needs_human:  # 模型只能把“自动回复”升级成人工，不能反过来
+            t.outcome, t.needs_human = "MODEL_FLAGGED", True
+            t.send_error = f"AI 认为需要人工：{r.parsed.reason}"[:300]
     else:
-        t.needs_human = True
+        t.needs_human = True  # 没写出消息：转人工
     t.suggested_at = utcnow()
 
 
@@ -215,11 +304,8 @@ def _send(db: Session, t: LogisticsTicket, conv: Conversation) -> None:
     if check.result == "BLOCK":
         t.send_status, t.send_error = "FAILED", "合规检查不通过，需人工修改后发送"
         return
-    files = [db.get(AftersalesFile, a["file_id"]) for a in t.attachments or [] if a.get("file_id")]
     media = []
-    for f in files:
-        if f is None or f.status != "STORED":
-            continue
+    for f in _stored_files(db, t):
         ctype = f.content_type or ""
         kind = "IMAGE" if ctype.startswith("image/") else ("PDF" if "pdf" in ctype else "DOC")
         media.append({"mediaName": f.original_name, "mediaType": kind, "fileId": f.id})
@@ -234,32 +320,58 @@ def _send(db: Session, t: LogisticsTicket, conv: Conversation) -> None:
                               "compliance": check.result, "source": "logistics_ticket"}))
 
 
+RESHIP_TYPE, LOGISTICS_TYPE = "物流问题需判断补发", "物流异常/未收到"
+
+
+def _result_line(t: LogisticsTicket) -> str:
+    return f"谷仓查件单 {t.io_code}（{t.type_name}）已回复【{OUTCOMES[t.outcome or 'UNKNOWN'][0]}】：{(t.reply or '见附件')[:300]}"
+
+
+def _note(conv: Conversation, line: str) -> None:
+    """已在售后处理中的会话：把查件结果补进备注（新的放前面），同一条不重复写。"""
+    if line[:80] not in (conv.aftersales_note or ""):
+        conv.aftersales_note = "；".join(x for x in (line, conv.aftersales_note) if x)[:1000]
+        conv.aftersales_updated_at = utcnow()
+
+
 def _mark(db: Session, t: LogisticsTicket, client: GoodcangClient | None = None) -> None:
+    """查件结果要人工：会话标“待售后处理”（已在售后中的补进备注；需补发的类型升级成需判断补发），
+    并打标记“需判断补发”或“需人工审核”，需补发的附上原发货仓补发库存。"""
+    from .. import auto_tags
+
     conv = db.get(Conversation, t.conversation_id) if t.conversation_id else None
-    if not conv or conv.aftersales_status in (Aftersales.PENDING, Aftersales.IN_PROGRESS):
+    if not conv:
         return
-    now = utcnow()
-    note = f"谷仓查件单 {t.io_code}（{t.type_name}）已回复：{(t.reply or '见附件')[:300]}"
-    if client is not None and t.reference_no and RESHIP_WORDS.search(t.reply or ""):  # 需判断补发：附上补发库存
+    reship = handling(t.outcome) == RESHIP
+    line = _result_line(t)
+    if reship and client is not None and t.reference_no:
         from .followup import reship_stock
 
         try:
-            note += "；" + reship_stock(client, t.reference_no)["summary"]
+            line += "；" + reship_stock(client, t.reference_no)["summary"]
         except Exception as e:  # noqa: BLE001  查不到库存也要照常标记
-            note += f"；补发库存查询失败：{e if isinstance(e, GoodcangError) else type(e).__name__}"
-    reship = bool(RESHIP_WORDS.search(t.reply or ""))
+            line += f"；补发库存查询失败：{e if isinstance(e, GoodcangError) else type(e).__name__}"
+    auto_tags.apply_names(db, conv, [("需判断补发", "danger") if reship else ("需人工审核", "warning")],
+                          {"io_code": t.io_code, "outcome": t.outcome})
+    if conv.aftersales_status in (Aftersales.PENDING, Aftersales.IN_PROGRESS):
+        _note(conv, line)
+        if reship:
+            conv.aftersales_type = RESHIP_TYPE
+        return
+    now = utcnow()
     conv.aftersales_status = Aftersales.PENDING
-    conv.aftersales_type = "物流问题需判断补发" if reship else "物流异常/未收到"
-    conv.aftersales_note = note[:1000]
+    conv.aftersales_type = RESHIP_TYPE if reship else LOGISTICS_TYPE
+    conv.aftersales_note = line[:1000]
     conv.aftersales_marked_by, conv.aftersales_marked_at, conv.aftersales_handled_by = "AI（查件结果）", now, None
     conv.aftersales_updated_at = now
     db.add(AuditEvent(actor=ACTOR, action="AFTERSALES_AUTO_MARKED", store_id=conv.store_id, conversation_id=conv.id,
-                      detail={"io_code": t.io_code, "type": t.type_name}))
+                      detail={"io_code": t.io_code, "type": t.type_name, "outcome": t.outcome}))
 
 
 def sync(db: Session, *, client: GoodcangClient | None = None, provider=None, locate=None,
-         http: httpx.Client | None = None, suggest_days: int = 3) -> dict:
+         http: httpx.Client | None = None, suggest_days: int | None = None) -> dict:
     s = get_settings()
+    suggest_days = suggest_days or s.logistics_ticket_reply_days
     client = client or GoodcangClient(s)
     end = _cn_now()
     start = end - timedelta(days=min(186, max(1, s.logistics_ticket_sync_days)))
@@ -291,6 +403,8 @@ def sync(db: Session, *, client: GoodcangClient | None = None, provider=None, lo
             _locate(db, t, locate, cache)
             stats["located"] += bool(t.store_id)
             fresh = not t.handled_at and not t.suggested_at and _replied_recently(t, suggest_days)
+            if fresh and t.store_id and t.buyer_key:
+                _pick_conversation(db, t, client, cache)
             if fresh and s.logistics_ticket_auto_send:
                 conv = _ensure_conversation(db, t)
             else:
@@ -300,26 +414,32 @@ def sync(db: Session, *, client: GoodcangClient | None = None, provider=None, lo
             if fresh and conv is None and t.store_id:
                 t.send_status, t.send_error = "NO_BUYER", "没找到订单买家，无法通知"
             if fresh and conv is not None:
+                _decide(db, t)
                 if provider is not None:
                     _suggest(db, t, provider)
                     stats["suggested"] += 1
                 else:
                     t.needs_human = True
-                if t.needs_human and s.logistics_ticket_auto_send and s.logistics_ticket_send_needs_human:
+                label, how = OUTCOMES[t.outcome]
+                if t.needs_human:
                     stats["needs_human"] += 1
-                    _send(db, t, conv)  # 照样告诉买家查件结果（不承诺退款补发），同事在售后里跟进
-                    stats["sent"] += t.send_status == "SENT"
-                    _mark(db, t, client)
-                elif t.needs_human:
-                    stats["needs_human"] += 1
-                    t.send_status = "NEEDS_HUMAN"
-                    t.send_error = "查件结果需要人工决定（如妥投未收到、退回、丢失、可能补发），没有自动发送"
+                    # 看不懂的回复不发；其他要人工的按配置照样告诉买家查件结果（不承诺退款补发），同事在售后里跟进
+                    if s.logistics_ticket_auto_send and s.logistics_ticket_send_needs_human and t.outcome not in NO_SEND:
+                        _send(db, t, conv)
+                        stats["sent"] += t.send_status == "SENT"
+                    else:
+                        t.send_status = "NEEDS_HUMAN"
+                        t.send_error = t.send_error or f"{how}：{label}，没有自动发送"
                     _mark(db, t, client)
                 elif s.logistics_ticket_auto_send:
                     _send(db, t, conv)
                     if t.send_status == "SENT":
                         stats["sent"] += 1
-                    else:
+                        if conv.aftersales_status in (Aftersales.PENDING, Aftersales.IN_PROGRESS):
+                            _note(conv, _result_line(t) + "（已自动回复买家）")
+                    else:  # 发送失败（合规不过、没写出消息）：转人工审核
+                        t.needs_human = True
+                        stats["needs_human"] += 1
                         _mark(db, t, client)
             db.flush()
         except Exception as e:  # noqa: BLE001  单张失败不影响其他

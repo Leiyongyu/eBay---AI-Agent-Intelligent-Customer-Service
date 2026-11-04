@@ -29,6 +29,13 @@ export interface Claim {
   expires_at: string
 }
 
+/** AI 起草时给出的会话情况：阶段 + 一句中文概括 */
+export interface SituationInfo {
+  stage: 'presale' | 'shipping' | 'aftersales' | 'invoice' | 'other'
+  label: string | null
+  at: string | null
+}
+
 export interface ConversationItem {
   id: number
   store_id: string
@@ -49,6 +56,7 @@ export interface ConversationItem {
   claim: Claim | null
   auto_replied: boolean // 当前任务由 AI 自动回复发出
   aftersales: AftersalesInfo | null
+  situation?: SituationInfo | null // AI 判断的会话情况（阶段 + 一句话概括）
   mark: MessageMarkInfo | null // 第一个会话标记（兼容旧字段）
   marks?: MessageMarkInfo[] // 会话上的全部标记（可以多个）
   invoice_status: 'WAITING_EMAIL' | 'OPEN' | 'DONE' | 'CANCELLED' | null // 发票申请：OPEN 待审核发送
@@ -81,6 +89,7 @@ export interface ChatMessage {
   ebay_message_id: string
   seq: number
   role: 'BUYER' | 'SELLER' | 'SYSTEM' | 'UNKNOWN'
+  ack?: boolean // 转人工后自动发的“已收到”回执（不算正式回复）
   direction: string
   body: string
   zh_translation: string | null
@@ -269,6 +278,48 @@ export interface TicketTimelineItem {
   needs_human?: boolean | null
 }
 
+/** 对话里的发票（生成、发到邮箱），按时间插在聊天记录中 */
+export interface InvoiceTimelineItem {
+  kind: 'invoice'
+  key: string
+  at: string
+  invoice_id: number
+  number: string
+  invoice_kind: string
+  kind_label: string
+  order_id: string
+  total: number
+  currency: string
+  status: 'ISSUED' | 'SENT' | 'SIMULATED' | 'SEND_FAILED' | 'VOID'
+  status_label: string
+  send_error: string | null
+  sent_to: string | null
+  buyer_email: string | null
+  sent_by: string | null
+  created_by: string | null
+  created_at: string | null
+  sent_at: string | null
+  pdf_url: string | null
+}
+
+/** 系统配置页的一项 */
+export interface AppSettingItem {
+  group: string
+  key: string
+  env: string
+  label: string
+  help: string
+  type: 'bool' | 'int' | 'str' | 'secret'
+  restart: boolean
+  warn: string | null
+  source: 'page' | 'env'
+  updated_by: string | null
+  updated_at: string | null
+  value: string | number | boolean | null
+  is_set?: boolean
+  choices?: string[]
+}
+
 export interface ConversationDetail extends DraftTrace {
   conversation: {
     id: number
@@ -286,12 +337,14 @@ export interface ConversationDetail extends DraftTrace {
     conversation_title: string | null
     platform_status: string | null
     aftersales: AftersalesInfo | null // 客服标记转售后的状态
+    situation?: SituationInfo | null // AI 判断的会话情况
     mark: MessageMarkInfo | null // 第一个会话标记（兼容旧字段）
     marks?: MessageMarkInfo[] // 会话上的全部标记
     item_url: string | null // 在 eBay 打开商品（按刊登站点选域名）
   }
   messages: ChatMessage[]
   ticket_timeline?: TicketTimelineItem[]
+  invoice_timeline?: InvoiceTimelineItem[]
   events: { id: number; event_type: string; source: string; case_id: string | null; detail: string | null; occurred_at: string }[]
   jobs: { id: number; state: string; run_generation: number; created_at: string }[]
   job: JobInfo | null
@@ -600,4 +653,5 @@ export interface LogisticsTicketRow extends LogisticsTicketItem {
   store_name: string | null
   buyer_key: string | null
   conversation_id: number | null
+  open_same_order: number
 }

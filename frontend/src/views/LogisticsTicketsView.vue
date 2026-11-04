@@ -174,6 +174,8 @@ onMounted(async () => {
         <template #default="{ row }">
           <div class="mono">{{ row.order_id }}</div>
           <div class="mono muted">{{ row.tracking_no }}</div>
+          <el-tag v-if="row.open_same_order > 1" size="small" type="warning" effect="plain"
+                  title="同一订单有多张没完结的查件单，可能重复建单">同订单 {{ row.open_same_order }} 张未完结</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="发给买家" min-width="130">

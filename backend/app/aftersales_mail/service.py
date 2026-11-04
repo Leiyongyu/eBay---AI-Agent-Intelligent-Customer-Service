@@ -95,6 +95,28 @@ def _conversation(db: Session, store_id: str, buyer: str | None) -> int | None:
         Conversation.conversation_type != SYSTEM_TYPE).order_by(Conversation.last_message_at.desc().nulls_last()).limit(1))
 
 
+def order_conversation(db: Session, store_id: str, buyer: str | None, order_id: str | None,
+                       item_ids: list[str] | None = None) -> int | None:
+    """买家可能有多个会话：优先找同一刊登（订单商品）的会话，其次按订单建的通知会话，最后才是买家最近的会话。"""
+    if not buyer:
+        return None
+    base = select(Conversation).where(Conversation.store_id == store_id, func.lower(Conversation.buyer_key) == buyer.lower(),
+                                      Conversation.conversation_type != SYSTEM_TYPE)
+    items = [str(i) for i in item_ids or [] if i]
+    if items:
+        cid = db.scalar(select(Conversation.id).where(Conversation.id.in_(base.with_only_columns(Conversation.id)),
+                                                      Conversation.item_id.in_(items))
+                        .order_by(Conversation.last_message_at.desc().nulls_last()).limit(1))
+        if cid:
+            return cid
+    if order_id:
+        cid = db.scalar(select(Conversation.id).where(Conversation.store_id == store_id,
+                                                      Conversation.ebay_conversation_id == f"ORDER-{order_id}"))
+        if cid:
+            return cid
+    return _conversation(db, store_id, buyer)
+
+
 def locate_order(db: Session, order_id: str) -> Located | None:
     found = lookup_order_api(order_id)
     if not found:
@@ -249,14 +271,19 @@ def cleanup(db: Session, now: datetime | None = None, mailbox=None) -> dict:
     s = get_settings()
     now = now or utcnow()
     cutoff = now - timedelta(days=s.aftersales_retention_days)
+    # 谷仓查件单回复的附件（POD 签收证明等）是纠纷证据，单独按 LOGISTICS_POD_RETENTION_DAYS 保留
+    pod_cutoff = now - timedelta(days=max(s.logistics_pod_retention_days, s.aftersales_retention_days))
     root = s.aftersales_root
     n_files = 0
     for f in db.scalars(select(AftersalesFile).where(AftersalesFile.status == AsFileStatus.STORED,
                                                      AftersalesFile.received_at < cutoff)):
+        pod = f.source == "GOODCANG_TICKET"
+        if pod and f.received_at >= pod_cutoff:
+            continue
         if f.rel_path:
             (root / f.rel_path).unlink(missing_ok=True)
         f.status, f.purged_at = AsFileStatus.PURGED, now
-        f.status_reason = f"满 {s.aftersales_retention_days} 天自动清理"
+        f.status_reason = f"满 {s.logistics_pod_retention_days if pod else s.aftersales_retention_days} 天自动清理"
         n_files += 1
     n_mails = 0
     for m in db.scalars(select(AftersalesMail).where(AftersalesMail.processed_at < cutoff,

@@ -2,9 +2,10 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, get, post, session } from '../api'
-import { STATE_LABELS, errorText, fmtWaiting, intentLabel, riskTag, stateTag } from '../format'
+import { REVIEW_STATES, STAGE_LABELS, STATE_LABELS, errorText, fmtWaiting, intentLabel, riskTag, stateTag } from '../format'
 import type { ConversationItem, MessageTag, Store } from '../types'
 import ConversationPanel from '../components/ConversationPanel.vue'
+import SituationChip from '../components/SituationChip.vue'
 
 // 会话卡片右上角的最后一条消息时间：今天只显示时分，今年显示月-日 时分，更早显示年-月-日
 function fmtLast(iso: string | null): string {
@@ -31,6 +32,21 @@ async function loadTags() {
   tags.value = await get<MessageTag[]>('/internal/message-tags?include_inactive=true')
 }
 
+// 会话卡片标签分组用：系统自动打的（打标人以 “AI” 开头，如 AI（自动标记）、AI（物流规则）、AI（查件结果），以及买家上传页）算 AI 智能标签
+const isAi = (who?: string | null) => !!who && (who.startsWith('AI') || who === '上传页')
+const allMarks = (c: ConversationItem) => c.marks || (c.mark ? [c.mark] : [])
+const manualMarks = (c: ConversationItem) => allMarks(c).filter((m) => !isAi(m.marked_by))
+const aiMarks = (c: ConversationItem) => allMarks(c).filter((m) => isAi(m.marked_by))
+function replyLabel(c: ConversationItem) {
+  if (!c.job) return ''
+  if (c.job.state === 'SENT') return c.auto_replied ? 'AI 自动回复' : '人工回复'
+  return STATE_LABELS[c.job.state] || c.job.state
+}
+const aftersalesType = (c: ConversationItem) =>
+  c.aftersales?.status === 'DONE' ? 'success' : c.aftersales?.status === 'IN_PROGRESS' ? 'primary' : 'warning'
+const aftersalesLabel = (c: ConversationItem) =>
+  `${c.aftersales?.status === 'DONE' ? '售后已完成' : c.aftersales?.status === 'IN_PROGRESS' ? '售后处理中' : '待售后'} · ${c.aftersales?.type || ''}`
+
 // 买家消息与 eBay 系统消息（退货、退款、取消等通知）分开看
 const kind = ref<'buyer' | 'system'>('buyer')
 // 售后默认看“售后待处理”，其他角色默认看“待审核”
@@ -51,6 +67,7 @@ const unreadOnly = ref(false)
 type FilterCounts = {
   all: number; invoice: number; aftersales: number; aftersales_done: number; tags: Record<string, number>
   views?: Record<View, number>
+  stages?: Record<string, number>
 }
 const counts = ref<FilterCounts | null>(null)
 function withCount(label: string, n: number | undefined) {
@@ -60,6 +77,7 @@ const filterTotal = computed(() => {
   const c = counts.value
   if (!c || kind.value !== 'buyer') return undefined
   const f = filter.value
+  if (f.startsWith('stage:')) return c.stages?.[f.slice(6)] || 0
   return f.startsWith('tag:') ? c.tags[f.slice(4)] || 0 : (c as unknown as Record<string, number>)[f]
 })
 
@@ -107,8 +125,9 @@ async function refresh() {
   try {
     // 系统消息没有回复任务，不分待审核等分组
     const f = kind.value === 'system' ? 'all' : filter.value
-    const q = new URLSearchParams({ group: f.startsWith('tag:') ? 'all' : f, kind: kind.value })
+    const q = new URLSearchParams({ group: f.startsWith('tag:') || f.startsWith('stage:') ? 'all' : f, kind: kind.value })
     if (f.startsWith('tag:')) q.set('tag_id', f.slice(4))
+    if (f.startsWith('stage:')) q.set('stage', f.slice(6))
     if (kind.value === 'buyer') q.set('view', view.value)
     if (storeId.value) q.set('store_id', storeId.value)
     if (keyword.value.trim()) q.set('q', keyword.value.trim())
@@ -285,6 +304,9 @@ onUnmounted(() => {
             <el-option :label="withCount('待售后处理', counts?.aftersales)" value="aftersales" />
             <el-option :label="withCount('售后已完成', counts?.aftersales_done)" value="aftersales_done" />
           </el-option-group>
+          <el-option-group label="会话阶段（AI 判断）">
+            <el-option v-for="(label, k) in STAGE_LABELS" :key="k" :label="withCount(label, counts?.stages?.[k])" :value="`stage:${k}`" />
+          </el-option-group>
           <el-option-group label="会话标记">
             <el-option v-for="t in tags" :key="t.id"
                        :label="withCount(t.is_active ? t.name : `${t.name}（已停用）`, counts ? counts.tags[String(t.id)] || 0 : undefined)"
@@ -340,18 +362,30 @@ onUnmounted(() => {
             <el-tag v-if="c.channel_source === 'ebay'" size="small" type="primary">eBay</el-tag>
             <span class="muted" :title="`店铺 ID：${c.store_id}`">{{ c.store_name || c.store_id }} · {{ c.marketplace_id }}</span>
             <el-tag v-if="c.job?.risk_level" :type="riskTag(c.job.risk_level)" size="small">{{ c.job.risk_level }}</el-tag>
-            <el-tag v-if="c.job" :type="stateTag(c.job.state)" size="small" effect="plain">
-              {{ STATE_LABELS[c.job.state] || c.job.state }}
-            </el-tag>
-            <el-tag v-if="c.handoff_state === 'HUMAN'" type="danger" size="small" effect="plain">已接管</el-tag>
-            <el-tag v-if="c.auto_replied" type="success" size="small">AI 自动回复</el-tag>
-            <el-tag v-for="m in c.marks || (c.mark ? [c.mark] : [])" :key="m.tag_id" size="small" :type="m.color"
-                    :title="m.note || ''">{{ m.tag }}</el-tag>
-            <el-tag v-if="c.invoice_status === 'OPEN'" size="small" type="warning">待发发票</el-tag>
-            <el-tag v-if="c.aftersales" size="small" effect="plain"
-                    :type="c.aftersales.status === 'DONE' ? 'success' : c.aftersales.status === 'IN_PROGRESS' ? 'primary' : 'warning'">
-              {{ c.aftersales.status === 'DONE' ? '售后已完成' : c.aftersales.status === 'IN_PROGRESS' ? '售后处理中' : '待售后' }} · {{ c.aftersales.type }}
-            </el-tag>
+          </div>
+          <!-- 标签按三组排：① 回复状态（待审核 / 人工回复 / AI 自动回复）② 人工打的标记 ③ AI 智能标签（会话情况、自动标记、发票、AI 转的售后） -->
+          <div v-if="kind === 'buyer'" class="tag-groups">
+            <span v-if="c.job || c.handoff_state === 'HUMAN'" class="tag-group">
+              <el-tag v-if="c.job" :type="c.auto_replied ? 'success' : stateTag(c.job.state)" size="small" effect="plain"
+                      :class="{ 'review-hot': REVIEW_STATES.includes(c.job.state) }">{{ replyLabel(c) }}</el-tag>
+              <el-tag v-if="c.handoff_state === 'HUMAN'" type="danger" size="small" effect="plain">已接管</el-tag>
+            </span>
+            <span v-if="manualMarks(c).length || (c.aftersales && !isAi(c.aftersales.marked_by))" class="tag-group">
+              <el-tag v-for="m in manualMarks(c)" :key="m.tag_id" size="small" :type="m.color"
+                      :title="`${m.marked_by} 标记${m.note ? `：${m.note}` : ''}`">{{ m.tag }}</el-tag>
+              <el-tag v-if="c.aftersales && !isAi(c.aftersales.marked_by)" size="small" effect="plain" :type="aftersalesType(c)">
+                {{ aftersalesLabel(c) }}
+              </el-tag>
+            </span>
+            <span v-if="c.situation || aiMarks(c).length || c.invoice_status === 'OPEN' || (c.aftersales && isAi(c.aftersales.marked_by))"
+                  class="tag-group" title="AI 智能标签">
+              <SituationChip v-if="c.situation" :s="c.situation" />
+              <el-tag v-for="m in aiMarks(c)" :key="m.tag_id" size="small" :type="m.color" effect="plain" class="ai-tag"
+                      :title="`AI 按问题类型自动标记${m.note ? `：${m.note}` : ''}`">{{ m.tag }}</el-tag>
+              <el-tag v-if="c.invoice_status === 'OPEN'" size="small" type="warning" effect="plain" class="ai-tag">待发发票</el-tag>
+              <el-tag v-if="c.aftersales && isAi(c.aftersales.marked_by)" size="small" effect="plain" class="ai-tag"
+                      :type="aftersalesType(c)" :title="`${c.aftersales.marked_by} 自动转售后`">{{ aftersalesLabel(c) }}</el-tag>
+            </span>
           </div>
           <div v-if="c.conversation_title && kind === 'buyer'" class="title-line">
             <a v-if="c.item_url" :href="c.item_url" target="_blank" rel="noopener noreferrer" title="在 eBay 打开商品" @click.stop>↗</a>
@@ -586,6 +620,28 @@ onUnmounted(() => {
 .item.unread .when {
   color: var(--danger-text);
   font-weight: 600;
+}
+.tag-groups {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 0;
+  margin: 5px 0 2px;
+}
+.tag-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+/* 组与组之间一条竖线隔开 */
+.tag-group + .tag-group {
+  margin-left: 7px;
+  padding-left: 7px;
+  border-left: 1px solid var(--line);
+}
+.ai-tag {
+  border-style: dashed;
 }
 .first-row {
   padding-right: 72px;

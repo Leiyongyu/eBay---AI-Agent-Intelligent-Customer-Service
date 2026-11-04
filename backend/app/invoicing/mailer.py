@@ -14,20 +14,20 @@ EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,24}")
 SUBJECTS = {
     "de": ("Ihre Rechnung{ref} zur eBay-Bestellung {order}",
            "Guten Tag,\n\nanbei erhalten Sie die Rechnung{ref} zu Ihrer eBay-Bestellung {order}.\n\n"
-           "Vielen Dank für Ihren Einkauf.\n\nMit freundlichen Grüßen\n{sign}"),
+           "Vielen Dank für Ihren Einkauf."),
     "en": ("Your invoice{ref} for eBay order {order}",
            "Hello,\n\nPlease find attached invoice{ref} for your eBay order {order}.\n\n"
-           "Thank you for your purchase.\n\nKind regards\n{sign}"),
+           "Thank you for your purchase."),
     "fr": ("Votre facture{ref} pour la commande eBay {order}",
            "Bonjour,\n\nVeuillez trouver ci-joint la facture{ref} de votre commande eBay {order}.\n\n"
-           "Merci pour votre achat.\n\nCordialement\n{sign}"),
+           "Merci pour votre achat."),
     "it": ("La sua fattura{ref} per l'ordine eBay {order}",
            "Buongiorno,\n\nin allegato trova la fattura{ref} relativa al suo ordine eBay {order}.\n\n"
-           "Grazie per il suo acquisto.\n\nCordiali saluti\n{sign}"),
+           "Grazie per il suo acquisto."),
     "es": ("Su factura{ref} del pedido de eBay {order}",
            "Hola,\n\nAdjuntamos la factura{ref} de su pedido de eBay {order}.\n\n"
-           "Gracias por su compra.\n\nAtentamente\n{sign}"),
-}
+           "Gracias por su compra."),
+}  # 正文不带落款（“Kind regards + 公司名”不要）；发件人显示名仍用 INVOICE_MAIL_FROM_NAME 或店铺公司名
 FILE_PREFIX = {"de": "Rechnung", "en": "Invoice", "fr": "Facture", "it": "Fattura", "es": "Factura"}
 
 

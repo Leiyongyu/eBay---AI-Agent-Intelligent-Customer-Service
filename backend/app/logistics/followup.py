@@ -1,6 +1,7 @@
 """物流转人工后的两件事（回复流程落库时调用，失败不影响回复）：
 1. 查件单：断更、轨迹异常、妥投未收到时，在本系统起草一张查件单（查件单号为 DRAFT- 开头）；同一订单或跟踪号已有未完结的不再起草。
    开了 LOGISTICS_TICKET_AUTO_SUBMIT 时直接提交到谷仓（save_type=2），否则客服在工作台核对、可改后点“提交到谷仓”。
+   已有在跟的查件单时这条物流原因不再转人工；只有还没提交的草稿不算在跟（不能对买家说已查件），照旧转人工。
 2. 补发库存：涉及补发（超时需判断补发、买家要求补发、妥投未收到）时查谷仓库存，
    原发货区域仓有货才能补发，没货只能协商退款——结果写进售后备注给人工参考，AI 不对买家说。
 """
@@ -100,10 +101,35 @@ def _desc(reason: str, order_id: str, pkg: dict) -> str:
     return (head + body)[:300]
 
 
-def _has_open_ticket(db: Session, order_id: str, tracking_no: str) -> bool:
-    rows = db.scalars(select(LogisticsTicket).where(or_(LogisticsTicket.tracking_no == tracking_no,
-                                                        LogisticsTicket.reference_no == order_id)))
-    return any(r.io_status not in CLOSED for r in rows)
+OPEN_SKIP = "已有未完结的查件单"  # 已提交到谷仓、在跟进中：算已处理
+DRAFT_SKIP = "已有查件单草稿（未提交到谷仓）"  # 还没提交：不能对买家说已查件，照旧转人工
+STALE_SKIP = "查件单跟进超时"  # 谷仓回复（或提交）已超过 LOGISTICS_TICKET_FOLLOWUP_DAYS 天，问题还在：转人工判断补发
+
+
+def ticket_age_days(t: LogisticsTicket) -> float | None:
+    """查件单最近一次进展（谷仓回复，没有回复时按提交/创建时间）距今多少天。"""
+    from datetime import datetime, timezone
+
+    from .assess import CN, parse_time
+
+    ref = parse_time(t.replied_at, CN) or (t.submitted_at.replace(tzinfo=timezone.utc) if t.submitted_at else None)         or parse_time(t.added_at, CN)
+    return round((datetime.now(timezone.utc) - ref).total_seconds() / 86400, 1) if ref else None
+
+
+def is_stale(t: LogisticsTicket) -> bool:
+    """已提交的查件单跟进超时：谷仓回复后（或提交后一直没回复）超过 N 天，包裹还是同样的问题。"""
+    if is_draft(t):
+        return False
+    age = ticket_age_days(t)
+    return age is not None and age >= get_settings().logistics_ticket_followup_days
+
+
+def _open_ticket(db: Session, order_id: str, tracking_no: str) -> LogisticsTicket | None:
+    """同一订单或跟踪号未完结的查件单；已提交的优先返回。"""
+    rows = [r for r in db.scalars(select(LogisticsTicket).where(or_(LogisticsTicket.tracking_no == tracking_no,
+                                                                    LogisticsTicket.reference_no == order_id)))
+            if r.io_status not in CLOSED]
+    return next((r for r in rows if not is_draft(r)), rows[0] if rows else None)
 
 
 def draft_tickets(db: Session, client: GoodcangClient, state, reasons: list[str], *, store_id: str | None,
@@ -113,8 +139,9 @@ def draft_tickets(db: Session, client: GoodcangClient, state, reasons: list[str]
     out = []
     for pkg in _packages(state):
         reason = (pkg.get("assessment") or {}).get("reason_code")
-        if reason not in TICKET_TYPES and "TRACKING_DELIVERED_NOT_RECEIVED" in reasons and \
-                (pkg.get("tracking") or {}).get("status") == "Delivered":
+        delivered = (pkg.get("tracking") or {}).get("status") == "Delivered" or \
+            (pkg.get("assessment") or {}).get("stage") == "DELIVERED"  # 含谷仓回传妥投（17TRACK 查不到的承运商）
+        if reason not in TICKET_TYPES and "TRACKING_DELIVERED_NOT_RECEIVED" in reasons and delivered:
             reason = "TRACKING_DELIVERED_NOT_RECEIVED"
         if reason not in TICKET_TYPES or reason not in reasons:
             continue
@@ -123,12 +150,18 @@ def draft_tickets(db: Session, client: GoodcangClient, state, reasons: list[str]
         if not (tn and wh.get("order_code") and order_id):
             out.append({"tracking_no": tn, "skipped": "不是谷仓发的货或缺跟踪号"})
             continue
-        if _has_open_ticket(db, order_id, tn):
-            out.append({"tracking_no": tn, "skipped": "已有未完结的查件单", "reason": reason})
+        existing = _open_ticket(db, order_id, tn)
+        if existing is not None:
+            # 查件单在跟但已超时（谷仓回复“已催派”后轨迹还是不动，查件单我们不会去完结）：不再当成已处理，转人工判断补发
+            skip = DRAFT_SKIP if is_draft(existing) else STALE_SKIP if is_stale(existing) else OPEN_SKIP
+            out.append({"tracking_no": tn, "existing": existing.io_code, "reason": reason, "skipped": skip,
+                        **({"age_days": ticket_age_days(existing)} if skip == STALE_SKIP else {})})
             continue
         wanted = TICKET_TYPES[reason]
-        if reason in ("TRACKING_STALLED", "TRACKING_RESHIP_REVIEW") and not (pkg.get("tracking") or {}).get("events"):
-            wanted = ("无Ascan",) + wanted  # 发货后一直没有轨迹：先查有没有揽收扫描
+        trk = pkg.get("tracking") or {}
+        if reason in ("TRACKING_STALLED", "TRACKING_RESHIP_REVIEW") and not wh.get("ascan_time") \
+                and (not trk.get("events") or trk.get("status") == "InfoReceived"):
+            wanted = ("无Ascan",) + wanted  # 没有轨迹或只有面单信息、谷仓也没有揽收时间：先查有没有揽收扫描
         picked = _pick_type(client, wh.get("shipping_method"), wanted)
         if not picked:
             out.append({"tracking_no": tn, "skipped": f"物流方式 {wh.get('shipping_method')} 不支持所需查件类型"})
@@ -166,7 +199,7 @@ def auto_handled(follow: dict | None) -> set[str]:
     if not follow or not get_settings().logistics_ticket_auto_submit:
         return set()
     return {t["reason"] for t in follow.get("tickets") or [] if t.get("reason")
-            and (t.get("submitted") or t.get("skipped") == "已有未完结的查件单")}
+            and (t.get("submitted") or t.get("skipped") == OPEN_SKIP)}
 
 
 # ---------------------------------------------------------------- 补发库存
@@ -215,9 +248,11 @@ def after_reply(db: Session, job, conv, state, reasons: list[str], client: Goodc
             out["tickets"] = draft_tickets(db, client, state, reasons, store_id=conv.store_id if conv else None,
                                            buyer_key=conv.buyer_key if conv else None,
                                            conversation_id=conv.id if conv else None)
-            if s.logistics_ticket_auto_submit:
+            if s.logistics_ticket_auto_submit and conv is not None and conv.channel_source is not None:
                 db.flush()
                 auto_submit(db, client, out["tickets"])
+            elif s.logistics_ticket_auto_submit and any(t.get("io_code") for t in out["tickets"]):
+                out["submit_skipped"] = "测试会话：只起草不提交到谷仓"  # 测试会话用的是真实订单号，不能真的去谷仓建单
         except GoodcangError as e:
             out["ticket_error"] = str(e)
     if want_stock:
@@ -228,17 +263,32 @@ def after_reply(db: Session, job, conv, state, reasons: list[str], client: Goodc
                 out["stock"] = reship_stock(client, order_id, (order or {}).get("items"))
             except GoodcangError as e:
                 out["stock_error"] = str(e)
-    if conv is not None and conv.aftersales_marked_by == ACTOR and conv.aftersales_status == Aftersales.PENDING:
-        extra = [x for x in (
-            (out.get("stock") or {}).get("summary"),
-            ("已自动向谷仓提交查件单（" + "、".join(t["type"] for t in out.get("tickets", []) if t.get("submitted")) + "）")
-            if any(t.get("submitted") for t in out.get("tickets", [])) else None,
-            ("已起草查件单（" + "、".join(t["type"] for t in out.get("tickets", []) if t.get("io_code") and not t.get("submitted"))
-             + "），请在“查件单”页核对后提交到谷仓")
-            if any(t.get("io_code") and not t.get("submitted") for t in out.get("tickets", [])) else None) if x]
-        if extra and not any(x in (conv.aftersales_note or "") for x in extra):
-            conv.aftersales_note = "；".join([conv.aftersales_note or ""] + extra).strip("；")[:1000]
+    append_note(conv, out)
     return out
+
+
+def append_note(conv, out: dict | None) -> None:
+    """把补发库存、查件单结果追加到 AI 标的“待售后处理”备注里（会话还没被 AI 标售后时不动）。
+    回复流程里先跑 after_reply 再标售后，所以标完售后要再调一次，否则第一次标的备注里没有库存和查件单。"""
+    if not out or conv is None or conv.aftersales_marked_by != ACTOR or conv.aftersales_status != Aftersales.PENDING:
+        return
+    tickets = out.get("tickets") or []
+    sub = [f"{t['type']} {t['io_code']}" for t in tickets if t.get("submitted")]
+    new = [t["type"] for t in tickets if t.get("io_code") and not t.get("submitted")]
+    drafts = [t["existing"] for t in tickets if t.get("skipped") == DRAFT_SKIP and t.get("existing")]
+    stale = [f"{t['existing']}（{t.get('age_days')} 天）" for t in tickets if t.get("skipped") == STALE_SKIP]
+    elsewhere = [t["tracking_no"] for t in tickets if t.get("skipped") == "不是谷仓发的货或缺跟踪号" and t.get("tracking_no")]
+    extra = [x for x in (
+        (out.get("stock") or {}).get("summary"),
+        f"已自动向谷仓提交查件单（{'、'.join(sub)}）" if sub else None,
+        f"已起草查件单（{'、'.join(new)}），请在“查件单”页核对后提交到谷仓" if new else None,
+        f"已有查件单草稿 {'、'.join(drafts)} 还没提交到谷仓，请在“查件单”页核对后提交" if drafts else None,
+        f"查件单 {'、'.join(stale)} 跟进已超时、问题还在，请判断补发或再次催查" if stale else None,
+        f"{'、'.join(elsewhere)} 不是谷仓发的货：系统不能建查件单、查不到补发库存，请到对应仓库/承运商处理" if elsewhere else None,
+        out.get("submit_skipped")) if x]
+    extra = [x for x in extra if x not in (conv.aftersales_note or "")]
+    if extra:
+        conv.aftersales_note = "；".join([conv.aftersales_note or ""] + extra).strip("；")[:1000]
 
 
 # ---------------------------------------------------------------- 工作台：修改、提交、废弃草稿
@@ -283,3 +333,103 @@ def discard_draft(db: Session, t: LogisticsTicket, actor: str) -> LogisticsTicke
     db.add(AuditEvent(actor=actor, action="LOGISTICS_TICKET_DISCARDED", store_id=t.store_id, conversation_id=t.conversation_id,
                       detail={"io_code": t.io_code, "order_id": t.reference_no}))
     return t
+
+
+# ---------------------------------------------------------------- 提交后安抚买家
+NOTICE_ACTOR = "AI（查件安抚）"
+# 买家这次只问了物流（或顺带致谢）才发固定的安抚消息；还问了别的，交给人工一起回
+NOTICE_INTENTS = {"shipping_status", "delivery_delay", "handling_time", "thanks_closing"}
+# 这些原因不影响发安抚消息（安抚消息是固定话术，不涉及承诺）；其他原因（合规、纠纷、退款、发票等）留给人工
+NOTICE_OK_REASONS = {"MODEL_REQUESTED_HUMAN", "RISK_NOT_L0", "INTENT_NOT_WHITELISTED", "STORE_AUTO_SEND_OFF",
+                     "AUTO_SEND_DISABLED", "NO_KB_EVIDENCE", "AUTO_REPLY_STREAK", "TRACKING_STALLED",
+                     "TRACKING_RESHIP_REVIEW", "TRACKING_EXCEPTION", "TRACKING_NOT_FOUND",
+                     "TRACKING_DELIVERED_NOT_RECEIVED", "TRACKING_LOST_DAMAGED", "RESHIP_REQUESTED"}
+NOTICE_TEXT = {
+    "en": "Thank you for your message and your patience. We have passed your request on to our logistics team, and they "
+          "have opened an inquiry with the carrier about your parcel. As soon as we receive the carrier's reply, we will "
+          "let you know right away.",
+    "de": "Vielen Dank für Ihre Nachricht und Ihre Geduld. Wir haben Ihr Anliegen an unser Logistik-Team weitergegeben, "
+          "das bereits eine Nachforschung beim Versanddienstleister zu Ihrem Paket eingeleitet hat. Sobald uns die "
+          "Rückmeldung des Versanddienstleisters vorliegt, informieren wir Sie umgehend.",
+    "fr": "Merci pour votre message et votre patience. Nous avons transmis votre demande à notre équipe logistique, qui a "
+          "ouvert une enquête auprès du transporteur concernant votre colis. Dès que nous aurons la réponse du "
+          "transporteur, nous vous en informerons immédiatement.",
+    "it": "Grazie per il messaggio e per la pazienza. Abbiamo inoltrato la sua richiesta al nostro team logistico, che ha "
+          "aperto una verifica con il corriere sul suo pacco. Appena riceveremo la risposta del corriere, la informeremo "
+          "subito.",
+    "es": "Gracias por su mensaje y su paciencia. Hemos trasladado su consulta a nuestro equipo de logística, que ha "
+          "abierto una investigación con el transportista sobre su paquete. En cuanto recibamos la respuesta del "
+          "transportista, le informaremos de inmediato.",
+}
+NOTICE_ZH = "感谢您的来信和耐心等待。我们已把您的问题转给物流同事，他们已就您的包裹向承运商发起查询。一收到承运商的回复，我们会马上通知您。"
+_SITE_LANG = {"EBAY_DE": "de", "EBAY_AT": "de", "EBAY_CH": "de", "EBAY_FR": "fr", "EBAY_BE": "fr", "EBAY_IT": "it",
+              "EBAY_ES": "es"}
+
+
+def _notice_language(db: Session, conv, hint: str | None) -> str:
+    """买家语言：本次 AI 草稿的语言 → 这个会话最近一次 AI 草稿的语言 → 站点语言 → 英语。"""
+    from ..models import Draft, ReplyJob
+
+    lang = (hint or "").lower()[:2]
+    if lang not in NOTICE_TEXT:
+        last = db.scalar(select(Draft.language).join(ReplyJob, Draft.job_id == ReplyJob.id)
+                         .where(ReplyJob.conversation_id == conv.id, Draft.author == "agent", Draft.language.is_not(None))
+                         .order_by(Draft.id.desc()).limit(1))
+        lang = (last or "").lower()[:2]
+    return lang if lang in NOTICE_TEXT else _SITE_LANG.get(conv.marketplace_id or "", "en")
+
+
+def send_submit_notice(db: Session, tickets: list[LogisticsTicket], *, respect_claim: bool = False) -> str:
+    """查件单提交到谷仓后，给买家发一条固定的安抚消息（模拟发送）：已转物流同事、已向承运商查询、有结果马上通知。
+    会话里有待审的 AI 草稿时一并结案（这条就是本次回复）。买家还问了别的、有其他需人工的原因、客服正在写回复时不发，
+    留给人工。返回 SENT 或没发的原因（同时记在查件单上）。谷仓回复后由查件单同步再把结果发给买家。"""
+    from ..models import Conversation, Draft, JobState, ReplyJob, WorkClaim
+    from ..sending.service import GENERATING, SendError, simulate_send
+
+    tickets = [t for t in tickets if t is not None and t.notice_sent_at is None]
+    if not tickets:
+        return "已发过"
+
+    def skip(reason: str) -> str:
+        for t in tickets:
+            t.notice_status = reason[:200]
+        return reason
+
+    if not get_settings().logistics_ticket_submit_notice:
+        return skip("未开启 LOGISTICS_TICKET_SUBMIT_NOTICE")
+    conv_id = next((t.conversation_id for t in tickets if t.conversation_id), None)
+    conv = db.get(Conversation, conv_id) if conv_id else None
+    if conv is None:
+        return skip("没有买家会话，等谷仓回复后再通知")
+    if respect_claim:
+        claim = db.scalar(select(WorkClaim).where(WorkClaim.store_id == conv.store_id, WorkClaim.conversation_id == conv.id))
+        if claim and claim.expires_at > utcnow():
+            return skip("有同事正在处理这个会话，没发")
+    job = db.scalar(select(ReplyJob).where(ReplyJob.conversation_id == conv.id, ReplyJob.state != JobState.CANCELLED_STALE)
+                    .order_by(ReplyJob.id.desc()).limit(1))
+    draft = None
+    if job is not None and job.state in GENERATING:
+        return skip("AI 正在生成回复，没发")
+    if job is not None and job.state in JobState.PENDING_REVIEW:
+        draft = db.scalar(select(Draft).where(Draft.job_id == job.id, Draft.status == "ACTIVE").order_by(Draft.id.desc()).limit(1))
+        if draft is not None and draft.author != "agent":
+            return skip("客服正在写回复，没发")
+        other = set((draft.intents if draft else None) or []) - NOTICE_INTENTS
+        if other:
+            return skip("买家还问了其他问题（" + "、".join(sorted(other)) + "），留给人工一起回复")
+        blocking = set(job.decision_reasons or []) - NOTICE_OK_REASONS
+        if blocking:
+            return skip("还有其他需人工的原因（" + "、".join(sorted(blocking)) + "），留给人工回复")
+    lang = _notice_language(db, conv, draft.language if draft else None)
+    try:
+        with db.begin_nested():
+            msg, _ = simulate_send(db, conv=conv, text=NOTICE_TEXT[lang], actor=NOTICE_ACTOR, text_zh=NOTICE_ZH, auto=True)
+    except SendError as e:
+        return skip(f"没发：{e.message}")
+    now = utcnow()
+    for t in tickets:
+        t.notice_status, t.notice_sent_at = "SENT", now
+    db.add(AuditEvent(actor=NOTICE_ACTOR, action="LOGISTICS_TICKET_NOTICE_SENT", store_id=conv.store_id,
+                      conversation_id=conv.id, detail={"io_codes": [t.io_code for t in tickets], "language": lang,
+                                                       "message_id": msg.ebay_message_id}))
+    return "SENT"

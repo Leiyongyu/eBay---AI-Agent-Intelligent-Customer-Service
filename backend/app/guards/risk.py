@@ -37,6 +37,9 @@ REASON_LABELS = {
     "MISSING_FACTS": "缺少必要事实",
     "LANGUAGE_MISMATCH": "回复语言和买家最新来信不一致",
     "INVOICE_EMAIL_RECEIVED": "买家发来接收发票的邮箱：请在会话“发票”里核对订单、审核后发邮件",
+    "INVOICE_VAT_HUMAN": "买家要增值税发票：系统不开增值税发票，请人工开具后发给买家",
+    "INVOICE_AUTO_FAILED": "普通发票没能自动发出（见发票页备注）：回复里说“已发送”的请改，处理好发票再回复",
+    "INVOICE_NEEDS_ORDER": "买家给了邮箱但有多笔订单或查不到订单，发票没发出；回复应请买家说明订单号，请核对回复（不能说已发出）",
     "KNOWLEDGE_CONFLICT": "知识条款相互冲突",
     "EVIDENCE_INVALID": "引用了本次不存在的证据",
     "CLAIMS_MISSING": "回复有事实陈述但没有绑定证据",
@@ -58,6 +61,8 @@ REASON_LABELS = {
     "TRACKING_STALLED": "物流轨迹多天未更新（达到 LOGISTICS_STALL_DAYS），需人工判断是否补发",
     "TRACKING_LOST_DAMAGED": "物流轨迹显示损坏、丢失、退回或运输过久，需人工判断是否补发",
     "EMPTY_PARCEL": "买家说收到的是空包裹，需人工判断是否补发",
+    "TRACKING_PICKUP_OVERDUE": "包裹在取件点放太久还没取，快到期退回，需人工提醒买家或安排",
+    "SHIP_LATE": "已过 eBay 承诺的最晚发货日还没发货，需人工联系仓库",
     "TRACKING_RESHIP_REVIEW": "物流轨迹长时间未更新（达到 LOGISTICS_RESHIP_DAYS），需人工判断是否补发",
     "RESHIP_REQUESTED": "买家要求补发/重发/换货，由人工决定",
 }

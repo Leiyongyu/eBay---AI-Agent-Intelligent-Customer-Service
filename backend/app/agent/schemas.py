@@ -69,7 +69,16 @@ class ReplyDraftOutput(BaseModel):
     reasoning_zh: str = Field(default="", max_length=600, description="给审核员看的中文回复思路，2–4 句，不超过 200 字")
     reply_text: str = Field(max_length=3000)
     reply_zh: str = Field(default="", max_length=3000, description="reply_text 的中文回译，仅供审核员")
+    # 会话情况标签：客服在列表里一眼看出这个会话怎么了（看整段会话，不只是最新一条）
+    situation_stage: Literal["presale", "shipping", "aftersales", "invoice", "other"] = Field(
+        default="other", description="会话现在所处阶段：presale 售前咨询 / shipping 物流跟进 / aftersales 售后处理 / invoice 发票 / other 其他")
+    situation_zh: str = Field(default="", description="一句中文概括这个会话现在是什么情况、卡在哪，不超过 16 个汉字")
     reason_code: str = Field(max_length=64)
+
+    @field_validator("situation_zh")
+    @classmethod
+    def _short(cls, v: str) -> str:
+        return " ".join((v or "").split())[:24]
 
     @field_validator("intents")
     @classmethod

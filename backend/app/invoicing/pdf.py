@@ -2,7 +2,8 @@
 
 - 普通发票（NORMAL）：照 eBay 后台下载的订单单据排版——店铺名、收货地址 / 卖家地址 / 买家注册地址三栏、
   “VAT Paid: OSS - …”（eBay 代收增值税用的 eBay 税号）、订单号与销售记录号、带税率列的商品表、
-  “MwSt. (von eBay eingezogen)”合计和脚注。不印 eBay 标志。
+  “MwSt. (von eBay eingezogen)”合计和脚注；顶部店铺链接和店铺二维码，收货地址下买家电话和 eBay 转发邮箱，
+  左下角卖家留言。不印 eBay 标志（eBay 的商标，这份单据是店铺开的）。语言按站点。
 - 增值税发票（VAT）：照店铺的 Excel 发票模板（湘彦-DE-VAT 发票模板）——粗外框的表格，卖方公司与地址、
   邮编、卖方税号，发票号与开票日期，收票人与收货地址，商品明细，小计/运费/VAT/折扣/总价，销售渠道与订单号。
 
@@ -104,6 +105,26 @@ def _rate(r) -> str:
     return str(int(r)) if float(r).is_integer() else str(r)
 
 
+def _qr(url: str, size: float):
+    """店铺链接二维码（reportlab 自带，不用外部库）。"""
+    from reportlab.graphics.barcode.qr import QrCodeWidget
+    from reportlab.graphics.shapes import Drawing
+
+    w = QrCodeWidget(url, barBorder=0)
+    x0, y0, x1, y1 = w.getBounds()
+    d = Drawing(size, size, transform=[size / (x1 - x0), 0, 0, size / (y1 - y0), 0, 0])
+    d.add(w)
+    d.hAlign = "CENTER"
+    return d
+
+
+def _service_label(code: str, L: dict) -> str:
+    """配送服务代码 → 单据上的写法：eBay 单据把“其他快递”类显示成 Sonstige / Other；其余去掉站点前缀、下划线换空格。"""
+    if re.search(r"other|sonstig|autre|altro|otro", code or "", re.I):
+        return L["other_service"]
+    return re.sub(r"^(UK|DE|FR|IT|ES|AT|US)_", "", code or "").replace("_", " ")
+
+
 # ------------------------------------------------------------------ 普通发票：照 eBay 订单单据
 NORMAL = {
     "de": {"title": "RECHNUNG", "ship_to": "Lieferadresse", "sender": "Absenderadresse", "reg": "Anmeldeadresse des Käufers",
@@ -111,7 +132,9 @@ NORMAL = {
            "cols": ("Artikel", "Stückzahl", "Artikelpreis", "MwSt.-Satz", "Artikel insgesamt"), "item_no": "Artikelnr.",
            "service": "Vom Käufer ausgewählter Versandservice", "subtotal": "Zwischensumme", "shipping": "Versand",
            "discount": "Rabatt", "vat": "MwSt. (von eBay eingezogen)", "tax": "Steuer (von eBay eingezogen)",
-           "vat_incl": "enthaltene MwSt.", "total": "Gesamtbetrag",
+           "vat_incl": "enthaltene MwSt.", "total": "Gesamtbetrag", "qr": "Link zu Shop-QR-Code",
+           "msg_from": "Eine Nachricht von {name}", "thanks": "Vielen Dank für Ihren Einkauf! Ich wünsche Ihnen viel Freude damit!",
+           "other_service": "Sonstige",
            "note": "Gesamtbetrag einschl. der von eBay eingezogenen Mehrwertsteuer. eBay hat diese MwSt. vom Betrag "
                    "abgezogen, den der Käufer bezahlt hat, und führt sie an die zuständigen Steuerbehörden ab."},
     "en": {"title": "INVOICE", "ship_to": "Ship to", "sender": "Sender address", "reg": "Buyer's registered address",
@@ -119,7 +142,9 @@ NORMAL = {
            "cols": ("Item", "Quantity", "Item price", "VAT rate", "Item total"), "item_no": "Item no.",
            "service": "Shipping service selected by buyer", "subtotal": "Subtotal", "shipping": "Shipping",
            "discount": "Discount", "vat": "VAT (collected by eBay)", "tax": "Tax (collected by eBay)",
-           "vat_incl": "VAT included", "total": "Total",
+           "vat_incl": "VAT included", "total": "Total", "qr": "Link to shop QR code",
+           "msg_from": "A message from {name}", "thanks": "Thank you for your purchase! I hope you enjoy it!",
+           "other_service": "Other",
            "note": "Total including the VAT collected by eBay. eBay deducted this VAT from the amount paid by the buyer "
                    "and remits it to the relevant tax authorities."},
     "fr": {"title": "FACTURE", "ship_to": "Adresse de livraison", "sender": "Adresse de l'expéditeur",
@@ -127,7 +152,9 @@ NORMAL = {
            "record": "N° d'enregistrement de vente", "cols": ("Objet", "Quantité", "Prix", "Taux de TVA", "Total objet"),
            "item_no": "N° d'objet", "service": "Service de livraison choisi par l'acheteur", "subtotal": "Sous-total",
            "shipping": "Livraison", "discount": "Remise", "vat": "TVA (perçue par eBay)", "tax": "Taxe (perçue par eBay)",
-           "vat_incl": "dont TVA", "total": "Total",
+           "vat_incl": "dont TVA", "total": "Total", "qr": "Lien vers le QR code de la boutique",
+           "msg_from": "Un message de {name}", "thanks": "Merci pour votre achat ! Profitez-en bien !",
+           "other_service": "Autre",
            "note": "Total TVA perçue par eBay incluse. eBay a déduit cette TVA du montant payé par l'acheteur et la reverse "
                    "aux autorités fiscales compétentes."},
     "it": {"title": "FATTURA", "ship_to": "Indirizzo di spedizione", "sender": "Indirizzo del mittente",
@@ -136,7 +163,9 @@ NORMAL = {
            "cols": ("Oggetto", "Quantità", "Prezzo", "Aliquota IVA", "Totale oggetto"), "item_no": "N. oggetto",
            "service": "Servizio di spedizione scelto dall'acquirente", "subtotal": "Subtotale", "shipping": "Spedizione",
            "discount": "Sconto", "vat": "IVA (riscossa da eBay)", "tax": "Imposta (riscossa da eBay)",
-           "vat_incl": "di cui IVA", "total": "Totale",
+           "vat_incl": "di cui IVA", "total": "Totale", "qr": "Link al codice QR del negozio",
+           "msg_from": "Un messaggio da {name}", "thanks": "Grazie per l'acquisto! Le auguro di goderselo!",
+           "other_service": "Altro",
            "note": "Totale comprensivo dell'IVA riscossa da eBay. eBay ha trattenuto questa IVA dall'importo pagato "
                    "dall'acquirente e la versa alle autorità fiscali competenti."},
     "es": {"title": "FACTURA", "ship_to": "Dirección de envío", "sender": "Dirección del remitente",
@@ -144,7 +173,9 @@ NORMAL = {
            "record": "N.º de registro de venta", "cols": ("Artículo", "Cantidad", "Precio", "Tipo de IVA", "Total artículo"),
            "item_no": "N.º de artículo", "service": "Servicio de envío elegido por el comprador", "subtotal": "Subtotal",
            "shipping": "Envío", "discount": "Descuento", "vat": "IVA (recaudado por eBay)", "tax": "Impuesto (recaudado por eBay)",
-           "vat_incl": "IVA incluido", "total": "Total",
+           "vat_incl": "IVA incluido", "total": "Total", "qr": "Enlace al código QR de la tienda",
+           "msg_from": "Un mensaje de {name}", "thanks": "¡Gracias por su compra! ¡Que lo disfrute!",
+           "other_service": "Otro",
            "note": "Total con el IVA recaudado por eBay incluido. eBay ha deducido este IVA del importe pagado por el "
                    "comprador y lo ingresa en las autoridades fiscales competentes."},
 }
@@ -170,8 +201,16 @@ def render_normal(doc: dict, number: str) -> bytes:
     head_r = ParagraphStyle("hr", parent=bold, alignment=TA_RIGHT)
     money = lambda v: f"{cur} {_money(v, lang, comma)}"  # noqa: E731
 
-    top = Table([["", _p(doc.get("store_name") or "", shop), _p(L["title"], title)]], colWidths=[40 * mm, 100 * mm, 40 * mm])
-    top.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
+    url = doc.get("store_url")
+    head = [_p(doc.get("store_name") or "", shop)]
+    if url:
+        head.append(_p(url, ParagraphStyle("url", parent=bold, fontSize=8.5, alignment=TA_CENTER)))
+    right = [_p(L["title"], title)]
+    if url:  # 和 eBay 单据一样：右上角“店铺二维码”
+        qr_label = ParagraphStyle("qrl", parent=base, fontSize=8, leading=10, alignment=TA_CENTER)
+        right += [Spacer(1, 4 * mm), _p(L["qr"], qr_label), Spacer(1, 1.5 * mm), _qr(url, 18 * mm)]
+    top = Table([["", head, right]], colWidths=[40 * mm, 100 * mm, 40 * mm])
+    top.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("ALIGN", (2, 0), (2, 0), "CENTER")]))
 
     s = doc["seller"]
     contact = s.get("contact") if s.get("contact") and s.get("contact", "").lower() != (s.get("name") or "").lower() else ""
@@ -183,7 +222,7 @@ def render_normal(doc: dict, number: str) -> bytes:
                         [_p(L["reg"], bold), _p("\n".join(doc["bill_to"]), base)]]],
                       colWidths=[70 * mm, 55 * mm, 55 * mm])
     addresses.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 4)]))
-    buyer = []
+    buyer = [_p(doc[k], base) for k in ("buyer_phone", "buyer_email") if doc.get(k)]  # 同 eBay 单据：电话、eBay 转发邮箱
     if doc.get("buyer_username"):
         buyer.append(_p(f"{L['user']}: {doc['buyer_username']}", base))
     if doc.get("buyer_vat"):
@@ -222,14 +261,19 @@ def render_normal(doc: dict, number: str) -> bytes:
     sums.append([_p(L["total"] + star, bold), _p(money(doc["total"]), num_bold)])
     if mode == "included" and doc.get("vat_amount"):
         sums.append([_p(f"{L['vat_incl']} {_rate(doc['vat_rate'])}%", small), _p(money(doc["vat_amount"]), num)])
-    service = _p(f"{L['service']}: {doc['shipping_service']}", ParagraphStyle("sv", parent=base, alignment=TA_RIGHT,
-                                                                              textColor=gray)) \
+    service = _p(f"{L['service']}: {_service_label(doc['shipping_service'], L)}",
+                 ParagraphStyle("sv", parent=base, alignment=TA_RIGHT, textColor=gray)) \
         if doc.get("shipping_service") else Spacer(1, 1)
-    sum_tbl = Table(sums, colWidths=[50 * mm, 30 * mm], hAlign="RIGHT")
+    sum_tbl = Table(sums, colWidths=[50 * mm, 30 * mm])
     sum_tbl.setStyle(TableStyle([("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1)]))
+    # 左下角卖家留言（同 eBay 单据“Eine Nachricht von …”），署名用店铺 eBay 注册人
+    sender = s.get("contact") or s.get("name") or doc.get("store_name") or ""
+    message = [_p(L["msg_from"].format(name=sender), bold), Spacer(1, 2 * mm), _p(L["thanks"], base)]
+    bottom = Table([[message, sum_tbl]], colWidths=[95 * mm, 85 * mm])
+    bottom.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "BOTTOM"), ("LEFTPADDING", (0, 0), (0, 0), 4)]))
 
-    story = [top, Spacer(1, 10 * mm), addresses, Spacer(1, 3 * mm), *buyer, Spacer(1, 8 * mm), order_tbl, record,
-             Spacer(1, 5 * mm), items, Spacer(1, 3 * mm), service, Spacer(1, 3 * mm), sum_tbl]
+    story = [top, Spacer(1, 8 * mm), addresses, Spacer(1, 3 * mm), *buyer, Spacer(1, 8 * mm), order_tbl, record,
+             Spacer(1, 5 * mm), items, Spacer(1, 3 * mm), service, Spacer(1, 3 * mm), bottom]
     if s.get("footer"):
         story += [Spacer(1, 6 * mm), _p(s["footer"], small)]
     if mode == "ebay_collected":

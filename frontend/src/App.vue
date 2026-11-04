@@ -9,12 +9,13 @@ import StatusView from './views/StatusView.vue'
 import UsageView from './views/UsageView.vue'
 import AccountsView from './views/AccountsView.vue'
 import InvoicesView from './views/InvoicesView.vue'
+import SettingsView from './views/SettingsView.vue'
 import AftersalesFilesView from './views/AftersalesFilesView.vue'
 import LogisticsTicketsView from './views/LogisticsTicketsView.vue'
 import ShipNoticesView from './views/ShipNoticesView.vue'
 import LoginView from './views/LoginView.vue'
 
-type ViewKey = 'workbench' | 'knowledge' | 'aftersales' | 'tickets' | 'shipnotices' | 'invoices' | 'usage' | 'status' | 'accounts'
+type ViewKey = 'workbench' | 'knowledge' | 'aftersales' | 'tickets' | 'shipnotices' | 'invoices' | 'usage' | 'status' | 'accounts' | 'settings'
 // adminOnly：只有管理员看得到的页面（后端同样只允许管理员）
 const ALL_VIEWS: { key: ViewKey; label: string; adminOnly?: boolean; feature?: 'aftersales_files' }[] = [
   { key: 'workbench', label: '审核工作台' },
@@ -26,6 +27,7 @@ const ALL_VIEWS: { key: ViewKey; label: string; adminOnly?: boolean; feature?: '
   { key: 'usage', label: '用量统计', adminOnly: true },
   { key: 'status', label: '系统状态', adminOnly: true },
   { key: 'accounts', label: '账号管理', adminOnly: true },
+  { key: 'settings', label: '系统配置', adminOnly: true },
 ]
 const VIEWS = computed(() =>
   ALL_VIEWS.filter(
@@ -172,6 +174,7 @@ onUnmounted(() => {
       <KnowledgeView v-else-if="view === 'knowledge'" />
       <UsageView v-else-if="view === 'usage'" @open="(id: number) => go('workbench', id)" />
       <AccountsView v-else-if="view === 'accounts'" />
+      <SettingsView v-else-if="view === 'settings' && session.user?.role === 'ADMIN'" />
       <ShipNoticesView v-else-if="view === 'shipnotices'" @open="(id: number) => go('workbench', id)" />
       <LogisticsTicketsView v-else-if="view === 'tickets'" @open="(id: number) => go('workbench', id)" />
       <InvoicesView v-else-if="view === 'invoices'" @open="(id: number) => go('workbench', id)" />

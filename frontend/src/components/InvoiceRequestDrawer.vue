@@ -59,7 +59,7 @@ async function issue() {
   try {
     await api('PUT', `/internal/invoice-requests/${props.reqId}`, body())
     const inv = await post<InvoiceInfo>(`/internal/invoice-requests/${props.reqId}/invoices`, {
-      order_id: form.value.order_id.trim(), language: form.value.language || null, kind: form.value.invoice_type,
+      order_id: form.value.order_id.trim(), language: form.value.language || null, kind: 'NORMAL',
       buyer_company: form.value.buyer_company, buyer_vat: form.value.buyer_vat,
     })
     ElMessage.success(`已生成${inv.kind_label} ${inv.number}（已留底）`)
@@ -149,23 +149,14 @@ const STATUS_TYPE: Record<string, 'success' | 'warning' | 'danger' | 'info' | 'p
       <el-alert v-if="req.note" :title="req.note" type="warning" :closable="false" class="mb" />
       <el-alert v-if="!info.mail.enabled" type="warning" :closable="false" show-icon class="mb"
         title="邮件发送未开启：现在发送只记为模拟发送，买家收不到邮件" :description="info.mail.not_ready_reasons.join('；')" />
-      <el-alert v-if="form.invoice_type === 'VAT' && !info.issuer?.vat_ready" type="error" :closable="false" show-icon class="mb"
-        title="增值税发票要用店铺的增值税号：请管理员在“开票主体”里填好这个店铺的税号并启用（普通发票不需要）" />
+      <el-alert v-if="req.invoice_type === 'VAT'" type="error" :closable="false" show-icon class="mb"
+        title="买家要增值税发票：系统不开增值税发票，请人工开具后发给买家（处理完点“不用开了”关掉这条申请）" />
       <div class="muted small mb">发票抬头（公司名、注册人、地址）自动取这笔订单所属店铺的 eBay 注册资料。</div>
 
       <el-form label-width="90px">
         <el-form-item label="发票种类">
-          <el-radio-group v-model="form.invoice_type">
-            <el-radio-button value="NORMAL">普通发票</el-radio-button>
-            <el-radio-button value="VAT">增值税发票</el-radio-button>
-          </el-radio-group>
-          <div class="muted small">
-            {{ form.invoice_type === 'VAT'
-              ? '店铺 VAT 发票模板：带卖方税号和发票号，列明增值税；公司买家报税用。订单没有增值税的开不了。'
-              : '和 eBay 后台下载的订单单据一样：列明 eBay 代收的增值税（OSS 税号），不带卖方税号。' }}
-            <template v-if="req.invoice_type">买家要的是：{{ req.invoice_type === 'VAT' ? '增值税发票' : '普通发票' }}</template>
-            <template v-else>还没问清买家要哪种，可以先打开会话看看。</template>
-          </div>
+          <span>普通发票</span>
+          <div class="muted small">和 eBay 后台下载的订单单据一样：列明 eBay 代收的增值税（OSS 税号），不带卖方税号。系统只开普通发票。</div>
         </el-form-item>
         <el-form-item label="买家邮箱">
           <el-input v-model="form.email" placeholder="买家在消息里给的接收发票邮箱" />
@@ -190,7 +181,7 @@ const STATUS_TYPE: Record<string, 'success' | 'warning' | 'danger' | 'info' | 'p
         <el-button v-if="req.status !== 'DONE' && req.status !== 'CANCELLED'" :disabled="busy" @click="save('CANCELLED')">不用开了</el-button>
         <el-button v-if="req.status === 'CANCELLED'" :disabled="busy" @click="save('OPEN')">重新打开</el-button>
         <el-button :disabled="busy" @click="save()">保存</el-button>
-        <el-button type="primary" :loading="busy" :disabled="form.invoice_type === 'VAT' && !info.issuer?.vat_ready" @click="issue">生成发票</el-button>
+        <el-button type="primary" :loading="busy" @click="issue">生成普通发票</el-button>
       </div>
 
       <h4>发票（每份都已留底）</h4>

@@ -9,11 +9,12 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import APP_NAME, APP_VERSION
-from .api import accounts, aftersales_files, ebay, upload_public, invoices, knowledge_admin, maintenance, ship_notices, system, usage, webhooks, workbench
+from .api import accounts, aftersales_files, ebay, upload_public, invoices, knowledge_admin, maintenance, settings_admin, ship_notices, system, usage, webhooks, workbench
 from .auth import auth_middleware, require_admin
 from .config import PROJECT_ROOT, get_settings
 from .aftersales_mail.service import worker as aftersales_mail_worker
 from .logistics.tickets import worker as logistics_ticket_worker
+from .review_ack import worker as review_ack_worker
 from .translation import translator
 from .ship_notices import worker as ship_notice_worker
 from .ebay.notifications import push_not_ready_reasons, push_worker, recheck_destination
@@ -66,7 +67,10 @@ async def lifespan(app: FastAPI):
         log.info("买家消息自动翻译已启动")
     if logistics_ticket_worker.start():  # 每天同步谷仓查件单，谷仓回复后起草给买家的回复建议
         log.info("谷仓查件单同步已启动：每天 %s", s.logistics_ticket_sync_time)
+    if review_ack_worker.start():  # 事事有回应：转人工的来信超时没人回复，先给买家发“已收到”
+        log.info("转人工回执已启动：来信 %s 分钟没人回复就先回应买家", s.review_ack_delay_minutes)
     yield
+    review_ack_worker.stop()
     logistics_ticket_worker.stop()
     translator.stop()
     ship_notice_worker.stop()
@@ -89,6 +93,7 @@ def create_app() -> FastAPI:
     app.include_router(aftersales_files.router)  # 售后附件：管理员或账号打开“可看售后附件”，按店铺范围
     app.include_router(upload_public.router)  # 买家上传页 /upload：不需要登录（隧道只放行 /upload 开头）
     app.include_router(invoices.admin)  # 发票留底、开票主体、邮箱测试：只有管理员
+    app.include_router(settings_admin.router)  # 系统配置页：只有管理员
     app.include_router(webhooks.router)
     app.include_router(ebay.router, dependencies=[Depends(require_admin)])  # 只有管理员
     app.include_router(knowledge_admin.router)
@@ -103,7 +108,8 @@ def create_app() -> FastAPI:
             target = (FRONTEND_DIST / path).resolve()
             if path and target.is_file() and FRONTEND_DIST in target.parents:
                 return FileResponse(target)
-            return FileResponse(FRONTEND_DIST / "index.html")
+            # 首页不缓存：前端重新构建后（资源文件名带哈希）普通刷新就能拿到新版
+            return FileResponse(FRONTEND_DIST / "index.html", headers={"Cache-Control": "no-cache"})
     else:
         @app.get("/", include_in_schema=False)
         def no_frontend():

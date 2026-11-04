@@ -34,7 +34,9 @@ from ..models import (
     Message,
     MessageAttachment,
     ConversationMark,
+    Invoice,
     InvoiceRequest,
+    InvoiceStatus,
     MessageTag,
     ReplyJob,
     ReplyJobSource,
@@ -47,10 +49,10 @@ from ..models import (
 )
 from ..logistics.followup import CLOSED as CLOSED_TICKET
 from ..logistics.followup import (DRAFT_PREFIX, TicketError, discard_draft, edit_draft, is_draft, is_local_draft,
-                                  reship_stock, submit_draft)
+                                  reship_stock, send_submit_notice, submit_draft)
 from ..logistics.goodcang import GoodcangClient, GoodcangError
 from ..providers.chat import get_chat_provider
-from ..sending.service import AUTO_ACTOR, SIMULATED_PREFIX, SendError, request_send, simulate_send
+from ..sending.service import AUTO_ACTOR, SIMULATED_PREFIX, SendError, is_ack, request_send, simulate_send
 from .. import usage as usage_log
 from ..worker import worker
 from ..sources import get_source_for_store
@@ -58,6 +60,7 @@ from ..sources.ebay import item_url
 from ..guards.language import mostly_chinese
 from ..read_state import mark_read, mark_unread, unread_count, unread_count_expr
 from ..auth import allowed_store_ids, check_store, current_user, require_admin
+from ..auth import current as current_account
 from .deps import iso, optional_reviewer, reviewer_name
 
 
@@ -82,6 +85,15 @@ def _active_claim(db: Session, conv: Conversation) -> WorkClaim | None:
     claim = db.scalar(select(WorkClaim).where(WorkClaim.store_id == conv.store_id,
                                               WorkClaim.conversation_id == conv.id))
     return claim if claim and claim.expires_at > utcnow() else None
+
+
+STAGES = ("presale", "shipping", "aftersales", "invoice", "other")
+
+
+def _situation_dict(conv: Conversation) -> dict | None:
+    if not conv.situation_stage and not conv.situation_label:
+        return None
+    return {"stage": conv.situation_stage or "other", "label": conv.situation_label, "at": iso(conv.situation_at)}
 
 
 def _claim_dict(claim: WorkClaim | None) -> dict | None:
@@ -195,10 +207,10 @@ def _like(text: str) -> str:
 @router.get("/conversations")
 def list_conversations(store_id: str | None = None, group: str = "pending", q: str | None = None,
                        unread_only: bool = False, kind: str | None = None, tag_id: int | None = None,
-                       view: str = "all", db: Session = Depends(get_db)):
+                       view: str = "all", stage: str | None = None, db: Session = Depends(get_db)):
     """kind：buyer 买家消息（含测试会话）/ system eBay 系统消息 / 空为全部。
     view：买家消息列表顶部的页签——pending 待审核（当前任务需要人工审核，客服平时只看这个）/
-    auto 自动回复（AI 已自动发出，供抽查）/ all 全部；在此基础上再按 group、tag_id 细分。"""
+    auto 自动回复（AI 已自动发出，供抽查）/ all 全部；在此基础上再按 group、tag_id、stage（会话阶段）细分。"""
     unread = unread_count_expr()
     query = select(Conversation, unread).order_by(Conversation.last_message_at.desc().nulls_last(),
                                                   Conversation.id.desc()).limit(300)
@@ -217,6 +229,8 @@ def list_conversations(store_id: str | None = None, group: str = "pending", q: s
     if tag_id:  # 有消息打了这个标记的会话
         query = query.where(Conversation.id.in_(select(ConversationMark.conversation_id)
                                                 .where(ConversationMark.tag_id == tag_id)))
+    if stage in STAGES:
+        query = query.where(Conversation.situation_stage == stage)
     items = []
     now = utcnow()
     store_names = dict(db.execute(select(Store.id, Store.name)).all())  # 卡片上显示店铺名
@@ -266,7 +280,7 @@ def list_conversations(store_id: str | None = None, group: str = "pending", q: s
             "job": _job_dict(job), "intent": draft.intent if draft else None,
             "claim": _claim_dict(_active_claim(db, conv)),
             "auto_replied": auto_replied,
-            "aftersales": _aftersales_dict(conv),
+            "aftersales": _aftersales_dict(conv), "situation": _situation_dict(conv),
             "mark": _conversation_mark(db, conv.id), "marks": _conversation_marks(db, conv.id),
             "invoice_status": inv_status,  # 发票申请：OPEN 待开票发送 / DONE 已发 / CANCELLED
             "item_url": _conv_item_url(db, conv),
@@ -313,7 +327,10 @@ def conversation_filter_counts(store_id: str | None = None, q: str | None = None
     open_invoice = select(InvoiceRequest.conversation_id).where(InvoiceRequest.status == "OPEN")
     tags = dict(db.execute(select(ConversationMark.tag_id, func.count(ConversationMark.conversation_id))
                            .where(ConversationMark.conversation_id.in_(base)).group_by(ConversationMark.tag_id)).all())
+    stages = dict(db.execute(select(Conversation.situation_stage, func.count()).where(Conversation.id.in_(base))
+                             .group_by(Conversation.situation_stage)).all())
     return {"all": count(), "invoice": count(Conversation.id.in_(open_invoice)),
+            "stages": {k: stages.get(k, 0) for k in STAGES},
             "aftersales": count(Conversation.aftersales_status.in_((Aftersales.PENDING, Aftersales.IN_PROGRESS))),
             "aftersales_done": count(Conversation.aftersales_status == Aftersales.DONE),
             "tags": {str(k): v for k, v in tags.items()}, "views": views}
@@ -469,7 +486,7 @@ def conversation_detail(conv_id: int, db: Session = Depends(get_db)):
             "channel_source": conv.channel_source, "conversation_title": conv.conversation_title,
             "platform_status": conv.platform_status,
             "read_seq": conv.read_seq, "read_by": conv.read_by, "read_at": iso(conv.read_at),
-            "aftersales": _aftersales_dict(conv),
+            "aftersales": _aftersales_dict(conv), "situation": _situation_dict(conv),
             "mark": _conversation_mark(db, conv.id), "marks": _conversation_marks(db, conv.id),
             "item_url": _conv_item_url(db, conv),
             "unread_count": unread_count(db, conv), "platform_unread_count": conv.platform_unread_count,
@@ -479,10 +496,12 @@ def conversation_detail(conv_id: int, db: Session = Depends(get_db)):
                       "zh_translation": m.zh_translation, "translating": m.id in translating, "sent_at": iso(m.sent_at),
                       "subject": m.subject, "sender_key": m.sender_key, "media": m.media or [],
                       "simulated": m.ebay_message_id.startswith(SIMULATED_PREFIX),
+                      "ack": is_ack(m.ebay_message_id),  # 自动“已收到”回执：不算正式回复
                       "has_html": m.id in with_html,
                       "trace": sent_from.get(m.ebay_message_id),
                       "attachments": attachments.get(m.id, [])} for m in messages],
         "ticket_timeline": _ticket_timeline(db, conv.id),
+        "invoice_timeline": _invoice_timeline(db, conv.id),
         "events": [{"id": e.id, "event_type": e.event_type, "source": e.source, "case_id": e.case_id,
                     "detail": e.detail, "occurred_at": iso(e.occurred_at)} for e in events],
         "jobs": [{"id": j.id, "state": j.state, "run_generation": j.run_generation, "created_at": iso(j.created_at)}
@@ -945,7 +964,8 @@ def generate_draft(conv_id: int, reviewer: str = Depends(reviewer_name), db: Ses
     if current and current.state in (JobState.RECEIVED, JobState.RUNNING, JobState.SENDING, JobState.SEND_UNCERTAIN):
         raise HTTPException(409, "AI 正在生成草稿，请稍候")
     msgs = db.scalars(select(Message).where(Message.conversation_id == conv.id).order_by(Message.conversation_seq)).all()
-    last_seller = max((m.conversation_seq for m in msgs if m.sender_role == "SELLER"), default=0)
+    last_seller = max((m.conversation_seq for m in msgs if m.sender_role == "SELLER" and not is_ack(m.ebay_message_id)),
+                      default=0)  # “已收到”回执不算店铺回复
     pending = [m for m in msgs if m.sender_role == "BUYER" and m.conversation_seq > last_seller]
     if not pending:
         raise HTTPException(409, "没有待回复的买家消息（最后一条是店铺发出的，或发送方角色未知）")
@@ -1231,8 +1251,32 @@ def _ticket_timeline(db: Session, conv_id: int) -> list[dict]:
                         "reply": t.reply, "attachments": [{"name": a.get("name"), "file_id": a.get("file_id")}
                                                           for a in t.attachments or []],
                         "send_status": t.send_status, "send_error": t.send_error, "sent_at": iso(t.sent_at),
-                        "needs_human": t.needs_human})
+                        "needs_human": t.needs_human, **_outcome(t)})
     return sorted(out, key=lambda x: x["at"] or "")
+
+
+def _invoice_timeline(db: Session, conv_id: int) -> list[dict]:
+    """对话里的发票：生成、发到邮箱的时间和结果，按时间插进聊天记录；管理员可点开看 PDF。"""
+    from ..invoicing.service import KIND_LABELS, mask_email
+
+    user = current_account()
+    admin = user is not None and user.role == Role.ADMIN
+    req = db.scalar(select(InvoiceRequest).where(InvoiceRequest.conversation_id == conv_id))
+    out = []
+    for inv in db.scalars(select(Invoice).where(Invoice.conversation_id == conv_id).order_by(Invoice.id)):
+        reviewable = inv.status in (InvoiceStatus.ISSUED, InvoiceStatus.SEND_FAILED)
+        out.append({
+            "kind": "invoice", "key": f"i{inv.id}", "at": iso(inv.sent_at or inv.created_at), "invoice_id": inv.id,
+            "number": inv.number, "invoice_kind": inv.kind, "kind_label": KIND_LABELS.get(inv.kind, inv.kind),
+            "order_id": inv.order_id, "total": inv.total, "currency": inv.currency, "status": inv.status,
+            "status_label": InvoiceStatus.LABELS.get(inv.status, inv.status), "send_error": inv.send_error,
+            "sent_to": inv.sent_to if admin else mask_email(inv.sent_to),
+            "buyer_email": (req.email if admin else mask_email(req.email)) if req and req.email else None,
+            "sent_by": inv.sent_by, "created_by": inv.created_by, "created_at": iso(inv.created_at),
+            "sent_at": iso(inv.sent_at),
+            "pdf_url": f"/internal/invoices/{inv.id}/pdf" if admin or reviewable else None,
+        })
+    return out
 
 
 def _ticket_dict(t: LogisticsTicket) -> dict:
@@ -1247,7 +1291,16 @@ def _ticket_dict(t: LogisticsTicket) -> dict:
             "is_local_draft": is_local_draft(t), "it_type_id": t.it_type_id, "sm_code": t.sm_code,
             "submitted_by": t.submitted_by, "submitted_at": iso(t.submitted_at),
             "send_status": t.send_status, "sent_at": iso(t.sent_at), "sent_message_id": t.sent_message_id,
-            "send_error": t.send_error}
+            "send_error": t.send_error, "notice_status": t.notice_status, "notice_sent_at": iso(t.notice_sent_at),
+            **_outcome(t)}
+
+
+def _outcome(t: LogisticsTicket) -> dict:
+    """谷仓回复的结果类别和处理方式（自动回复 / 需人工审核 / 需判断补发）。"""
+    from ..logistics.tickets import OUTCOMES
+
+    label, how = OUTCOMES.get(t.outcome, (None, None)) if t.outcome else (None, None)
+    return {"outcome": t.outcome, "outcome_label": label, "handling": how}
 
 
 def _ticket_view_cond(view: str):
@@ -1288,9 +1341,16 @@ def list_tickets(view: str = "draft", store_id: str | None = None, q: str | None
     names = dict(db.execute(select(Store.id, Store.name)).all())
     conv_ids = {t.conversation_id for t in rows if t.conversation_id}
     buyers = dict(db.execute(select(Conversation.id, Conversation.buyer_key).where(Conversation.id.in_(conv_ids))).all())         if conv_ids else {}
+    refs = {t.reference_no for t in rows if t.reference_no}
+    open_by_ref = dict(db.execute(select(LogisticsTicket.reference_no, func.count()).where(
+        LogisticsTicket.reference_no.in_(refs), LogisticsTicket.handled_at.is_(None),
+        or_(LogisticsTicket.io_status.is_(None), LogisticsTicket.io_status.not_in(CLOSED_TICKET)))
+        .group_by(LogisticsTicket.reference_no)).all()) if refs else {}
     return {"counts": counts, "items": [{**_ticket_dict(t), "store_id": t.store_id, "store_name": names.get(t.store_id),
                                          "buyer_key": buyers.get(t.conversation_id) or t.buyer_key,
-                                         "conversation_id": t.conversation_id} for t in rows]}
+                                         "conversation_id": t.conversation_id,
+                                         # 同一订单未完结的查件单数（大于 1 = 有重复，建单前先看一眼）
+                                         "open_same_order": open_by_ref.get(t.reference_no, 0)} for t in rows]}
 
 
 @router.get("/conversations/{conv_id}/logistics-tickets")
@@ -1353,7 +1413,8 @@ def ticket_submit(ticket_id: int, body: TicketDraftEdit, request: Request, db: S
         raise HTTPException(409, str(e)) from None
     except GoodcangError as e:
         raise HTTPException(502, str(e)) from None
-    return _ticket_dict(t)
+    notice = send_submit_notice(db, [t])  # 提交成功就给买家发安抚消息；没发的原因随结果返回
+    return {**_ticket_dict(t), "notice": notice}
 
 
 @router.post("/logistics-tickets/{ticket_id}/discard")

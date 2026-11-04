@@ -16,6 +16,14 @@ export const STATE_LABELS: Record<string, string> = {
 
 type TagType = 'primary' | 'success' | 'info' | 'warning' | 'danger'
 
+/** 会话情况阶段（AI 起草时判断） */
+export const STAGE_LABELS: Record<string, string> = {
+  presale: '售前', shipping: '物流', aftersales: '售后', invoice: '发票', other: '其他',
+}
+
+/** 需要人工审核的任务状态：会话卡片和头部用深红实底高亮 */
+export const REVIEW_STATES = ['REVIEW_REQUIRED', 'AUTO_ELIGIBLE', 'FAILED_HANDOFF']
+
 export function stateTag(state?: string | null): TagType {
   if (!state) return 'info'
   if (['SENT', 'RESOLVED_NO_REPLY'].includes(state)) return 'success'

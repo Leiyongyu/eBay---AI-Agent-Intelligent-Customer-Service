@@ -2,6 +2,8 @@
 有取消/退款的标“不发”；审核后模拟发送到买家已有会话或按订单新建的会话；每单只生成一次。全部用模拟的 eBay 数据。"""
 from datetime import date, datetime, timedelta, timezone
 
+from app.config import get_settings
+
 DAY = date(2026, 11, 4)
 TODAY_UTC = "2026-11-04T02:10:47.000Z"  # 北京时间 11-04 10:10
 YESTERDAY_UTC = "2026-11-03T10:00:00.000Z"  # 北京时间 11-03 18:00
@@ -69,6 +71,7 @@ def test_collect_today_skip_cancelled_and_dedupe(app_env, monkeypatch):
     with session_scope() as db:
         db.add(Store(id="REAL_A", name="Shop A", ebay_user_id="seller_a", default_marketplace_id="EBAY_DE"))
     monkeypatch.setattr(ship_notices, "_ebay_stores", lambda db: [db.get(Store, "REAL_A")])
+    monkeypatch.setattr(get_settings(), "ship_notice_wait_for_warehouse", False)  # 这条测试不等谷仓出库
     r = ship_notices.collect(DAY, source=FakeSource(api))
     assert (r["orders"], r["new"], r["skipped"], r["errors"]) == (3, 3, 1, [])
     with session_scope() as db:

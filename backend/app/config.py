@@ -122,6 +122,8 @@ class Settings(BaseSettings):
     invoice_smtp_password: str | None = None  # 企业邮箱的“客户端专用密码”，只放 .env
     invoice_mail_from_name: str | None = None  # 发件人显示名，如店铺名
     invoice_mail_bcc: str | None = None  # 每封发票邮件密送一份到这个邮箱（可空）
+    invoice_auto_send: bool = False  # 普通发票不审核：买家给了邮箱、订单能确定时自动生成并直接发到邮箱；增值税发票一律转人工
+    invoice_test_recipient: str | None = None  # 测试期：所有发票邮件改发到这个邮箱（不发给买家），测试完清空
 
     # 售后邮箱：定时用 IMAP 收买家发来的照片/视频（邮件附件或 WeTransfer 链接），按订单号存到对应店铺文件夹
     aftersales_mail_enabled: bool = False  # 账号密码填好后改 true
@@ -169,16 +171,25 @@ class Settings(BaseSettings):
     track17_wait_seconds: int = 12  # 新注册后等轨迹返回的最长秒数，超时先返回基本信息
     logistics_stall_days: int = 4  # 轨迹多少天没更新算“断更”：转人工跟进（可建断更查件单）
     logistics_reship_days: int = 7  # 轨迹多少天没更新要人工判断是否补发
+    logistics_skip_sundays: bool = True  # 算“几天没更新”时不算周日（周日不派送、轨迹通常不动）
+    logistics_pickup_days: int = 7  # 包裹在取件点放了几天还没取：转人工（取件点一般只保留 7 天左右，过期退回）
+    track17_min_quota: int = 10  # 17TRACK 剩余额度低于这个数就不再注册新物流号（已注册的照常免费查）
     logistics_ticket_sync_time: str = "10:00"  # 每天同步谷仓查件单的时间（本机时间）；没开机的启动后补跑
     logistics_ticket_sync_days: int = 30  # 每次同步最近多少天创建的查件单（谷仓上限 186 天）
     logistics_ticket_sync_interval_minutes: int = 60  # 每隔多少分钟同步一次查件单；0 = 只按 LOGISTICS_TICKET_SYNC_TIME 每天一次
     logistics_ticket_auto_send: bool = False  # 谷仓回复后自动把查件结果（AI 起草的消息 + 附件）发给买家（目前为模拟发送）；需人工的不自动发
     ship_notice_enabled: bool = False  # 汇总当天已发货的订单，生成发货通知（订单号、承运商、跟踪号、查件链接）待人工审核发送
     ship_notice_interval_minutes: int = 60  # 每隔多少分钟汇总一次当天已发货的订单
+    ship_notice_wait_for_warehouse: bool = True  # 等谷仓出库单真正“已发货”（或有揽收扫描）再生成通知，买家拿到单号就查得到
+    ship_notice_lookback_days: int = 3  # 等仓库发出时，往回看几天内 eBay 标记发货、还没生成通知的订单
     auto_translate_buyer_messages: bool = False  # 买家来信自动译成中文（新拉到的和打开会话时还没译的），工作台显示原文 + 译文
     logistics_ticket_auto_draft: bool = False  # 物流需人工（断更、异常、妥投未收到）时自动起草查件单（只存本系统），客服在工作台核对后提交到谷仓
+    logistics_pod_retention_days: int = 180  # 谷仓查件单回复附件（POD 签收证明等）保留天数（纠纷证据，比售后附件长）
+    logistics_ticket_reply_days: int = 7  # 谷仓回复后几天内还没处理的照样处理（main.py 停机几天也不漏）；更早的不再通知买家
+    logistics_ticket_followup_days: int = 3  # 查件单谷仓回复（或提交后没回复）超过几天、包裹问题还在：不再算“在跟”，转人工判断补发
     logistics_ticket_auto_submit: bool = False  # 起草后直接提交到谷仓（不用人工核对）；这类回复（告诉买家已发起查件）也不再因物流原因转人工
     logistics_ticket_send_needs_human: bool = False  # 谷仓回复后需要人工的结果（丢失、退回、妥投未收到等）也直接回复买家，同时标待售后
+    logistics_ticket_submit_notice: bool = True  # 查件单提交到谷仓后马上给买家发一条安抚消息（已转物流同事、已向承运商查询，有结果马上通知）；谷仓回复后再发查件结果
     logistics_ticket_notify_emails: str = ""  # 查件单通知邮箱（谷仓必填，最多 10 个，逗号分隔）
 
     # eBay 消息拉取（只读，Commerce Message API）
@@ -227,6 +238,11 @@ class Settings(BaseSettings):
     auto_send_max_risk: str = "L0"  # 自动发送允许的最高风险：L0 / L1；L2、L3 永远不自动发
     auto_send_exclude_intents: str | None = None  # 白名单为 * 时仍要人工的意图，如 fitment,price_offer
     auto_send_evidence: str = "kb"  # kb：必须引用知识库；any：任一依据（知识库/商品/查询结果）或回复无事实陈述
+    # 事事有回应：转人工的来信 N 分钟内没人回复，自动给买家发“已收到，同事正在处理，会尽快回复”（见 review_ack.py）
+    review_ack_enabled: bool = True
+    review_ack_delay_minutes: int = 30  # 来信后多少分钟还没人回复就发回执
+    review_ack_max_age_hours: int = 24  # 超过多少小时的旧来信不再补发（刚开启时不给积压消息补发）
+    review_ack_cooldown_hours: int = 12  # 发过回执还没正式回复时，买家追问多少小时内不重复发
     auto_reply_max_streak: int = 1  # 同一会话 AI 最多连续自动回复几次，达到后买家再来信交人工
     auto_tag_enabled: bool = True  # 按 AI 识别的问题类型自动给会话打标记（适配咨询、物流查询、退货退款等）
 
@@ -530,6 +546,16 @@ class Settings(BaseSettings):
         }
 
 
+# 系统配置页（runtime_settings.py）里管理员改过的项，优先于 .env
+_overrides: dict = {}
+
+
+def set_overrides(values: dict) -> None:
+    _overrides.clear()
+    _overrides.update(values)
+    get_settings.cache_clear()
+
+
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    return Settings(**_overrides)

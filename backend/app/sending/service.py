@@ -131,6 +131,11 @@ def dispatch(db: Session, intent: SendIntent) -> None:
 
 
 SIMULATED_PREFIX = "SIM-OUT-"
+ACK_PREFIX = SIMULATED_PREFIX + "ACK-"  # 转人工后自动发的“已收到”回执（review_ack.py）：不算正式回复
+
+
+def is_ack(platform_message_id: str | None) -> bool:
+    return (platform_message_id or "").startswith(ACK_PREFIX)
 GENERATING = (JobState.RECEIVED, JobState.RUNNING, JobState.SENDING, JobState.SEND_UNCERTAIN)
 AUTO_ACTOR = "AI自动回复"  # 通过闸门后由 Agent 自动发出（仍是模拟发送）时记录的发送人
 
@@ -151,6 +156,8 @@ def auto_reply_streak(db: Session, conv_id: int) -> int:
     autos = auto_reply_message_ids(db, outs)
     n = 0
     for mid in outs:
+        if is_ack(mid):
+            continue  # “已收到”回执不算回复：不打断、也不计入连续自动回复
         if mid not in autos:
             break
         n += 1

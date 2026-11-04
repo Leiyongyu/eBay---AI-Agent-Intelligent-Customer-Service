@@ -58,7 +58,9 @@ def _check(user: CurrentUser, store_id: str | None) -> None:
 def _days_left(f: AftersalesFile) -> int | None:
     if f.status != AsFileStatus.STORED or not f.received_at:
         return None
-    left = f.received_at + timedelta(days=get_settings().aftersales_retention_days) - utcnow()
+    s = get_settings()
+    days = max(s.logistics_pod_retention_days, s.aftersales_retention_days) if f.source == "GOODCANG_TICKET" else s.aftersales_retention_days
+    left = f.received_at + timedelta(days=days) - utcnow()
     return max(0, left.days + (1 if left.seconds else 0))
 
 

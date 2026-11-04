@@ -4,13 +4,15 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ApiError, get, post, api, session } from '../api'
-import { STATE_LABELS, errorText, fmtTime } from '../format'
+import { REVIEW_STATES, STATE_LABELS, errorText, fmtTime } from '../format'
 import DraftTrace from './DraftTrace.vue'
 import InvoicePanel from './InvoicePanel.vue'
 import AftersalesFilesPanel from './AftersalesFilesPanel.vue'
 import LogisticsTicketsPanel from './LogisticsTicketsPanel.vue'
 import TicketTimelineCard from './TicketTimelineCard.vue'
-import type { Attachment, ChatMessage, ComplianceResult, ConversationDetail, JobTrace, ListingCard, TicketTimelineItem } from '../types'
+import InvoiceTimelineCard from './InvoiceTimelineCard.vue'
+import SituationChip from './SituationChip.vue'
+import type { Attachment, ChatMessage, ComplianceResult, ConversationDetail, JobTrace, ListingCard, TicketTimelineItem, InvoiceTimelineItem } from '../types'
 
 const props = defineProps<{ convId: number }>()
 const emit = defineEmits<{ changed: []; deleted: [] }>()
@@ -27,12 +29,14 @@ async function loadListing() {
 }
 const loadError = ref('')
 
-// 查件记录按时间插进聊天：排在它之后的第一条消息前面，比所有消息都晚的放最后
+// 查件记录、发票按时间插进聊天：排在它之后的第一条消息前面，比所有消息都晚的放最后
 const ticketPlacement = computed(() => {
   const msgs = d.value?.messages || []
-  const before = new Map<number, TicketTimelineItem[]>()
-  const after: TicketTimelineItem[] = []
-  for (const it of d.value?.ticket_timeline || []) {
+  const before = new Map<number, (TicketTimelineItem | InvoiceTimelineItem)[]>()
+  const after: (TicketTimelineItem | InvoiceTimelineItem)[] = []
+  const all = [...(d.value?.ticket_timeline || []), ...(d.value?.invoice_timeline || [])]
+    .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+  for (const it of all) {
     const at = Date.parse(it.at)
     const m = msgs.find((x) => Date.parse(x.sent_at) > at)
     if (m) before.set(m.id, [...(before.get(m.id) || []), it])
@@ -55,22 +59,6 @@ let zhTimer: number | undefined
 let zhSeq = 0
 let applyingZh = false
 const translating = ref<Record<number, boolean>>({})
-// 右侧信息栏（刊登、售后、附件、查件单、发票）：开关记在本机
-const sideOpen = ref((() => {
-  try {
-    return localStorage.getItem('cp-side') !== 'off'
-  } catch {
-    return true
-  }
-})())
-function toggleSide() {
-  sideOpen.value = !sideOpen.value
-  try {
-    localStorage.setItem('cp-side', sideOpen.value ? 'on' : 'off')
-  } catch {
-    /* 隐私模式等写不进去时只在本次生效 */
-  }
-}
 const traceOpen = ref(false) // 生成依据默认收起，需要时点标题展开
 const chatEl = ref<HTMLElement | null>(null)
 
@@ -89,7 +77,8 @@ const simulatedCount = computed(() => d.value?.messages.filter((m) => m.simulate
 // 店铺最后一次回复之后的买家消息：AI 生成草稿要回复的就是这些
 const unanswered = computed(() => {
   const msgs = d.value?.messages || []
-  const lastSeller = msgs.map((m) => m.role).lastIndexOf('SELLER')
+  // 自动“已收到”回执不算店铺回复
+  const lastSeller = msgs.map((m) => (m.ack ? 'ACK' : m.role)).lastIndexOf('SELLER')
   return msgs.slice(lastSeller + 1).filter((m) => m.role === 'BUYER')
 })
 const canGenerate = computed(
@@ -562,13 +551,14 @@ onUnmounted(() => {
   <div v-else-if="d" class="panel cp">
     <div class="panel-head">
       <span class="store-name" :title="`店铺 ID：${d.conversation.store_id}`">{{ d.conversation.store_name || d.conversation.store_id }}</span>
+      <SituationChip v-if="d.conversation.situation" :s="d.conversation.situation" size="default" />
       <el-tag size="small" effect="plain" :type="d.conversation.marketplace_id === 'UNKNOWN' ? 'danger' : 'info'">
         {{ d.conversation.marketplace_id }}
       </el-tag>
       <el-tag v-if="isEbay" size="small" type="primary">eBay 真实会话</el-tag>
       <span class="conv-no" title="会话编号">#{{ d.conversation.id }}</span>
       <el-tag v-if="d.conversation.handoff_state === 'HUMAN'" size="small" type="danger">已人工接管</el-tag>
-      <el-tag v-if="job" size="small" effect="plain">{{ STATE_LABELS[job.state] || job.state }}</el-tag>
+      <el-tag v-if="job" size="small" effect="plain" :class="{ 'review-hot': REVIEW_STATES.includes(job.state) }">{{ STATE_LABELS[job.state] || job.state }}</el-tag>
       <span class="spacer" />
       <span v-if="d.claim" :class="claimedByOther ? 'warn' : 'muted'">{{ d.claim.claimed_by }} 认领中</span>
       <el-button v-if="d.claim && !claimedByOther" link size="small" @click="claim('release')">释放</el-button>
@@ -579,17 +569,73 @@ onUnmounted(() => {
       <el-button v-if="canFinish" link size="small" type="success" @click="finishAftersales">处理完成</el-button>
       <el-button v-if="canDelete" link size="small" type="danger" @click="deleteConversation">删除会话（测试）</el-button>
       <el-button v-if="simulatedCount" link size="small" type="warning" @click="clearSimulated">清除模拟消息（{{ simulatedCount }}）</el-button>
-      <el-button link size="small" @click="toggleSide">{{ sideOpen ? '收起信息栏' : '展开信息栏' }}</el-button>
       <el-button link size="small" :disabled="claimedByOther" @click="toggleHandoff">
         {{ d.conversation.handoff_state === 'HUMAN' ? '解除接管' : '人工接管' }}
       </el-button>
     </div>
+    <div v-if="d.conversation.item_id && listing" class="listing-card">
+      <img v-if="listing.picture_url" :src="listing.picture_url" alt="" class="listing-img" referrerpolicy="no-referrer" />
+      <div class="listing-info">
+        <a v-if="listing.url" :href="listing.url" target="_blank" rel="noopener noreferrer" class="listing-title">
+          {{ listing.title || d.conversation.conversation_title || listing.item_id }}
+        </a>
+        <div class="muted listing-facts">
+          <span v-if="listing.sku">SKU <span class="mono">{{ listing.sku }}</span></span>
+          <span v-if="listing.price">{{ listing.price.value }} {{ listing.price.currency }}</span>
+          <span v-if="listing.quantity_available != null">可售 {{ listing.quantity_available }}</span>
+          <span v-if="listing.condition">{{ listing.condition }}</span>
+          <span v-if="listing.listing_status">{{ listing.listing_status }}</span>
+          <span v-if="listing.marketplace_id">{{ listing.marketplace_id }}</span>
+          <span v-if="listing.variations && listing.variations > 1">{{ listing.variations }} 个变体</span>
+          <span v-if="listing.compatibility_total">兼容车型 {{ listing.compatibility_total }} 条</span>
+        </div>
+        <div v-if="listing.error" class="warn">{{ listing.error }}</div>
+      </div>
+    </div>
+    <div class="conv-meta">
+      <span v-if="d.conversation.conversation_title" class="conv-title">{{ d.conversation.conversation_title }}</span>
+      <span class="muted">
+        买家 <span class="mono">{{ d.conversation.buyer_key }}</span> · 刊登
+        <a v-if="d.conversation.item_url" class="mono" :href="d.conversation.item_url" target="_blank" rel="noopener noreferrer">
+          {{ d.conversation.item_id }} ↗
+        </a>
+        <span v-else class="mono">{{ d.conversation.item_id || '无' }}</span>
+      </span>
+    </div>
+    <div v-if="af" class="af-box" :class="af.status">
+      <el-tag size="small" :type="af.status === 'DONE' ? 'success' : af.status === 'IN_PROGRESS' ? 'primary' : 'warning'">
+        {{ af.status_label }}
+      </el-tag>
+      <b>{{ af.type }}</b>
+      <span class="muted">客服 {{ af.marked_by }} 标记于 {{ af.marked_at ? fmtTime(af.marked_at) : '—' }}</span>
+      <span v-if="af.handled_by" class="muted">· 售后 {{ af.handled_by }}</span>
+      <div v-if="af.note" class="af-note">{{ af.note }}</div>
+    </div>
+    <div v-if="convMarks.length" class="conv-mark">
+      <span v-for="m in convMarks" :key="m.tag_id" class="mark-item"
+            :title="`${m.marked_by} · ${m.marked_at ? fmtTime(m.marked_at) : ''}（点标记改备注）`">
+        <el-tag size="small" :type="m.color" closable class="mark-tag" @click="openConvMark(m.tag_id)" @close="removeMark(m.tag_id)">
+          {{ m.tag }}
+        </el-tag>
+        <span v-if="m.note" class="mark-note">{{ m.note }}</span>
+      </span>
+      <el-button link size="small" type="primary" @click="openConvMark()">+ 加标记</el-button>
+    </div>
+    <AftersalesFilesPanel :conv-id="convId" :marketplace="d.conversation.marketplace_id"
+      :refresh-key="job ? `${job.id}-${job.state}-${d.messages.length}` : String(d.messages.length)"
+      @insert="(t: string) => (editText = t)" />
+    <LogisticsTicketsPanel :conv-id="convId" :refresh-key="job ? `${job.id}-${job.state}` : ''"
+      @insert="(t: string) => (editText = t)" />
+    <InvoicePanel :conv-id="convId" :refresh-key="job ? `${job.id}-${job.state}` : ''" />
     <div class="cp-body">
       <div class="cp-main">
         <!-- 聊天记录 -->
         <div ref="chatEl" class="chat">
           <template v-for="m in d.messages" :key="m.id">
-          <TicketTimelineCard v-for="it in ticketPlacement.before.get(m.id) || []" :key="it.key" :item="it" />
+          <template v-for="it in ticketPlacement.before.get(m.id) || []" :key="it.key">
+            <InvoiceTimelineCard v-if="it.kind === 'invoice'" :item="it" />
+            <TicketTimelineCard v-else :item="it" />
+          </template>
           <div class="msg-row" :class="m.role.toLowerCase()">
             <div class="bubble" :class="{ task: traceSourceSet.has(m.ebay_message_id), sim: m.simulated }">
               <div class="msg-head">
@@ -665,7 +711,10 @@ onUnmounted(() => {
             </div>
           </div>
           </template>
-          <TicketTimelineCard v-for="it in ticketPlacement.after" :key="it.key" :item="it" />
+          <template v-for="it in ticketPlacement.after" :key="it.key">
+            <InvoiceTimelineCard v-if="it.kind === 'invoice'" :item="it" />
+            <TicketTimelineCard v-else :item="it" />
+          </template>
 
           <div v-for="e in d.events" :key="e.id" class="event">
             <span>{{ fmtTime(e.occurred_at) }} · {{ e.event_type }} · {{ e.source }}<template v-if="e.case_id"> · {{ e.case_id }}</template></span>
@@ -685,8 +734,9 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
-
-        <!-- 输入框 -->
+      </div>
+      <aside class="cp-compose">
+        <!-- 输入框（右侧一栏） -->
         <div class="composer">
           <div v-if="blocked" class="blocked">
             合规命中：<el-tag size="small" :type="blocked.result === 'BLOCK' ? 'danger' : 'warning'">{{ blocked.result }}</el-tag>
@@ -696,7 +746,7 @@ onUnmounted(() => {
               </template>
             </div>
           </div>
-          <el-input v-model="editText" type="textarea" :autosize="{ minRows: 3, maxRows: 10 }" :disabled="claimedByOther || isSystemConv"
+          <el-input v-model="editText" type="textarea" :autosize="{ minRows: 8, maxRows: 18 }" :disabled="claimedByOther || isSystemConv"
             :placeholder="isSystemConv ? 'eBay 系统消息不需要回复' : '输入回复（用买家的语言）；点“AI 生成草稿”会把 AI 写的回复填到这里，可以再修改'" />
           <div v-if="!isSystemConv" class="zh-box">
             <div class="zh-head">
@@ -704,7 +754,7 @@ onUnmounted(() => {
               <span v-if="zhSyncing" class="muted">· 正在更新正式回复…</span>
               <span v-else-if="zhStale" class="warn">· 正式回复改过了，中文可能对不上，点“译成中文”刷新</span>
             </div>
-            <el-input v-model="zhText" type="textarea" :autosize="{ minRows: 2, maxRows: 8 }" :disabled="claimedByOther"
+            <el-input v-model="zhText" type="textarea" :autosize="{ minRows: 6, maxRows: 14 }" :disabled="claimedByOther"
               placeholder="也可以先在这里用中文写回复，会自动译成买家语言填到上面" @input="onZhInput" />
           </div>
           <div class="composer-bar">
@@ -724,62 +774,6 @@ onUnmounted(() => {
             </el-button>
           </div>
         </div>
-      </div>
-      <aside v-show="sideOpen" class="cp-side">
-        <div v-if="d.conversation.item_id && listing" class="listing-card">
-          <img v-if="listing.picture_url" :src="listing.picture_url" alt="" class="listing-img" referrerpolicy="no-referrer" />
-          <div class="listing-info">
-            <a v-if="listing.url" :href="listing.url" target="_blank" rel="noopener noreferrer" class="listing-title">
-              {{ listing.title || d.conversation.conversation_title || listing.item_id }}
-            </a>
-            <div class="muted listing-facts">
-              <span v-if="listing.sku">SKU <span class="mono">{{ listing.sku }}</span></span>
-              <span v-if="listing.price">{{ listing.price.value }} {{ listing.price.currency }}</span>
-              <span v-if="listing.quantity_available != null">可售 {{ listing.quantity_available }}</span>
-              <span v-if="listing.condition">{{ listing.condition }}</span>
-              <span v-if="listing.listing_status">{{ listing.listing_status }}</span>
-              <span v-if="listing.marketplace_id">{{ listing.marketplace_id }}</span>
-              <span v-if="listing.variations && listing.variations > 1">{{ listing.variations }} 个变体</span>
-              <span v-if="listing.compatibility_total">兼容车型 {{ listing.compatibility_total }} 条</span>
-            </div>
-            <div v-if="listing.error" class="warn">{{ listing.error }}</div>
-          </div>
-        </div>
-        <div class="conv-meta">
-          <span v-if="d.conversation.conversation_title" class="conv-title">{{ d.conversation.conversation_title }}</span>
-          <span class="muted">
-            买家 <span class="mono">{{ d.conversation.buyer_key }}</span> · 刊登
-            <a v-if="d.conversation.item_url" class="mono" :href="d.conversation.item_url" target="_blank" rel="noopener noreferrer">
-              {{ d.conversation.item_id }} ↗
-            </a>
-            <span v-else class="mono">{{ d.conversation.item_id || '无' }}</span>
-          </span>
-        </div>
-        <div v-if="af" class="af-box" :class="af.status">
-          <el-tag size="small" :type="af.status === 'DONE' ? 'success' : af.status === 'IN_PROGRESS' ? 'primary' : 'warning'">
-            {{ af.status_label }}
-          </el-tag>
-          <b>{{ af.type }}</b>
-          <span class="muted">客服 {{ af.marked_by }} 标记于 {{ af.marked_at ? fmtTime(af.marked_at) : '—' }}</span>
-          <span v-if="af.handled_by" class="muted">· 售后 {{ af.handled_by }}</span>
-          <div v-if="af.note" class="af-note">{{ af.note }}</div>
-        </div>
-        <div v-if="convMarks.length" class="conv-mark">
-          <span v-for="m in convMarks" :key="m.tag_id" class="mark-item"
-                :title="`${m.marked_by} · ${m.marked_at ? fmtTime(m.marked_at) : ''}（点标记改备注）`">
-            <el-tag size="small" :type="m.color" closable class="mark-tag" @click="openConvMark(m.tag_id)" @close="removeMark(m.tag_id)">
-              {{ m.tag }}
-            </el-tag>
-            <span v-if="m.note" class="mark-note">{{ m.note }}</span>
-          </span>
-          <el-button link size="small" type="primary" @click="openConvMark()">+ 加标记</el-button>
-        </div>
-        <AftersalesFilesPanel :conv-id="convId" :marketplace="d.conversation.marketplace_id"
-          :refresh-key="job ? `${job.id}-${job.state}-${d.messages.length}` : String(d.messages.length)"
-          @insert="(t: string) => (editText = t)" />
-        <LogisticsTicketsPanel :conv-id="convId" :refresh-key="job ? `${job.id}-${job.state}` : ''"
-          @insert="(t: string) => (editText = t)" />
-        <InvoicePanel :conv-id="convId" :refresh-key="job ? `${job.id}-${job.state}` : ''" />
       </aside>
     </div>
     <el-dialog v-model="markOpen" title="给这个会话加标记" width="500px">
@@ -868,20 +862,27 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
 }
-.cp-side {
-  width: 360px;
+.cp-compose {
+  width: 440px;
   flex-shrink: 0;
   overflow: auto;
   border-left: 1px solid var(--line);
   background: var(--panel);
+  display: flex;
+  flex-direction: column;
 }
 @media (max-width: 1400px) {
-  .cp-side {
-    width: 300px;
+  .cp-compose {
+    width: 360px;
   }
 }
-.cp-side .listing-card {
-  align-items: flex-start;
+.cp-compose .composer {
+  border-top: none;
+  flex: 1;
+}
+.cp-compose .composer-bar {
+  flex-wrap: wrap;
+  row-gap: 6px;
 }
 .spacer {
   flex: 1;

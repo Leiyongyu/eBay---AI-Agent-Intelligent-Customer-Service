@@ -21,8 +21,11 @@ DEFAULT_MESSAGE_TAGS = [("查适配中", "warning"), ("不适配", "danger"), ("
 
 
 def bootstrap() -> dict:
-    s = get_settings()
     init_db()
+    from . import runtime_settings
+
+    runtime_settings.load()  # 系统配置页里改过的项优先于 .env
+    s = get_settings()
     report: dict = {}
     with session_scope() as db:
         from .models import MessageTag

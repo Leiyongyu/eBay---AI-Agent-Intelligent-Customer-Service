@@ -4,6 +4,9 @@
 - 只读 eBay：订单列表（按最近修改时间 + 已发货状态过滤）和每单的发货记录（shipping_fulfillment）。
 - 当天 = 北京时间；按 eBay 记录的标记发货时间算。承运商以 eBay 为准（买家在订单里看到的就是它）。
 - 一个订单只生成一次；有取消申请、有退款的订单直接标“不发”。消息不写任何送达日期。
+- SHIP_NOTICE_WAIT_FOR_WAREHOUSE：eBay 标记发货时仓库多半只是打好面单，等谷仓出库单变成“已发货”（或有揽收扫描）
+  才生成，买家拿到单号就能查到；没出库的下次汇总再看（eBay 标记发货后 SHIP_NOTICE_LOOKBACK_DAYS 天内都会再看），
+  通知算在仓库实际发出的那天。谷仓查不到出库单的（不是谷仓发的货）不等。
 - 目前为模拟发送：只在本系统会话里追加一条店铺消息，不调用 eBay。
 """
 from __future__ import annotations
@@ -144,10 +147,26 @@ def _ebay_stores(db: Session) -> list[Store]:
             if is_ebay_store(s.id)]
 
 
-def collect_store(db: Session, api, store: Store, day: date) -> dict:
+def _warehouse_shipped(gc, order_id: str, cache: dict) -> bool:
+    """谷仓出库单已发货（状态 D）或已有揽收扫描；查不到出库单（不是谷仓发的货）也算可以发通知。"""
+    if order_id not in cache:
+        try:
+            whs = gc.orders_by_reference(order_id)
+        except Exception:  # noqa: BLE001  谷仓查不了：这次先不生成，下次再看
+            return False
+        cache[order_id] = not whs or any(w.get("order_status") == "D" or w.get("ascan_time") for w in whs)
+    return cache[order_id]
+
+
+def collect_store(db: Session, api, store: Store, day: date, gc=None) -> dict:
+    s = get_settings()
     start, end = day_range(day)
-    since = start.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    stats = {"orders": 0, "new": 0, "skipped": 0}
+    wait = s.ship_notice_wait_for_warehouse and gc is not None
+    # 等仓库实际发出时：eBay 前几天标记发货、今天才出库的也算今天
+    look_from = start - timedelta(days=s.ship_notice_lookback_days) if wait else start
+    since = look_from.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    stats = {"orders": 0, "new": 0, "skipped": 0, "waiting": 0}
+    wh_cache: dict = {}
     known = set(db.scalars(select(ShipNotice.order_id).where(ShipNotice.store_id == store.id)))
     offset = 0
     for _ in range(MAX_PAGES):
@@ -161,9 +180,12 @@ def collect_store(db: Session, api, store: Store, day: date) -> dict:
                 continue
             fulfil = (api.get(f"/sell/fulfillment/v1/order/{oid}/shipping_fulfillment") or {}).get("fulfillments") or []
             shipped = [(f, _parse(f.get("shippedDate"))) for f in fulfil if f.get("shipmentTrackingNumber")]
-            today = [(f, t) for f, t in shipped if t and start <= t < end]
+            today = [(f, t) for f, t in shipped if t and look_from <= t < end]
             if not today:
                 continue  # 不是当天发的（例如只是改了别的字段）
+            if wait and not _warehouse_shipped(gc, oid, wh_cache):
+                stats["waiting"] += 1  # 仓库还没真正发出：下次汇总再看
+                continue
             stats["orders"] += 1
             site = ((o.get("lineItems") or [{}])[0].get("listingMarketplaceId")) or store.default_marketplace_id
             lang = LANG_BY_SITE.get(site, "en")
@@ -175,6 +197,7 @@ def collect_store(db: Session, api, store: Store, day: date) -> dict:
             text, text_zh = render(oid, pkgs, lang)
             reason = _skip_reason(o)
             db.add(ShipNotice(store_id=store.id, order_id=oid, buyer_key=(o.get("buyer") or {}).get("username"),
+                              item_ids=[li.get("legacyItemId") for li in o.get("lineItems") or [] if li.get("legacyItemId")],
                               marketplace_id=site, ship_date=day.isoformat(), shipped_at=min(t for _f, t in today),
                               packages=pkgs, language=lang, text=text, text_zh=text_zh,
                               status="SKIPPED" if reason else "PENDING", skip_reason=reason))
@@ -194,16 +217,21 @@ def collect(day: date | None = None, *, source=None, store_ids: list[str] | None
 
     day = day or datetime.now(CN).date()
     src = source or get_ebay_source()
-    result = {"date": day.isoformat(), "stores": 0, "orders": 0, "new": 0, "skipped": 0, "errors": []}
+    result = {"date": day.isoformat(), "stores": 0, "orders": 0, "new": 0, "skipped": 0, "waiting": 0, "errors": []}
+    gc = None
+    if get_settings().ship_notice_wait_for_warehouse and get_settings().goodcang_ready:
+        from .logistics.goodcang import GoodcangClient
+
+        gc = GoodcangClient()
     with session_scope() as db:
         stores = [s for s in _ebay_stores(db) if not store_ids or s.id in store_ids]
         targets = [(s.id, s.name) for s in stores]
     for sid, name in targets:
         try:
             with session_scope() as db:
-                st = collect_store(db, src._api(sid), db.get(Store, sid), day)
+                st = collect_store(db, src._api(sid), db.get(Store, sid), day, gc)
             result["stores"] += 1
-            for k in ("orders", "new", "skipped"):
+            for k in ("orders", "new", "skipped", "waiting"):
                 result[k] += st[k]
         except SourceNotAvailable as e:
             result["errors"].append(f"{name}：{e}"[:200])
@@ -222,12 +250,12 @@ class NoticeError(ValueError):
 
 
 def conversation_for(db: Session, n: ShipNotice, create: bool) -> Conversation | None:
-    from .aftersales_mail.service import _conversation
+    from .aftersales_mail.service import order_conversation
     from .ingestion.service import get_or_create_conversation
 
     if n.conversation_id:
         return db.get(Conversation, n.conversation_id)
-    cid = _conversation(db, n.store_id, n.buyer_key)
+    cid = order_conversation(db, n.store_id, n.buyer_key, n.order_id, n.item_ids)
     if cid:
         return db.get(Conversation, cid)
     if not create or not n.buyer_key:

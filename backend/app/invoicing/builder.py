@@ -22,7 +22,7 @@ MARKETPLACE_DOMAIN = {"EBAY_DE": "ebay.de", "EBAY_GB": "ebay.co.uk", "EBAY_US": 
 MARKETPLACE_COUNTRY = {"EBAY_DE": "DE", "EBAY_GB": "GB", "EBAY_US": "US", "EBAY_MOTORS_US": "US", "EBAY_FR": "FR",
                        "EBAY_IT": "IT", "EBAY_ES": "ES", "EBAY_AT": "AT", "EBAY_AU": "AU", "EBAY_CA": "CA",
                        "EBAY_IE": "IE", "EBAY_NL": "NL", "EBAY_BE": "BE", "EBAY_CH": "CH", "EBAY_PL": "PL"}
-# 收货国家 → 发票语言（其余英语）
+# 站点国家（没有站点时用收货国家）→ 发票语言（其余英语）
 COUNTRY_LANGUAGE = {"DE": "de", "AT": "de", "CH": "de", "LI": "de", "LU": "de", "FR": "fr", "MC": "fr",
                     "IT": "it", "SM": "it", "ES": "es"}
 LANGUAGES = ("de", "en", "fr", "it", "es")
@@ -96,8 +96,12 @@ def _address_lines(name: str | None, company: str | None, addr: dict | None, lan
 
 
 def pick_language(ship_country: str | None, marketplace_id: str | None) -> str:
-    return COUNTRY_LANGUAGE.get(ship_country or "") or COUNTRY_LANGUAGE.get(MARKETPLACE_COUNTRY.get(marketplace_id or "", ""),
-                                                                          "en")
+    """发票语言按站点：ebay.de / ebay.at → 德语，ebay.fr → 法语，ebay.co.uk / ebay.com → 英语……
+    和 eBay 订单单据一致；没有站点信息时才按收货国家。"""
+    site = MARKETPLACE_COUNTRY.get(marketplace_id or "")
+    if site:
+        return COUNTRY_LANGUAGE.get(site, "en")
+    return COUNTRY_LANGUAGE.get(ship_country or "", "en")
 
 
 def last5(order_id: str) -> str:
@@ -224,6 +228,7 @@ def build(order: dict, *, issuer: dict, seller_account: str | None, issue_date: 
         "store_name": store_name or seller_account,
         "sales_record": order.get("salesRecordReference"),
         "shipping_service": start_step.get("shippingServiceCode"),
+        "store_url": issuer.get("store_url"),  # 店铺链接（eBay GetUser 的 StoreURL），发票顶部印链接和二维码
         "ebay_tax_reference": refs,  # 如 ["OSS - DE 200 0817 85"]：eBay 代收增值税用的 eBay 税号
         "seller": {"name": issuer.get("name"), "contact": issuer.get("contact"), "address": issuer.get("address"),
                    "postcode": issuer.get("postcode"),
@@ -235,6 +240,9 @@ def build(order: dict, *, issuer: dict, seller_account: str | None, issue_date: 
         "ship_to": _address_lines(ship.get("fullName"), ship.get("companyName"), ship_addr, lang),
         "ship_country": ship_country,
         "buyer_username": buyer.get("username"),
+        # 和 eBay 订单单据一样印在收货地址下面：买家电话、eBay 转发邮箱（@members.ebay.com）
+        "buyer_phone": ((ship.get("primaryPhone") or {}).get("phoneNumber") or "").strip() or None,
+        "buyer_email": (ship.get("email") or "").strip() or None,
         "buyer_vat": buyer_vat or tax_id.get("taxpayerId"),
         "lines": lines,
         "subtotal": str(_q(subtotal_v)),

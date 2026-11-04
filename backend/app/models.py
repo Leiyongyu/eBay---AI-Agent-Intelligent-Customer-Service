@@ -9,6 +9,7 @@ tests/test_models.py 会检查漏写。时间字段一律存无时区的 UTC 时
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     JSON,
@@ -63,7 +64,7 @@ class Aftersales:
     """客服标记转售后的问题类型与状态。"""
     PENDING, IN_PROGRESS, DONE = "PENDING", "IN_PROGRESS", "DONE"
     STATUS_LABELS = {PENDING: "待售后处理", IN_PROGRESS: "售后处理中", DONE: "售后已完成"}
-    TYPES = ["退货", "退款", "赔偿/部分退款", "不适配", "破损/错发/缺件", "质量问题", "物流异常/未收到", "物流问题需判断补发", "取消订单",
+    TYPES = ["退货", "退款", "赔偿/部分退款", "不适配", "破损/错发/缺件", "质量问题", "物流异常/未收到", "物流问题需判断补发", "延迟发货", "取消订单",
              "改地址", "其他"]
     # AI 识别的意图 → 标记时默认选中的类型（只是建议，客服可改）
     INTENT_HINT = {"return_refund": "退货", "refund_status": "退款", "damaged_wrong": "破损/错发/缺件",
@@ -174,6 +175,10 @@ class Conversation(Base):
     aftersales_marked_at: Mapped[datetime | None] = mapped_column(DateTime, comment="标记转售后时间（UTC）")
     aftersales_handled_by: Mapped[str | None] = mapped_column(String(64), comment="接手处理的售后")
     aftersales_updated_at: Mapped[datetime | None] = mapped_column(DateTime, comment="售后状态最近变更时间（UTC）")
+    situation_stage: Mapped[str | None] = mapped_column(
+        String(16), index=True, comment="会话情况阶段（AI 每次起草时更新）：presale 售前 / shipping 物流 / aftersales 售后 / invoice 发票 / other 其他")
+    situation_label: Mapped[str | None] = mapped_column(String(64), comment="会话情况一句话概括（AI 起草时给出，中文）")
+    situation_at: Mapped[datetime | None] = mapped_column(DateTime, comment="会话情况标签更新时间（UTC）")
     row_version: Mapped[int] = mapped_column(Integer, default=1,
                                              comment="会话版本号：新消息、系统事件时 +1；批准发送时用于检测过期")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="创建时间（UTC）")
@@ -323,6 +328,10 @@ class ReplyJob(Base):
     rule_version: Mapped[str | None] = mapped_column(String(64), comment="判定所用的规则版本")
     model_version: Mapped[str | None] = mapped_column(String(64), comment="判定所用的模型配置版本（不含密钥）")
     last_error: Mapped[str | None] = mapped_column(Text, comment="最近一次运行错误")
+    ack_status: Mapped[str | None] = mapped_column(
+        String(64), comment="转人工后给买家的“已收到”回执：SENT 已发；其他为不发的原因；空 = 还没到时间或还没处理（见 review_ack.py）")
+    ack_sent_at: Mapped[datetime | None] = mapped_column(DateTime, comment="回执发出时间（UTC）")
+    ack_message_id: Mapped[int | None] = mapped_column(Integer, comment="回执消息 ID（messages.id）")
     lock_version: Mapped[int] = mapped_column(Integer, default=1, comment="乐观锁版本号：状态变更时 +1，防止并发覆盖")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="创建时间（UTC）")
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, comment="最后更新时间（UTC）")
@@ -736,6 +745,16 @@ class InvoiceRequestStatus:
     LABELS = {WAITING_EMAIL: "等买家邮箱", OPEN: "待审核发送", DONE: "已发送", CANCELLED: "已取消"}
 
 
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+    __table_args__ = {"comment": "系统配置页：管理员在页面上改的配置项，优先于 .env；删掉一行就回到 .env 的值"}
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True, comment="配置项（Settings 字段名，小写）")
+    value: Mapped[Any] = mapped_column(JSON, comment="配置值（密码类也存在这里，接口不返回）")
+    updated_by: Mapped[str | None] = mapped_column(String(64), comment="最后修改的管理员")
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, comment="最后修改时间（UTC）")
+
+
 class InvoiceIssuer(Base):
     __tablename__ = "invoice_issuers"
     __table_args__ = {"comment": "开票主体：发票上的卖方公司信息；一个主体可给多个店铺用（stores.invoice_issuer_id）；只有管理员维护"}
@@ -802,6 +821,8 @@ class InvoiceRequest(Base):
     status: Mapped[str] = mapped_column(String(16), default="OPEN", comment="WAITING_EMAIL 等买家邮箱 / OPEN 待审核发送 / DONE 已发送 / CANCELLED 取消")
     source: Mapped[str] = mapped_column(String(16), default="agent", comment="来源：agent AI 识别 / manual 客服填写")
     note: Mapped[str | None] = mapped_column(String(500), comment="说明（如自动开票失败原因）")
+    trigger_message_id: Mapped[str | None] = mapped_column(
+        String(128), comment="最近一次触发开票的买家消息（平台 ID）：同一条消息重跑不重复开票发邮件，买家再要一次就再开一张")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="创建时间（UTC）")
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="最近更新时间（UTC）")
 
@@ -973,6 +994,12 @@ class LogisticsTicket(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime, comment="查件结果发给买家的时间（UTC）")
     sent_message_id: Mapped[int | None] = mapped_column(Integer, comment="发给买家的消息 ID（messages.id）")
     send_error: Mapped[str | None] = mapped_column(String(300), comment="没自动发送的原因")
+    outcome: Mapped[str | None] = mapped_column(
+        String(24), comment="谷仓回复的结果类别（规则判定，见 logistics/tickets.py OUTCOMES）：如 IN_TRANSIT 已催派、POD 已给签收证明、"
+                            "LOST 疑似丢失、ADDRESS 地址问题、UNKNOWN 看不懂；谷仓再次回复时清空重判")
+    notice_status: Mapped[str | None] = mapped_column(
+        String(200), comment="提交后给买家的安抚消息：SENT 已发送；其他为没发的原因（如买家还问了别的问题、还有其他需人工的原因）")
+    notice_sent_at: Mapped[datetime | None] = mapped_column(DateTime, comment="安抚消息发出时间（UTC）")
 
 
 class ShipNotice(Base):
@@ -987,6 +1014,7 @@ class ShipNotice(Base):
     ship_date: Mapped[str] = mapped_column(String(10), index=True, comment="发货日期（北京时间 YYYY-MM-DD，按 eBay 标记发货时间）")
     shipped_at: Mapped[datetime | None] = mapped_column(DateTime, comment="eBay 标记发货时间（UTC）")
     packages: Mapped[list] = mapped_column(JSON, comment="包裹 [{carrier, tracking_no, url}]")
+    item_ids: Mapped[list | None] = mapped_column(JSON, comment="订单商品的刊登号（找买家同一商品的会话用）")
     language: Mapped[str] = mapped_column(String(8), comment="消息语言 de / en / fr / it / es")
     text: Mapped[str] = mapped_column(Text, comment="发给买家的消息（可在审核时修改）")
     text_zh: Mapped[str | None] = mapped_column(Text, comment="中文对照")
