@@ -166,6 +166,14 @@ def delete_conversations(db: Session, conv_ids: list[int]) -> tuple[dict, set[st
     db.execute(delete(ConversationMark).where(ConversationMark.conversation_id.in_(conv_ids)))
     # 发票申请（含买家邮箱）随会话删；已生成的发票留底不删（invoices 表，财务要求保存）
     db.execute(delete(InvoiceRequest).where(InvoiceRequest.conversation_id.in_(conv_ids)))
+    # 飞书售后工单随会话删（卡片和话题留在飞书群里）
+    from .models import AftersalesCase
+
+    db.execute(delete(AftersalesCase).where(AftersalesCase.conversation_id.in_(conv_ids)))
+    # 发件箱记录随会话删（还没发出的也一起删掉，不会再发）
+    from .models import OutboundMessage
+
+    db.execute(delete(OutboundMessage).where(OutboundMessage.conversation_id.in_(conv_ids)))
     # 谷仓查件单保留（来自谷仓），只解除与会话的关联；之后同步时按买家重新匹配
     db.execute(update(LogisticsTicket).where(LogisticsTicket.conversation_id.in_(conv_ids)).values(conversation_id=None))
     n_msgs = db.execute(delete(Message).where(Message.conversation_id.in_(conv_ids))).rowcount or 0

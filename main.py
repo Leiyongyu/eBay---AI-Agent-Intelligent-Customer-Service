@@ -55,7 +55,11 @@ class AppLauncher:
         # 开了 Cloudflare 隧道时端口必须固定：隧道在 Cloudflare 后台写死转到 localhost:APP_PORT
         port = self.pick_port(settings.app_host, settings.app_port,
                               strict=bool(settings.cloudflared_path and settings.cloudflare_tunnel_token))
-        url = f"http://{settings.app_host}:{port}/"
+        lan = settings.app_host in ("0.0.0.0", "::")  # 监听全部网卡：局域网里的电脑也能访问
+        url = f"http://{'127.0.0.1' if lan else settings.app_host}:{port}/"
+        if lan:
+            log.info("局域网访问地址：%s（其他电脑用这个地址；需在 Windows 防火墙放行 TCP %s 端口）",
+                     "、".join(f"http://{ip}:{port}/" for ip in self.lan_ips()) or "（没找到局域网 IP）", port)
         if self.open_browser_flag and settings.app_open_browser:
             threading.Thread(target=self.open_browser_when_ready, args=(url,), daemon=True).start()
         self.serve(settings.app_host, port, url)
@@ -179,6 +183,20 @@ class AppLauncher:
         subprocess.run([npm, "run", "build"], cwd=FRONTEND, check=True)
 
     # ------------------------------------------------------------------ 服务
+    @staticmethod
+    def lan_ips() -> list[str]:
+        """本机的局域网 IPv4 地址（192.168.* / 10.* / 172.16–31.*）。"""
+        ips = set()
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ips.add(info[4][0])
+        except OSError:
+            pass
+        def private(ip: str) -> bool:
+            a, b_ = (int(x) for x in ip.split(".")[:2])
+            return a == 10 or (a == 192 and b_ == 168) or (a == 172 and 16 <= b_ <= 31)
+        return sorted(ip for ip in ips if private(ip))
+
     @staticmethod
     def pick_port(host: str, preferred: int, strict: bool = False) -> int:
         for port in range(preferred, preferred + (1 if strict else 20)):

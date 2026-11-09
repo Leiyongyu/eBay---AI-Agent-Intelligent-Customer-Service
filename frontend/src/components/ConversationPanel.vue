@@ -1,21 +1,25 @@
 <script setup lang="ts">
 // 右侧会话面板：完整聊天记录 + 输入框。AI 草稿只在点击“AI 生成草稿”时生成并填进输入框，
-// 生成过程（读了什么、查了什么、依据什么）显示在聊天末尾；“发送”是模拟发送，只记在本系统，不会发到 eBay。
+// 生成过程（读了什么、查了什么、依据什么）显示在聊天末尾；“发送”先进发件箱，延迟几分钟发出，发出前可撤回。
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ApiError, get, post, api, session } from '../api'
 import { REVIEW_STATES, STATE_LABELS, errorText, fmtTime } from '../format'
 import DraftTrace from './DraftTrace.vue'
-import InvoicePanel from './InvoicePanel.vue'
-import AftersalesFilesPanel from './AftersalesFilesPanel.vue'
-import LogisticsTicketsPanel from './LogisticsTicketsPanel.vue'
 import TicketTimelineCard from './TicketTimelineCard.vue'
 import InvoiceTimelineCard from './InvoiceTimelineCard.vue'
+import OutboxCard from './OutboxCard.vue'
 import SituationChip from './SituationChip.vue'
-import type { Attachment, ChatMessage, ComplianceResult, ConversationDetail, JobTrace, ListingCard, TicketTimelineItem, InvoiceTimelineItem } from '../types'
+import { TAG_PALETTE, fromPicker, pickerValue, tagStyle } from '../tagColor'
+import TemplatePicker from './TemplatePicker.vue'
+import ComposerIcon from './ComposerIcon.vue'
+import type { Tpl } from './TemplateEditor.vue'
+import type { Attachment, ChatMessage, ComplianceResult, ConversationDetail, ConvContext, JobTrace, ListingCard, TicketTimelineItem, InvoiceTimelineItem } from '../types'
 
-const props = defineProps<{ convId: number }>()
-const emit = defineEmits<{ changed: []; deleted: [] }>()
+// layout=page：独立的回复页面（商品、订单信息在右侧栏显示，输入框放到聊天下面）；hideTrans：只看原文
+const props = defineProps<{ convId: number; layout?: 'page'; hideTrans?: boolean }>()
+const isPage = computed(() => props.layout === 'page')
+const emit = defineEmits<{ changed: []; deleted: []; context: [ctx: ConvContext] }>()
 
 const d = ref<ConversationDetail | null>(null)
 const listing = ref<ListingCard | null>(null) // 商品卡片：打开会话后单独加载，不拖慢聊天记录
@@ -102,6 +106,20 @@ const ROLE_LABELS: Record<string, string> = {
   UNKNOWN: '发送方未知',
 }
 
+// 插入消息模板：占位符由后端按这个会话换成实际内容；回复框里已经有字时接在后面
+async function insertTemplate(t: Tpl) {
+  try {
+    const r = await post<{ text: string; missing: { key: string; label: string }[]; attachments: unknown[] }>(
+      `/internal/message-templates/${t.id}/render`, { conversation_id: props.convId })
+    editText.value = editText.value.trim() ? `${editText.value.trimEnd()}\n\n${r.text}` : r.text
+    if (r.missing.length)
+      ElMessage.warning({ message: `这些内容没取到，模板里原样留着，发送前请补上：${r.missing.map((m) => m.label).join('、')}`, duration: 6000 })
+    if (r.attachments.length) ElMessage.info(`模板带 ${r.attachments.length} 张图片，回复里不会自动带上，需要的话请单独发`)
+  } catch (e) {
+    ElMessage.error(errorText(e))
+  }
+}
+
 async function load() {
   try {
     d.value = await get<ConversationDetail>(`/internal/conversations/${props.convId}`)
@@ -181,6 +199,38 @@ async function generateDraft() {
   }
 }
 
+// 回复里带的图片：选好就先上传（挂在这个会话上），发送时一起带上；一条最多 5 张
+const replyImages = ref<{ file_id: number; name: string; url: string }[]>([])
+const imageInput = ref<HTMLInputElement | null>(null)
+const uploadingImg = ref(false)
+async function onPickImages(e: Event) {
+  const input = e.target as HTMLInputElement
+  const files = [...(input.files || [])]
+  input.value = ''
+  const room = 5 - replyImages.value.length
+  if (files.length > room) ElMessage.warning('一条回复最多带 5 张图片，多出来的没有加')
+  uploadingImg.value = true
+  try {
+    for (const f of files.slice(0, Math.max(room, 0))) {
+      if (f.size > 5 * 1024 * 1024) {
+        ElMessage.warning(`${f.name} 超过 5 MB`)
+        continue
+      }
+      const data = await new Promise<string>((res, rej) => {
+        const r = new FileReader()
+        r.onload = () => res(String(r.result))
+        r.onerror = rej
+        r.readAsDataURL(f)
+      })
+      replyImages.value.push(await post(`/internal/conversations/${props.convId}/reply-images`, { name: f.name, data }))
+    }
+  } catch (err) {
+    ElMessage.error(errorText(err))
+  } finally {
+    uploadingImg.value = false
+  }
+}
+
 async function send() {
   if (needReviewer() || !d.value) return
   sending.value = true
@@ -191,11 +241,14 @@ async function send() {
       handling_ms: Date.now() - openedAt.value,
       // 中文对照和正式回复对得上时一起带上；对不上（正式回复后来又改过）时后端发出后再补
       text_zh: (!zhStale.value && zhText.value.trim()) || undefined,
+      file_ids: replyImages.value.map((x) => x.file_id),
     })
-    ElMessage.success('已模拟发送（只记录在本系统，没有发到 eBay）')
+    const mins = Math.round((session.meta?.send_delay_seconds ?? 300) / 60)
+    ElMessage.success(mins > 0 ? `已放进待发送，${mins} 分钟后发出，发出前可撤回` : '已发送')
     editText.value = ''
     zhText.value = ''
     zhStale.value = false
+    replyImages.value = []
     emit('changed')
   } catch (e) {
     fail(e)
@@ -212,9 +265,7 @@ const msgTags = ref<{ id: number; name: string; color: string; created_by?: stri
 const markOpen = ref(false)
 const convMarkForm = ref({ tag_id: null as number | null, note: '' })
 const convMarks = computed(() => d.value?.conversation.marks || (d.value?.conversation.mark ? [d.value.conversation.mark] : []))
-const newTag = ref({ name: '', color: 'primary' })
-const TAG_COLORS = [{ value: 'primary', label: '蓝' }, { value: 'success', label: '绿' }, { value: 'warning', label: '橙' },
-                    { value: 'danger', label: '红' }, { value: 'info', label: '灰' }]
+const newTag = ref({ name: '', color: '#3a7bfd' })
 
 async function loadMsgTags() {
   msgTags.value = await get('/internal/message-tags')
@@ -224,9 +275,20 @@ async function openConvMark(tagId?: number) {
   await loadMsgTags()
   const m = convMarks.value.find((x) => x.tag_id === tagId)
   convMarkForm.value = { tag_id: tagId ?? null, note: m?.note || '' }
-  newTag.value = { name: '', color: 'primary' }
+  newTag.value = { name: '', color: newTag.value.color }
+  tagQuery.value = ''
   markOpen.value = true
 }
+
+// 标记弹窗：按名称搜索；已经打在这个会话上的排在前面
+const tagQuery = ref('')
+const shownTags = computed(() => {
+  const q = tagQuery.value.trim().toLowerCase()
+  const marked = new Set(convMarks.value.map((m) => m.tag_id))
+  return msgTags.value
+    .filter((t) => !q || t.name.toLowerCase().includes(q))
+    .sort((a, b) => Number(marked.has(b.id)) - Number(marked.has(a.id)))
+})
 
 function pickTag(id: number) {
   convMarkForm.value = { tag_id: id, note: convMarks.value.find((x) => x.tag_id === id)?.note || '' }
@@ -284,6 +346,17 @@ async function deleteTag(t: { id: number; name: string }) {
 // 客服转售后 / 售后处理：客服判断回复不了的标记问题类型，售后接手并处理完成
 const role = computed(() => session.user?.role)
 const af = computed(() => d.value?.conversation.aftersales || null)
+
+// 售后状态、售后群工单、查件单、发票、内部参考放在右侧栏“当前对话待处理”：把刷新用的状态告诉回复页，
+// 右侧栏“填入回复框”、审核完查件单 / 发票后刷新聊天记录，都通过下面暴露的方法回到这里
+const convContext = computed<ConvContext | null>(() => d.value
+  ? { jobKey: job.value ? `${job.value.id}-${job.value.state}` : '', messages: d.value.messages.length, af: af.value }
+  : null)
+watch(convContext, (c) => c && emit('context', c), { immediate: true })
+defineExpose({
+  setEditText: (t: string) => (editText.value = t),
+  reload: () => load(),
+})
 const canMark = computed(() => role.value !== 'AFTERSALES' && (!af.value || af.value.status === 'DONE'))
 const canUnmark = computed(() => role.value !== 'AFTERSALES' && af.value?.status === 'PENDING')
 const canStart = computed(() => role.value !== 'CS' && af.value?.status === 'PENDING')
@@ -319,39 +392,11 @@ async function finishAftersales() {
   }
 }
 
-// 测试期：删除整个测试会话（正式上线前移除）
-const canDelete = computed(() => !!session.meta?.test_delete_enabled && !isEbay.value)
-async function deleteConversation() {
-  if (needReviewer()) return
-  try {
-    await ElMessageBox.confirm('删除这个测试会话的全部消息、图片、AI 草稿和回复任务？删除后不能恢复。', '删除会话（测试用）',
-                               { type: 'warning', confirmButtonText: '删除' })
-  } catch {
-    return
-  }
-  try {
-    await api('DELETE', `/internal/conversations/${props.convId}`)
-    ElMessage.success('已删除')
-    emit('deleted')
-  } catch (e) {
-    fail(e)
-  }
-}
-
-async function clearSimulated() {
-  try {
-    await ElMessageBox.confirm(`删除本会话里 ${simulatedCount.value} 条模拟发送的消息？真实的 eBay 消息不受影响。`, '清除模拟消息', { type: 'warning' })
-  } catch {
-    return
-  }
-  try {
-    const r = await api<{ deleted: number }>('DELETE', `/internal/conversations/${props.convId}/simulated-messages`)
-    ElMessage.success(`已删除 ${r.deleted} 条模拟消息`)
-    emit('changed')
-  } catch (e) {
-    fail(e)
-  }
+// 撤回后把原文放回输入框（输入框里已有内容时不覆盖）
+function onRecalled(text: string) {
+  if (!editText.value.trim()) editText.value = text
   load()
+  emit('changed')
 }
 
 async function toggleHandoff() {
@@ -548,9 +593,11 @@ onUnmounted(() => {
 
 <template>
   <div v-if="loadError" class="panel"><el-alert :title="loadError" type="error" show-icon /></div>
-  <div v-else-if="d" class="panel cp">
+  <div v-else-if="d" class="panel cp" :class="{ page: isPage }">
     <div class="panel-head">
       <span class="store-name" :title="`店铺 ID：${d.conversation.store_id}`">{{ d.conversation.store_name || d.conversation.store_id }}</span>
+      <el-tag v-if="d.blacklist" type="danger" effect="dark" size="small"
+              :title="`${d.blacklist.created_by || ''} 加入：${d.blacklist.reason || '未填原因'}`">黑名单买家 · AI 不起草</el-tag>
       <SituationChip v-if="d.conversation.situation" :s="d.conversation.situation" size="default" />
       <el-tag size="small" effect="plain" :type="d.conversation.marketplace_id === 'UNKNOWN' ? 'danger' : 'info'">
         {{ d.conversation.marketplace_id }}
@@ -567,13 +614,11 @@ onUnmounted(() => {
       <el-button v-if="canUnmark" link size="small" @click="aftersales('unmark')">撤回转售后</el-button>
       <el-button v-if="canStart" link size="small" type="primary" @click="aftersales('start')">接手处理</el-button>
       <el-button v-if="canFinish" link size="small" type="success" @click="finishAftersales">处理完成</el-button>
-      <el-button v-if="canDelete" link size="small" type="danger" @click="deleteConversation">删除会话（测试）</el-button>
-      <el-button v-if="simulatedCount" link size="small" type="warning" @click="clearSimulated">清除模拟消息（{{ simulatedCount }}）</el-button>
       <el-button link size="small" :disabled="claimedByOther" @click="toggleHandoff">
         {{ d.conversation.handoff_state === 'HUMAN' ? '解除接管' : '人工接管' }}
       </el-button>
     </div>
-    <div v-if="d.conversation.item_id && listing" class="listing-card">
+    <div v-if="!isPage && d.conversation.item_id && listing" class="listing-card">
       <img v-if="listing.picture_url" :src="listing.picture_url" alt="" class="listing-img" referrerpolicy="no-referrer" />
       <div class="listing-info">
         <a v-if="listing.url" :href="listing.url" target="_blank" rel="noopener noreferrer" class="listing-title">
@@ -592,7 +637,7 @@ onUnmounted(() => {
         <div v-if="listing.error" class="warn">{{ listing.error }}</div>
       </div>
     </div>
-    <div class="conv-meta">
+    <div v-if="!isPage" class="conv-meta">
       <span v-if="d.conversation.conversation_title" class="conv-title">{{ d.conversation.conversation_title }}</span>
       <span class="muted">
         买家 <span class="mono">{{ d.conversation.buyer_key }}</span> · 刊登
@@ -602,31 +647,16 @@ onUnmounted(() => {
         <span v-else class="mono">{{ d.conversation.item_id || '无' }}</span>
       </span>
     </div>
-    <div v-if="af" class="af-box" :class="af.status">
-      <el-tag size="small" :type="af.status === 'DONE' ? 'success' : af.status === 'IN_PROGRESS' ? 'primary' : 'warning'">
-        {{ af.status_label }}
-      </el-tag>
-      <b>{{ af.type }}</b>
-      <span class="muted">客服 {{ af.marked_by }} 标记于 {{ af.marked_at ? fmtTime(af.marked_at) : '—' }}</span>
-      <span v-if="af.handled_by" class="muted">· 售后 {{ af.handled_by }}</span>
-      <div v-if="af.note" class="af-note">{{ af.note }}</div>
-    </div>
     <div v-if="convMarks.length" class="conv-mark">
       <span v-for="m in convMarks" :key="m.tag_id" class="mark-item"
             :title="`${m.marked_by} · ${m.marked_at ? fmtTime(m.marked_at) : ''}（点标记改备注）`">
-        <el-tag size="small" :type="m.color" closable class="mark-tag" @click="openConvMark(m.tag_id)" @close="removeMark(m.tag_id)">
+        <el-tag size="small" :style="tagStyle(m.color, true)" closable class="mark-tag" @click="openConvMark(m.tag_id)" @close="removeMark(m.tag_id)">
           {{ m.tag }}
         </el-tag>
         <span v-if="m.note" class="mark-note">{{ m.note }}</span>
       </span>
       <el-button link size="small" type="primary" @click="openConvMark()">+ 加标记</el-button>
     </div>
-    <AftersalesFilesPanel :conv-id="convId" :marketplace="d.conversation.marketplace_id"
-      :refresh-key="job ? `${job.id}-${job.state}-${d.messages.length}` : String(d.messages.length)"
-      @insert="(t: string) => (editText = t)" />
-    <LogisticsTicketsPanel :conv-id="convId" :refresh-key="job ? `${job.id}-${job.state}` : ''"
-      @insert="(t: string) => (editText = t)" />
-    <InvoicePanel :conv-id="convId" :refresh-key="job ? `${job.id}-${job.state}` : ''" />
     <div class="cp-body">
       <div class="cp-main">
         <!-- 聊天记录 -->
@@ -634,7 +664,7 @@ onUnmounted(() => {
           <template v-for="m in d.messages" :key="m.id">
           <template v-for="it in ticketPlacement.before.get(m.id) || []" :key="it.key">
             <InvoiceTimelineCard v-if="it.kind === 'invoice'" :item="it" />
-            <TicketTimelineCard v-else :item="it" />
+            <TicketTimelineCard v-else :item="it" :conv-id="convId" @changed="load" />
           </template>
           <div class="msg-row" :class="m.role.toLowerCase()">
             <div class="bubble" :class="{ task: traceSourceSet.has(m.ebay_message_id), sim: m.simulated }">
@@ -642,7 +672,7 @@ onUnmounted(() => {
                 <span class="who">{{ ROLE_LABELS[m.role] || m.role }}</span>
                 <span class="time">{{ fmtTime(m.sent_at) }}</span>
                 <el-tag v-if="m.trace?.auto" size="small" type="success">AI 自动回复</el-tag>
-                <el-tag v-if="m.simulated" size="small" type="warning" effect="plain">模拟发送 · 未发到 eBay</el-tag>
+                <el-tag v-if="m.simulated" size="small" type="info" effect="plain">只记在本系统 · 未发到 eBay</el-tag>
                 <el-tag v-if="traceSourceSet.has(m.ebay_message_id)" size="small" type="warning" effect="plain">本次回复对象</el-tag>
                 <span class="spacer" />
                 <el-button v-if="m.trace?.from_ai" link size="small" type="primary" @click="openTrace(m)">查看依据</el-button>
@@ -653,7 +683,7 @@ onUnmounted(() => {
 
               <div v-if="m.subject" class="subject">主题：{{ m.subject }}</div>
               <div class="msg-body">{{ m.body }}</div>
-              <div v-if="m.zh_translation" class="trans">
+              <div v-if="m.zh_translation && !hideTrans" class="trans">
                 <div class="trans-label">{{ m.direction === 'OUT' ? '中文对照 · 买家收到的是上方原文' : '中文译文 · 自动翻译，仅供理解' }}</div>
                 <div class="trans-body">{{ m.zh_translation }}</div>
               </div>
@@ -713,8 +743,9 @@ onUnmounted(() => {
           </template>
           <template v-for="it in ticketPlacement.after" :key="it.key">
             <InvoiceTimelineCard v-if="it.kind === 'invoice'" :item="it" />
-            <TicketTimelineCard v-else :item="it" />
+            <TicketTimelineCard v-else :item="it" :conv-id="convId" @changed="load" />
           </template>
+          <OutboxCard v-for="o in d.outbox || []" :key="`ob${o.id}`" :item="o" @recalled="onRecalled" />
 
           <div v-for="e in d.events" :key="e.id" class="event">
             <span>{{ fmtTime(e.occurred_at) }} · {{ e.event_type }} · {{ e.source }}<template v-if="e.case_id"> · {{ e.case_id }}</template></span>
@@ -746,7 +777,7 @@ onUnmounted(() => {
               </template>
             </div>
           </div>
-          <el-input v-model="editText" type="textarea" :autosize="{ minRows: 8, maxRows: 18 }" :disabled="claimedByOther || isSystemConv"
+          <el-input v-model="editText" type="textarea" :autosize="isPage ? { minRows: 3, maxRows: 8 } : { minRows: 8, maxRows: 18 }" :disabled="claimedByOther || isSystemConv"
             :placeholder="isSystemConv ? 'eBay 系统消息不需要回复' : '输入回复（用买家的语言）；点“AI 生成草稿”会把 AI 写的回复填到这里，可以再修改'" />
           <div v-if="!isSystemConv" class="zh-box">
             <div class="zh-head">
@@ -754,21 +785,46 @@ onUnmounted(() => {
               <span v-if="zhSyncing" class="muted">· 正在更新正式回复…</span>
               <span v-else-if="zhStale" class="warn">· 正式回复改过了，中文可能对不上，点“译成中文”刷新</span>
             </div>
-            <el-input v-model="zhText" type="textarea" :autosize="{ minRows: 6, maxRows: 14 }" :disabled="claimedByOther"
+            <el-input v-model="zhText" type="textarea" :autosize="isPage ? { minRows: 2, maxRows: 6 } : { minRows: 6, maxRows: 14 }" :disabled="claimedByOther"
               placeholder="也可以先在这里用中文写回复，会自动译成买家语言填到上面" @input="onZhInput" />
           </div>
+          <div v-if="replyImages.length || uploadingImg" class="reply-imgs">
+            <div v-for="(img, i) in replyImages" :key="img.file_id" class="reply-img">
+              <el-image :src="img.url" fit="cover" :preview-src-list="replyImages.map((x) => x.url)" :initial-index="i" preview-teleported />
+              <button class="reply-img-x" title="不带这张" @click="replyImages.splice(i, 1)">×</button>
+            </div>
+            <span v-if="uploadingImg" class="muted">上传中…</span>
+          </div>
           <div class="composer-bar">
-            <el-tooltip :content="generateHint" placement="top">
-              <span>
-                <el-button :loading="generating || aiBusy" :disabled="!canGenerate" @click="generateDraft">
-                  {{ aiBusy ? 'AI 生成中…' : activeDraft ? '重新生成 AI 草稿' : 'AI 生成草稿' }}
-                </el-button>
-              </span>
+            <!-- 工具按钮：只显示图标，鼠标放上去显示中文说明 -->
+            <el-tooltip :content="replyImages.length >= 5 ? '插入图片（最多 5 张）' : '插入图片'" placement="top">
+              <button class="tool" :disabled="claimedByOther || isSystemConv || uploadingImg || replyImages.length >= 5"
+                      aria-label="插入图片" @click="imageInput?.click()">
+                <ComposerIcon name="image" />
+              </button>
             </el-tooltip>
-            <el-button :disabled="!editText.trim()" @click="translateEdit">译成中文</el-button>
+            <input ref="imageInput" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden @change="onPickImages" />
+            <el-tooltip :content="aiBusy ? 'AI 生成中…' : canGenerate ? (activeDraft ? 'AI生成草稿（重新生成）' : 'AI生成草稿') : `AI生成草稿：${generateHint}`" placement="top">
+              <button class="tool" :class="{ busy: generating || aiBusy }" :disabled="!canGenerate || generating" aria-label="AI生成草稿"
+                      @click="generateDraft">
+                <ComposerIcon name="ai" />
+              </button>
+            </el-tooltip>
+            <el-tooltip :content="editText.trim() ? '翻译（把回复译成中文对照）' : '翻译：先写回复内容'" placement="top">
+              <button class="tool" :disabled="!editText.trim()" aria-label="翻译" @click="translateEdit">
+                <ComposerIcon name="translate" />
+              </button>
+            </el-tooltip>
+            <TemplatePicker :disabled="claimedByOther || isSystemConv" @pick="insertTemplate">
+              <el-tooltip content="回复模板" placement="top">
+                <button class="tool" :disabled="claimedByOther || isSystemConv" aria-label="回复模板">
+                  <ComposerIcon name="insert" />
+                </button>
+              </el-tooltip>
+            </TemplatePicker>
             <span v-if="edited" class="warn">已修改 AI 草稿</span>
             <span class="spacer" />
-            <span class="muted">模拟发送：只记录在本系统，不会发到 eBay</span>
+            <span class="muted">发送后 {{ Math.round((session.meta?.send_delay_seconds ?? 300) / 60) }} 分钟内可撤回</span>
             <el-button type="primary" :loading="sending" :disabled="!editText.trim() || claimedByOther || isSystemConv || aiBusy" @click="send">
               发送
             </el-button>
@@ -778,19 +834,25 @@ onUnmounted(() => {
     </div>
     <el-dialog v-model="markOpen" title="给这个会话加标记" width="500px">
       <div class="muted small">选一个标记（可以给同一个会话打多个）；没有合适的就在下面新建。</div>
+      <el-input v-model="tagQuery" class="tag-search" clearable placeholder="搜索标记名称" @keyup.enter="shownTags.length === 1 && pickTag(shownTags[0].id)" />
+      <!-- 一行一个，上下滑动；已经打上的排在前面 -->
       <div class="tag-options">
-        <div v-for="t in msgTags" :key="t.id" class="tag-opt" :class="{ on: convMarkForm.tag_id === t.id }" @click="pickTag(t.id)">
-          <el-tag size="small" :type="t.color as any" :effect="convMarkForm.tag_id === t.id ? 'dark' : 'light'">{{ t.name }}</el-tag>
+        <div v-for="t in shownTags" :key="t.id" class="tag-opt" :class="{ on: convMarkForm.tag_id === t.id }" @click="pickTag(t.id)">
+          <span class="tag-radio" aria-hidden="true" />
+          <el-tag size="small" :style="tagStyle(t.color, convMarkForm.tag_id === t.id)">{{ t.name }}</el-tag>
           <span v-if="convMarks.some((m) => m.tag_id === t.id)" class="muted small">已打</span>
+          <span class="tag-spacer" />
           <el-button link size="small" type="danger" class="del" title="删除这个标记项（所有会话上的都会去掉）" @click.stop="deleteTag(t)">删除</el-button>
         </div>
-        <div v-if="!msgTags.length" class="muted small">还没有标记项，先新建一个</div>
+        <div v-if="!msgTags.length" class="muted small tag-empty">还没有标记项，先新建一个</div>
+        <div v-else-if="!shownTags.length" class="muted small tag-empty">
+          没有找到「{{ tagQuery.trim() }}」
+          <el-button link type="primary" size="small" @click="newTag.name = tagQuery.trim(); createTag()">新建这个标记</el-button>
+        </div>
       </div>
       <div class="new-tag">
         <el-input v-model="newTag.name" size="small" maxlength="32" placeholder="新建标记，如 等配件到货" @keyup.enter="createTag" />
-        <el-select v-model="newTag.color" size="small" style="width: 80px">
-          <el-option v-for="c in TAG_COLORS" :key="c.value" :value="c.value" :label="c.label" />
-        </el-select>
+        <el-color-picker :model-value="pickerValue(newTag.color)" :predefine="TAG_PALETTE" size="small" color-format="hex" clearable @change="(v: string | null) => (newTag.color = fromPicker(v))" />
         <el-button size="small" :disabled="!newTag.name.trim()" @click="createTag">新建</el-button>
       </div>
       <el-form label-width="50px" style="margin-top: 12px">
@@ -876,6 +938,23 @@ onUnmounted(() => {
     width: 360px;
   }
 }
+/* 回复页面：输入框放到聊天记录下面 */
+.cp.page .cp-body {
+  flex-direction: column;
+}
+.cp.page .cp-main {
+  min-height: 0;
+}
+.cp.page .cp-compose {
+  flex-shrink: 0;
+  width: auto;
+  max-height: 46%;
+  border-left: 0;
+  border-top: 1px solid var(--line);
+}
+.cp.page .chat {
+  background: var(--panel);
+}
 .cp-compose .composer {
   border-top: none;
   flex: 1;
@@ -916,28 +995,53 @@ onUnmounted(() => {
 .mark-tag {
   cursor: pointer;
 }
+.tag-search {
+  margin-top: 10px;
+}
+/* 标记列表：一行一个，固定高度上下滑动 */
 .tag-options {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 10px 0;
-  max-height: 220px;
-  overflow: auto;
+  flex-direction: column;
+  margin: 8px 0 10px;
+  max-height: 360px; /* 最多显示 10 行（每行 36px），多了在框里上下滑动 */
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 4px;
 }
 .tag-opt {
-  display: inline-flex;
+  display: flex;
+  flex-shrink: 0;
   align-items: center;
-  gap: 4px;
-  padding: 3px 6px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  gap: 8px;
+  height: 36px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--line-soft);
   cursor: pointer;
 }
-.tag-opt.on {
-  border-color: var(--el-color-primary);
+.tag-opt:last-child {
+  border-bottom: 0;
 }
-.tag-opt .del {
-  margin-left: 2px;
+.tag-opt:hover {
+  background: var(--hover, #f5f6f8);
+}
+.tag-opt.on {
+  background: var(--accent-soft, #fff4ec);
+}
+.tag-radio {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border: 1px solid var(--el-border-color);
+  border-radius: 50%;
+}
+.tag-opt.on .tag-radio {
+  border: 4px solid var(--el-color-primary);
+}
+.tag-spacer {
+  flex: 1;
+}
+.tag-empty {
+  padding: 12px 10px;
 }
 .new-tag {
   display: flex;
@@ -1176,6 +1280,68 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+/* 回复框工具按钮：图标 + 悬停提示 */
+.tool {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+.tool:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.tool:disabled {
+  color: #c9cdd4;
+  cursor: not-allowed;
+}
+.tool.busy {
+  color: var(--accent);
+  animation: tool-pulse 1s ease-in-out infinite;
+}
+@keyframes tool-pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+.reply-imgs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.reply-img {
+  position: relative;
+  width: 56px;
+  height: 56px;
+}
+.reply-img .el-image {
+  width: 100%;
+  height: 100%;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+}
+.reply-img-x {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--danger);
+  color: #fff;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
 }
 .composer-bar .el-button + .el-button {
   margin-left: 0;

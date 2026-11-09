@@ -66,15 +66,26 @@ class ChatModelProvider:
     def __init__(self, settings: Settings, model: BaseChatModel | None = None):
         self.settings = settings
         self.model = model or self._build(settings)
+        # 翻译用的模型：配置了 LLM_TRANSLATE_MODEL 或要关思考时单独建一个；测试注入了假模型时沿用它
+        self._translator: BaseChatModel | None = model
+
+    @property
+    def translator(self) -> BaseChatModel:
+        if self._translator is None:
+            s = self.settings
+            same = s.translate_model_name == s.llm_chat_model and s.translate_extra_body() == s.extra_body()
+            self._translator = self.model if same else self._build(s, model=s.translate_model_name,
+                                                                   extra=s.translate_extra_body())
+        return self._translator
 
     @staticmethod
-    def _build(s: Settings) -> BaseChatModel:
+    def _build(s: Settings, model: str | None = None, extra: dict | None = None) -> BaseChatModel:
         if s.llm_provider != "openai_compatible":
             raise ProviderNotReady(f"LLM_PROVIDER={s.llm_provider} 暂不支持")
         from langchain_openai import ChatOpenAI
 
         kwargs: dict[str, Any] = {
-            "model": s.llm_chat_model,
+            "model": model or s.llm_chat_model,
             "api_key": s.llm_api_key,
             "timeout": s.llm_timeout_seconds,
             "max_retries": 1,
@@ -85,8 +96,9 @@ class ChatModelProvider:
             kwargs["max_tokens"] = s.llm_max_output_tokens
         if s.llm_temperature is not None:
             kwargs["temperature"] = s.llm_temperature
-        if s.extra_body():
-            kwargs["extra_body"] = s.extra_body()
+        body = extra if model else s.extra_body()
+        if body:
+            kwargs["extra_body"] = body
         return ChatOpenAI(**kwargs)
 
     # ------------------------------------------------------------------
@@ -147,7 +159,7 @@ class ChatModelProvider:
 
     def translate_with_usage(self, text: str, target_language: str = "中文") -> tuple[str, dict]:
         system = load_prompt("translate_review").replace("{target_language}", target_language)
-        resp = self.model.invoke([SystemMessage(content=system), HumanMessage(content=text)])
+        resp = self.translator.invoke([SystemMessage(content=system), HumanMessage(content=text)])
         return str(resp.content).strip(), _usage(resp)
 
     def ping(self) -> dict:

@@ -1,16 +1,16 @@
-"""登录、退出、改密码，以及管理员的账号管理（只有管理员能建账号、分配店铺、重置密码、停用）。"""
+"""登录、退出、改密码，以及管理员的账号管理（只有管理员能建账号、分配店铺、重置密码、停用、删除；登录名由系统随机生成）。"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from .. import auth
 from ..auth import CurrentUser, current_user, require_admin
 from ..config import get_settings
 from ..db import get_db, utcnow
-from ..models import AuditEvent, Role, Store, User, UserStore
+from ..models import AuditEvent, Role, Store, User, UserSession, UserStore
 from .deps import iso
 
 router = APIRouter(prefix="/api", tags=["accounts"])
@@ -90,13 +90,38 @@ def _set_stores(db: Session, user: User, store_ids: list[str]) -> None:
         db.add(UserStore(user_id=user.id, store_id=sid))
 
 
+# 登录名：系统随机生成，字母开头、字母 + 数字；去掉容易看错的 0 o 1 l i
+_LETTERS = "abcdefghjkmnpqrstuvwxyz"
+_DIGITS = "23456789"
+
+
+def random_username(db: Session, length: int = 8) -> str:
+    import secrets
+
+    for _ in range(50):
+        chars = [secrets.choice(_LETTERS)] + [secrets.choice(_LETTERS + _DIGITS) for _ in range(length - 1)]
+        if not any(c in _DIGITS for c in chars):
+            chars[secrets.randbelow(length - 1) + 1] = secrets.choice(_DIGITS)
+        name = "".join(chars)
+        if not db.scalar(select(User.id).where(User.username == name)):
+            return name
+    raise HTTPException(500, "生成登录名失败，请重试")
+
+
+@router.get("/admin/users/new-username")
+def new_username(admin: CurrentUser = Depends(require_admin), db: Session = Depends(get_db)):
+    """新建账号时预先生成一个随机登录名（字母 + 数字），可以换一个。"""
+    return {"username": random_username(db)}
+
+
 @router.get("/admin/users")
 def list_users(admin: CurrentUser = Depends(require_admin), db: Session = Depends(get_db)):
     return [_user_dict(db, u) for u in db.scalars(select(User).order_by(User.id))]
 
 
 class CreateUserBody(BaseModel):
-    username: str = Field(min_length=2, max_length=64, pattern=r"^[A-Za-z0-9_.@-]+$")
+    # 登录名由系统随机生成（GET /admin/users/new-username 预先给出）；不传就当场生成
+    username: str | None = Field(default=None, min_length=2, max_length=64, pattern=r"^[A-Za-z0-9_.@-]+$")
     display_name: str = Field(min_length=1, max_length=64)
     role: str = Field(pattern="^(ADMIN|CS|AFTERSALES)$")
     password: str = Field(max_length=128)
@@ -107,7 +132,7 @@ class CreateUserBody(BaseModel):
 
 @router.post("/admin/users")
 def create_user(body: CreateUserBody, admin: CurrentUser = Depends(require_admin), db: Session = Depends(get_db)):
-    username = body.username.strip().lower()
+    username = (body.username or "").strip().lower() or random_username(db)
     if db.scalar(select(User.id).where(User.username == username)):
         raise HTTPException(409, "登录名已存在")
     problem = auth.password_problem(body.password)
@@ -180,3 +205,26 @@ def update_user(user_id: int, body: UpdateUserBody, admin: CurrentUser = Depends
     db.add(AuditEvent(actor=admin.display_name, action="USER_UPDATED", detail={"user": user.username, "changes": changes}))
     db.flush()
     return _user_dict(db, user)
+
+
+@router.delete("/admin/users/{user_id}")
+def delete_user(user_id: int, admin: CurrentUser = Depends(require_admin), db: Session = Depends(get_db)):
+    """删除账号：登录会话、负责店铺一起删；不能删自己，也不能删掉最后一个启用的管理员。
+    历史记录（审计、回复、标记等）里记的是名字，删除后照样保留。"""
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(404, "账号不存在")
+    if user.id == admin.id:
+        raise HTTPException(409, "不能删除自己的账号")
+    if user.role == Role.ADMIN and user.is_active:
+        admins = db.scalar(select(func.count(User.id)).where(User.role == Role.ADMIN, User.is_active.is_(True))) or 0
+        if admins <= 1:
+            raise HTTPException(409, "这是最后一个启用的管理员，不能删除")
+    auth.revoke_user_sessions(db, user.id)
+    db.execute(delete(UserSession).where(UserSession.user_id == user.id))
+    db.execute(delete(UserStore).where(UserStore.user_id == user.id))
+    db.add(AuditEvent(actor=admin.display_name, action="USER_DELETED",
+                      detail={"user": user.username, "display_name": user.display_name, "role": user.role}))
+    db.delete(user)
+    db.flush()
+    return {"deleted": user_id}

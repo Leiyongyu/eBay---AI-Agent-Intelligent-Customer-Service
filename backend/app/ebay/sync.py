@@ -391,6 +391,13 @@ class EbayMessageSync:
                 stats["messages_new"] += 1
                 stats[f"messages_{role.lower()}"] += 1
             db.flush()
+            if ctype == "FROM_MEMBERS" and store_ai:
+                # 规则：会话最后一句永远是我们的。最后一条是买家发的、又没有待处理任务（超过 24 小时的旧来信、首次同步）：
+                # 补一个回复任务，进“未处理”，不让买家的消息停在最后没人看见（每个会话最多一个）
+                from ..ingestion.service import open_job_for_unanswered
+
+                if open_job_for_unanswered(db, c, actor="ebay_sync"):
+                    stats["unanswered_jobs"] = stats.get("unanswered_jobs", 0) + 1
             if apply_platform_unread(db, c, conv.get("unreadCount")):
                 stats["read_from_ebay"] += 1
         if new_buyer:

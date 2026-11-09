@@ -2,8 +2,8 @@
 （含客服在谷仓后台手动建的），按订单号定位店铺、买家和会话。谷仓新回复的：附件（如 POD）一律存进售后附件，
 按规则把回复归类（OUTCOMES：已催派、已给 POD、已妥投、在自取点 → 自动回复；丢失、退回、破损 → 需判断补发；
 地址问题、妥投未收到、看不懂 → 需人工审核），AI 按买家语言起草消息。开了 LOGISTICS_TICKET_AUTO_SEND 时自动回复的
-直接连同附件发给买家（目前为模拟发送；买家还没有会话的新建一个）；要人工的把会话标成待售后、打“需判断补发”或
-“需人工审核”标记（需补发的附上补发库存），开了 LOGISTICS_TICKET_SEND_NEEDS_HUMAN 时也照样告诉买家查件结果，
+直接连同附件发给买家（目前为模拟发送；买家还没有会话的新建一个）；要人工的把会话标成待售后、打“物流异常退回后需要重发”或
+“物流异常”标记（需补发的附上补发库存），开了 LOGISTICS_TICKET_SEND_NEEDS_HUMAN 时也照样告诉买家查件结果，
 看不懂的不发。谷仓对同一张查件单再次回复时按新回复重新处理。
 """
 from __future__ import annotations
@@ -52,16 +52,21 @@ OUTCOMES = {  # 类别 → (中文说明, 处理方式)
     "IN_TRANSIT": ("已催派 / 运输中，请留意轨迹", AUTO),
     "UNKNOWN": ("回复看不懂或没有对应处理办法", REVIEW),
     "MODEL_FLAGGED": ("AI 认为规则判定与回复不符", REVIEW),
+    "OPEN_CASE": ("买家已开 eBay 纠纷，查件结果交人工", REVIEW),
 }
-NO_SEND = {"UNKNOWN", "MODEL_FLAGGED"}  # 拿不准怎么回的：不发给买家，直接转人工
+# 拿不准怎么回的、买家已开 eBay 纠纷的（给买家的说法会影响 eBay 判定）：不发给买家，直接转人工
+NO_SEND = {"UNKNOWN", "MODEL_FLAGGED", "OPEN_CASE"}
+CASE_LABELS = {"RETURN": "退货", "INR": "未收到货咨询", "CASE": "纠纷", "CANCEL": "取消请求"}
 DISPUTE_TYPES = {"妥投未收到", "查妥投地址"}  # 买家已经说过“显示妥投但没收到”的查件
 ACTION_TYPES = {"拦截", "改派"}
-_NEGATED = re.compile(r"(未|没有|没|并未|不是)(退回|退件|丢失|丢件|破损|损坏)|(无|没有)(自取|自提)(地址|点)?")
+# 归类前去掉否定说法：“未退回”不算退回，“未妥投”“妥投失败”不算已妥投，“未断更”不算断更
+_NEGATED = re.compile(r"(未|没有|没|并未|不是)(退回|退件|丢失|丢件|破损|损坏|妥投|签收|断更)|(无|没有)(自取|自提)(地址|点)?|"
+                      r"(妥投|签收)失败")
 _RULES = [  # 按顺序取第一个命中的；“如需理赔……”这类附带的条件句不算丢件，所以弱的丢件说法排在催派之后
     ("LOST", re.compile(r"考虑.{0,6}丢|确认.{0,4}丢|已丢|丢失了|遗失|可以?(提交|申请)理赔|销毁")),
     ("DAMAGED", re.compile(r"破损|损坏|空包|空箱|空盒")),
     ("RETURNED", re.compile(r"退回|退件|返回发件|无法再派")),
-    ("ADDRESS", re.compile(r"地址(错误|有误|不全|不完整|不详|无效)|信息不(完整|全)|无法(继续)?派送|派送失败|无人(接收|签收|在家)|找不到收件人|拒收|请指示|处理意见|扣关|清关|海关")),
+    ("ADDRESS", re.compile(r"地址(错误|有误|不全|不完整|不详|无效)|地址无法(访问|投递|派送)|投递失败|信息不(完整|全)|无法(继续)?派送|派送失败|无人(接收|签收|在家)|找不到收件人|拒收|请指示|处理意见|扣关|清关|海关")),
     ("PICKUP", re.compile(r"自取|自提|取件点|待取|等待领取|快递柜|包裹柜")),
     ("POD", re.compile(r"pod|签收证明|获取成功", re.I)),
     ("DELIVERED", re.compile(r"妥投|已签收|已送达|派送完毕")),
@@ -240,11 +245,54 @@ def _stored_files(db: Session, t: LogisticsTicket) -> list[AftersalesFile]:
     return [f for f in files if f is not None and f.status == "STORED"]
 
 
+def _find_cases(store_id: str, order_id: str) -> list[dict]:
+    """这笔订单在 eBay 上的退货 / 未收到货咨询 / 纠纷 / 取消（和工具 get_case_status 同一个数据源）；非 eBay 店铺返回空。
+    测试里替换掉这个函数。"""
+    from ..ebay.stores import is_ebay_store
+    from ..sources import get_ebay_source
+
+    if not is_ebay_store(store_id):
+        return []
+    return get_ebay_source().find_cases(store_id, [order_id])
+
+
+def _open_case(t: LogisticsTicket) -> dict | None:
+    """这笔订单有没有没结的 eBay case。查不到（非 eBay 店铺、没有订单号、接口报错）时不拦，返回 None。"""
+    if not (t.store_id and t.reference_no):
+        return None
+    try:
+        cases = _find_cases(t.store_id, t.reference_no)
+    except Exception as e:  # noqa: BLE001  查不了 case 就按原规则走
+        log.warning("查件单 %s 查 eBay case 失败，按原规则处理：%s: %s", t.io_code, type(e).__name__, str(e)[:200])
+        return None
+    return next((c for c in cases or [] if str(c.get("status") or "").upper() not in ("CLOSED", "RESOLVED")), None)
+
+
+def _claimed_not_received(db: Session, t: LogisticsTicket) -> bool:
+    """这个会话之前的回复任务里识别出过“轨迹已签收但买家说没收到”（TRACKING_DELIVERED_NOT_RECEIVED）。"""
+    from ..models import ReplyJob
+
+    if not t.conversation_id:
+        return False
+    rows = db.scalars(select(ReplyJob.decision_reasons).where(ReplyJob.conversation_id == t.conversation_id)
+                      .order_by(ReplyJob.id.desc()).limit(20)).all()
+    return any("TRACKING_DELIVERED_NOT_RECEIVED" in (r or []) for r in rows)
+
+
 def _decide(db: Session, t: LogisticsTicket) -> None:
     """按规则给谷仓回复归类，定下要不要人工；模型的判断不能把规则判成要人工的改成不要。"""
     outcome = classify(t)
+    # 员工手动建的“申请POD”，背后其实是买家说已签收但没收到：给 POD 之后还要人工跟进
+    if t.type_name == "申请POD" and outcome in ("POD", "DELIVERED") and _claimed_not_received(db, t):
+        outcome = "DELIVERED_DISPUTE"
     if outcome == "POD" and not _stored_files(db, t):
         outcome = "POD_MISSING"  # 说了附上 POD 却发不出附件：不能自动发
+    case = _open_case(t)
+    if case:  # 买家已开 eBay 纠纷：查件结果交人工，不自动发给买家；备注写明原本的类别和 case
+        kind = CASE_LABELS.get(case.get("case_type"), case.get("case_type") or "case")
+        t.send_error = (f"买家已开 eBay {kind}（{case.get('case_id')}，{case.get('last_action') or case.get('status')}），"
+                        f"查件结果原本判为【{OUTCOMES[outcome][0]}】，交人工按纠纷情况回复")[:300]
+        outcome = "OPEN_CASE"
     t.outcome, t.needs_human = outcome, handling(outcome) != AUTO
 
 
@@ -292,9 +340,13 @@ def _ensure_conversation(db: Session, t: LogisticsTicket) -> Conversation | None
 
 
 def _send(db: Session, t: LogisticsTicket, conv: Conversation) -> None:
-    """把 AI 起草的查件结果连同附件发给买家（模拟发送：追加一条店铺消息，不调 eBay）。合规硬阻断的不发。"""
+    """把 AI 起草的查件结果连同附件（妥投照片、签收单等）放进发件箱（延迟发出、可撤回）。合规硬阻断的不发。
+    对接了 eBay 的店铺：附件给 eBay 一个公网 HTTPS 地址（sending/media_links，最多 5 个，图片或 PDF）；
+    没有公网地址、附件类型 eBay 不收（如视频）、超过 5 个的交人工。"""
     from ..guards.compliance import ComplianceChecker
-    from ..ingestion.service import _append_message
+    from ..models import Store
+    from ..sending.channel import is_live_store
+    from ..sending.outbox import enqueue
 
     text = (t.suggestion or "").strip()
     if not text:
@@ -309,14 +361,27 @@ def _send(db: Session, t: LogisticsTicket, conv: Conversation) -> None:
         ctype = f.content_type or ""
         kind = "IMAGE" if ctype.startswith("image/") else ("PDF" if "pdf" in ctype else "DOC")
         media.append({"mediaName": f.original_name, "mediaType": kind, "fileId": f.id})
-    msg = _append_message(db, conv, f"{SIMULATED_PREFIX}{uuid.uuid4().hex[:12]}", "SELLER", "OUT", text, None)
-    msg.media, msg.zh_translation = media or None, t.suggestion_zh
-    conv.row_version += 1
+    ebay_media = None
+    if media and is_live_store(db.get(Store, conv.store_id)) and conv.channel_source == "ebay":
+        from ..sending.media_links import url_for
+
+        unsupported = [m["mediaName"] for m in media if m["mediaType"] not in ("IMAGE", "PDF")]
+        urls = [url_for(m["fileId"], m["mediaName"]) for m in media]
+        if unsupported or None in urls or len(media) > 5:
+            why = ("附件类型 eBay 不收：" + "、".join(unsupported)) if unsupported else (
+                "附件超过 5 个" if len(media) > 5 else "没有附件公网地址（PUBLIC_MEDIA_BASE_URL / EBAY_NOTIFY_ENDPOINT）")
+            t.send_status, t.send_error = "NEEDS_HUMAN", f"查件结果带附件，{why}：请人工发给买家"
+            return
+        ebay_media = [{"mediaName": m["mediaName"] or "attachment", "mediaType": m["mediaType"], "mediaUrl": u}
+                      for m, u in zip(media, urls)]
+    ob = enqueue(db, conv, text, actor=SEND_ACTOR, source="ticket", zh=t.suggestion_zh,
+                 meta={"ticket_id": t.id, "media": media or None, "ebay_media": ebay_media})
     now = utcnow()
-    t.send_status, t.sent_at, t.sent_message_id, t.send_error = "SENT", now, msg.id, None
+    if ob.state != "SENT":
+        t.send_status, t.send_error = "QUEUED", None  # 发出后由发件箱回写 SENT
     t.handled_at, t.handled_by = now, SEND_ACTOR
-    db.add(AuditEvent(actor=SEND_ACTOR, action="AUTO_SIMULATED_SEND", store_id=conv.store_id, conversation_id=conv.id,
-                      detail={"io_code": t.io_code, "message_id": msg.ebay_message_id, "attachments": len(media),
+    db.add(AuditEvent(actor=SEND_ACTOR, action="TICKET_REPLY_QUEUED", store_id=conv.store_id, conversation_id=conv.id,
+                      detail={"io_code": t.io_code, "outbound_id": ob.id, "attachments": len(media),
                               "compliance": check.result, "source": "logistics_ticket"}))
 
 
@@ -324,7 +389,10 @@ RESHIP_TYPE, LOGISTICS_TYPE = "物流问题需判断补发", "物流异常/未�
 
 
 def _result_line(t: LogisticsTicket) -> str:
-    return f"谷仓查件单 {t.io_code}（{t.type_name}）已回复【{OUTCOMES[t.outcome or 'UNKNOWN'][0]}】：{(t.reply or '见附件')[:300]}"
+    line = f"谷仓查件单 {t.io_code}（{t.type_name}）已回复【{OUTCOMES[t.outcome or 'UNKNOWN'][0]}】：{(t.reply or '见附件')[:300]}"
+    if t.outcome == "OPEN_CASE" and t.send_error:
+        line += f"（{t.send_error}）"
+    return line
 
 
 def _note(conv: Conversation, line: str) -> None:
@@ -336,7 +404,7 @@ def _note(conv: Conversation, line: str) -> None:
 
 def _mark(db: Session, t: LogisticsTicket, client: GoodcangClient | None = None) -> None:
     """查件结果要人工：会话标“待售后处理”（已在售后中的补进备注；需补发的类型升级成需判断补发），
-    并打标记“需判断补发”或“需人工审核”，需补发的附上原发货仓补发库存。"""
+    并打标记“物流异常退回后需要重发”（需补发）或“物流异常”，需补发的附上原发货仓补发库存。"""
     from .. import auto_tags
 
     conv = db.get(Conversation, t.conversation_id) if t.conversation_id else None
@@ -351,7 +419,7 @@ def _mark(db: Session, t: LogisticsTicket, client: GoodcangClient | None = None)
             line += "；" + reship_stock(client, t.reference_no)["summary"]
         except Exception as e:  # noqa: BLE001  查不到库存也要照常标记
             line += f"；补发库存查询失败：{e if isinstance(e, GoodcangError) else type(e).__name__}"
-    auto_tags.apply_names(db, conv, [("需判断补发", "danger") if reship else ("需人工审核", "warning")],
+    auto_tags.apply_names(db, conv, ["物流异常退回后需要重发" if reship else "物流异常"],
                           {"io_code": t.io_code, "outcome": t.outcome})
     if conv.aftersales_status in (Aftersales.PENDING, Aftersales.IN_PROGRESS):
         _note(conv, line)
@@ -421,19 +489,26 @@ def sync(db: Session, *, client: GoodcangClient | None = None, provider=None, lo
                 else:
                     t.needs_human = True
                 label, how = OUTCOMES[t.outcome]
+                try:  # 异常包裹跟进表：写回复结论和下一步
+                    from ..parcel_auto import on_ticket_result
+
+                    with db.begin_nested():
+                        on_ticket_result(db, t, label, how)
+                except Exception:  # noqa: BLE001
+                    log.exception("异常包裹跟进补写失败 ticket=%s", t.io_code)
                 if t.needs_human:
                     stats["needs_human"] += 1
                     # 看不懂的回复不发；其他要人工的按配置照样告诉买家查件结果（不承诺退款补发），同事在售后里跟进
                     if s.logistics_ticket_auto_send and s.logistics_ticket_send_needs_human and t.outcome not in NO_SEND:
                         _send(db, t, conv)
-                        stats["sent"] += t.send_status == "SENT"
+                        stats["sent"] += t.send_status in ("SENT", "QUEUED")
                     else:
                         t.send_status = "NEEDS_HUMAN"
                         t.send_error = t.send_error or f"{how}：{label}，没有自动发送"
                     _mark(db, t, client)
                 elif s.logistics_ticket_auto_send:
                     _send(db, t, conv)
-                    if t.send_status == "SENT":
+                    if t.send_status in ("SENT", "QUEUED"):  # QUEUED = 已进发件箱，到点发出
                         stats["sent"] += 1
                         if conv.aftersales_status in (Aftersales.PENDING, Aftersales.IN_PROGRESS):
                             _note(conv, _result_line(t) + "（已自动回复买家）")

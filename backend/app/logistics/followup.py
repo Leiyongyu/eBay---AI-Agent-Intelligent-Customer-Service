@@ -379,10 +379,14 @@ def _notice_language(db: Session, conv, hint: str | None) -> str:
     return lang if lang in NOTICE_TEXT else _SITE_LANG.get(conv.marketplace_id or "", "en")
 
 
-def send_submit_notice(db: Session, tickets: list[LogisticsTicket], *, respect_claim: bool = False) -> str:
+def send_submit_notice(db: Session, tickets: list[LogisticsTicket], *, respect_claim: bool = False,
+                       approved_by: str | None = None) -> str:
     """查件单提交到谷仓后，给买家发一条固定的安抚消息（模拟发送）：已转物流同事、已向承运商查询、有结果马上通知。
     会话里有待审的 AI 草稿时一并结案（这条就是本次回复）。买家还问了别的、有其他需人工的原因、客服正在写回复时不发，
-    留给人工。返回 SENT 或没发的原因（同时记在查件单上）。谷仓回复后由查件单同步再把结果发给买家。"""
+    留给人工。返回 SENT 或没发的原因（同时记在查件单上）。谷仓回复后由查件单同步再把结果发给买家。
+
+    approved_by：客服在工作台提交查件单时勾了“通知买家”——这就是人工审核过的发送，不看 LOGISTICS_TICKET_SUBMIT_NOTICE
+    （那个开关只管 AI 自动提交后的自动通知），“同事在跟进”也不挡（跟进的同事就是提交的人）。"""
     from ..models import Conversation, Draft, JobState, ReplyJob, WorkClaim
     from ..sending.service import GENERATING, SendError, simulate_send
 
@@ -395,7 +399,7 @@ def send_submit_notice(db: Session, tickets: list[LogisticsTicket], *, respect_c
             t.notice_status = reason[:200]
         return reason
 
-    if not get_settings().logistics_ticket_submit_notice:
+    if not approved_by and not get_settings().logistics_ticket_submit_notice:
         return skip("未开启 LOGISTICS_TICKET_SUBMIT_NOTICE")
     conv_id = next((t.conversation_id for t in tickets if t.conversation_id), None)
     conv = db.get(Conversation, conv_id) if conv_id else None
@@ -417,13 +421,14 @@ def send_submit_notice(db: Session, tickets: list[LogisticsTicket], *, respect_c
         other = set((draft.intents if draft else None) or []) - NOTICE_INTENTS
         if other:
             return skip("买家还问了其他问题（" + "、".join(sorted(other)) + "），留给人工一起回复")
-        blocking = set(job.decision_reasons or []) - NOTICE_OK_REASONS
+        blocking = set(job.decision_reasons or []) - NOTICE_OK_REASONS - ({"HUMAN_FOLLOWING"} if approved_by else set())
         if blocking:
             return skip("还有其他需人工的原因（" + "、".join(sorted(blocking)) + "），留给人工回复")
     lang = _notice_language(db, conv, draft.language if draft else None)
     try:
         with db.begin_nested():
             msg, _ = simulate_send(db, conv=conv, text=NOTICE_TEXT[lang], actor=NOTICE_ACTOR, text_zh=NOTICE_ZH, auto=True)
+            msg.source, msg.meta = "logistics_notice", {**(msg.meta or {}), "ticket_ids": [t.id for t in tickets]}
     except SendError as e:
         return skip(f"没发：{e.message}")
     now = utcnow()
@@ -431,5 +436,6 @@ def send_submit_notice(db: Session, tickets: list[LogisticsTicket], *, respect_c
         t.notice_status, t.notice_sent_at = "SENT", now
     db.add(AuditEvent(actor=NOTICE_ACTOR, action="LOGISTICS_TICKET_NOTICE_SENT", store_id=conv.store_id,
                       conversation_id=conv.id, detail={"io_codes": [t.io_code for t in tickets], "language": lang,
-                                                       "message_id": msg.ebay_message_id}))
+                                                       "outbound_id": msg.id,
+                                                       **({"approved_by": approved_by} if approved_by else {})}))
     return "SENT"

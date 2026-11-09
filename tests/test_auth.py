@@ -80,3 +80,27 @@ def test_cs_marks_aftersales_and_aftersales_handles(client):
     done = af.post(f"/internal/conversations/{cid}/aftersales", json={"action": "done", "note": "已退款"}).json()
     assert done["status"] == "DONE" and "已退款" in done["note"]
     assert af.get("/internal/conversations", params={"group": "aftersales"}).json() == []
+
+
+def test_random_username_and_delete_account(client):
+    """新建账号：登录名系统随机生成（字母开头、字母 + 数字），密码管理员自己设；删除账号连带登录会话，不能删自己和最后一个管理员。"""
+    import re
+
+    name = client.get("/api/admin/users/new-username").json()["username"]
+    assert re.fullmatch(r"[a-z][a-z0-9]{7}", name) and re.search(r"\d", name)
+    r = client.post("/api/admin/users", json={"username": name, "display_name": "客服小李", "role": "CS",
+                                               "password": TEST_PASSWORD, "store_ids": ["STORE_A"]})
+    assert r.status_code == 200 and r.json()["username"] == name
+    auto = client.post("/api/admin/users", json={"display_name": "客服小张", "role": "CS", "password": TEST_PASSWORD})
+    assert re.fullmatch(r"[a-z][a-z0-9]{7}", auto.json()["username"])  # 不传就当场生成
+
+    cs = TestClient(client.app)
+    login(cs, name)
+    assert cs.get("/api/auth/me").status_code == 200
+    assert cs.delete(f"/api/admin/users/{auto.json()['id']}").status_code == 403  # 只有管理员能删
+    assert client.delete(f"/api/admin/users/{r.json()['id']}").json() == {"deleted": r.json()["id"]}
+    assert cs.get("/api/auth/me").status_code == 401  # 已登录的立即失效
+    assert all(u["username"] != name for u in client.get("/api/admin/users").json())
+
+    me = client.get("/api/auth/me").json()["id"]
+    assert client.delete(f"/api/admin/users/{me}").status_code == 409  # 不能删自己

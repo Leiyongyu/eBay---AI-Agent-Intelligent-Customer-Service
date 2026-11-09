@@ -40,7 +40,11 @@ def app_env(tmp_path, monkeypatch):
         monkeypatch.setenv("REDIS_KEY_PREFIX", f"ebaycs_test_{uuid.uuid4().hex[:6]}:")
     monkeypatch.delenv("KNOWLEDGE_SEED_FILE", raising=False)  # 测试不预导入知识；需要时各测试自己导入样例
     monkeypatch.setenv("MEDIA_DIR", (tmp_path / "media").as_posix())  # 附件写到临时目录，不碰 data/media
+    monkeypatch.setenv("KB_DOCS_DIR", (tmp_path / "kb_documents").as_posix())  # 参考文档写到临时目录，不碰 data/kb_documents
     monkeypatch.setenv("MESSAGE_MERGE_WINDOW_SECONDS", "180")
+    monkeypatch.setenv("SEND_DELAY_SECONDS", "0")  # 旧测试按“提交即发”验证；延迟发送与撤回见 test_outbox.py
+    monkeypatch.setenv("EBAY_CHANNEL", "mock")
+    monkeypatch.delenv("EBAY_LIVE_STORES", raising=False)
     config.get_settings.cache_clear()
 
     from app import db, redis_bus
@@ -108,3 +112,12 @@ def login(c, username, password=TEST_PASSWORD):
     r = c.post("/api/auth/login", json={"username": username, "password": password})
     assert r.status_code == 200, r.text
     return r.json()
+
+
+@pytest.fixture(autouse=True)
+def _clear_goodcang_cache():
+    """谷仓出库单缓存在进程内存里，每个测试前清空（goodcang_cache）。"""
+    from app.logistics import goodcang
+
+    goodcang.clear_cache()
+    yield

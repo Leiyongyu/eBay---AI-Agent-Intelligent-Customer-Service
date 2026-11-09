@@ -43,14 +43,16 @@ def test_ack_after_delay_once_in_buyer_language(app_env):
         thanks_conv, thanks = _setup(db, "4", intents=("thanks_closing",))  # 只是致谢
         fr_conv, fr = _setup(db, "5", site="EBAY_FR", language=None)  # 草稿没写语言：按站点
         stats = review_ack.run(db)
-        assert stats["SENT"] == 2 and stats["WAIT"] == 1
+        assert stats["SENT"] == 3 and stats["WAIT"] == 1
         msg = _sellers(db, conv.id)[0]
         assert msg.body.startswith("Vielen Dank") and msg.zh_translation.startswith("感谢") and is_ack(msg.ebay_message_id)
         assert (job.ack_status, job.ack_message_id) == ("SENT", msg.id) and job.state == "REVIEW_REQUIRED"  # 草稿仍待审
         assert _sellers(db, fr_conv.id)[0].body.startswith("Merci")
         assert not _sellers(db, fresh_conv.id) and fresh.ack_status is None
         assert not _sellers(db, old_conv.id) and old.ack_status is None  # 超过 24 小时的根本不扫
-        assert not _sellers(db, thanks_conv.id) and thanks.ack_status == "不需要：买家只是致谢"
+        # 规则：最后一句永远是我们的——只是致谢也要回，回简短致谢（不回“已收到，正在处理”）
+        closing = _sellers(db, thanks_conv.id)[0]
+        assert closing.body == review_ack.CLOSING_TEXT["de"] and thanks.ack_status == "SENT"
         assert review_ack.run(db).get("SENT") is None  # 不重复发
         assert auto_reply_streak(db, conv.id) == 0  # 回执不算自动回复
         conv_row_version = conv.row_version
@@ -120,3 +122,20 @@ def test_generate_draft_ignores_ack(client):
     assert [m["ack"] for m in detail["messages"] if m["role"] == "SELLER"] == [True]
     r = client.post(f"/internal/conversations/{conv_id}/generate-draft")
     assert r.status_code != 409 or "没有待回复" not in r.text
+
+
+def test_ack_also_for_human_handoff(app_env):
+    """已人工接管的会话：同事超时没回，买家也要先收到“已收到”（最后一句永远是我们的）；黑名单买家仍不发。"""
+    from app import review_ack
+    from app.db import session_scope
+
+    with session_scope() as db:
+        conv, job = _setup(db, "H")
+        conv.handoff_state = "HUMAN"
+        db.flush()
+        assert review_ack.run(db).get("SENT") == 1
+        assert _sellers(db, conv.id)[0].body.startswith("Vielen Dank") and job.ack_status == "SENT"
+    for lang, text in review_ack.CLOSING_TEXT.items():
+        from app.guards.compliance import ComplianceChecker
+
+        assert ComplianceChecker().check(text).result != "BLOCK", lang

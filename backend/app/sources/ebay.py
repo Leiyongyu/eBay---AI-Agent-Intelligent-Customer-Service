@@ -26,7 +26,7 @@ from .base import BusinessSource, SourceNotAvailable
 
 NS = {"e": "urn:ebay:apis:eBLBaseComponents"}
 TRADING_URL = "https://api.ebay.com/ws/api.dll"
-READ_ONLY_TRADING = {"GetItem", "GetSellerList", "GetUser", "GetStore", "GetMyeBaySelling"}
+READ_ONLY_TRADING = {"GetItem", "GetSellerList", "GetUser", "GetStore", "GetMyeBaySelling", "GetFeedback", "GetBestOffers"}  # GetFeedback：售后管理的评价
 SITE_TO_MARKETPLACE = {"US": "EBAY_US", "eBayMotors": "EBAY_US", "Germany": "EBAY_DE", "UK": "EBAY_GB",
                        "Australia": "EBAY_AU", "Austria": "EBAY_AT", "France": "EBAY_FR", "Italy": "EBAY_IT",
                        "Spain": "EBAY_ES", "Canada": "EBAY_CA", "HongKong": "EBAY_HK"}
@@ -117,6 +117,7 @@ class EbaySource(BusinessSource):
         self.ttl = ttl_seconds
         self._cache: dict[tuple, tuple[float, object]] = {}
         self._lock = threading.Lock()
+        self._key_locks: dict[tuple, threading.Lock] = {}
         self._apis: dict[str, EbayReadOnlyApi] = {}
 
     # ------------------------------------------------------------ 基础
@@ -126,16 +127,32 @@ class EbaySource(BusinessSource):
                 self._apis[store_id] = self.api_factory(store_id)
             return self._apis[store_id]
 
-    def _cached(self, key: tuple, loader):
-        now = time.monotonic()
+    def _cached(self, key: tuple, loader, ttl: float | None = None):
+        """带过期的缓存。同一个 key 同时只加载一次：并发请求排队等第一个加载完直接用结果，
+        避免几个请求同时把一个店铺 90 天的订单各拉一遍。
+        缓存记的是加载时刻，多久以内算新鲜由调用方决定：默认 ttl（不传用 self.ttl）；
+        回复页右侧栏用 cache_age.max_age 放宽到 1 小时，“刷新”时为 0（强制重查并更新缓存）。"""
+        from ..cache_age import current
+
+        limit = current(self.ttl if ttl is None else ttl)
+
+        def fresh(hit) -> bool:
+            return bool(hit) and time.monotonic() - hit[0] < limit
+
         with self._lock:
             hit = self._cache.get(key)
-            if hit and hit[0] > now:
+            if fresh(hit):
                 return hit[1]
-        value = loader()
-        with self._lock:
-            self._cache[key] = (now + self.ttl, value)
-        return value
+            key_lock = self._key_locks.setdefault(key, threading.Lock())
+        with key_lock:
+            with self._lock:  # 排队期间别人可能已经加载好了
+                hit = self._cache.get(key)
+                if fresh(hit):
+                    return hit[1]
+            value = loader()
+            with self._lock:
+                self._cache[key] = (time.monotonic(), value)
+            return value
 
     def _seller(self, store_id: str) -> str:
         def load():
@@ -168,6 +185,20 @@ class EbaySource(BusinessSource):
         if (_t(item, "e:Seller/e:UserID") or "").lower() != self._seller(store_id).lower():
             return None  # 不是本店的刊登：当作不存在，绝不返回别家数据
         return _parse_item(item)
+
+    def listing_brief(self, store_id: str, item_id: str) -> dict | None:
+        """只取主图、标题、SKU（不带兼容表、属性，比 get_listing 快得多），不缓存，给售后管理定时入库用。
+        刊登不存在或不是本店的返回 None。"""
+        body = (f"<ItemID>{item_id}</ItemID>"
+                + "".join(f"<OutputSelector>{x}</OutputSelector>" for x in
+                          ("Item.ItemID", "Item.Title", "Item.SKU", "Item.PictureDetails.PictureURL", "Item.Seller.UserID")))
+        root = self._api(store_id).trading("GetItem", body, self._marketplace(store_id))
+        item = root.find("e:Item", NS)
+        if item is None or (_t(item, "e:Seller/e:UserID") or "").lower() != self._seller(store_id).lower():
+            return None
+        pictures = [x.text for x in item.findall("e:PictureDetails/e:PictureURL", NS) if x.text]
+        return {"item_id": _t(item, "e:ItemID") or item_id, "title": _t(item, "e:Title"), "sku": _t(item, "e:SKU"),
+                "picture_url": pictures[0] if pictures else None}
 
     def find_products(self, store_id, sku):
         return self._cached((store_id, "sku", sku), lambda: self._load_products(store_id, sku))
@@ -217,9 +248,45 @@ class EbaySource(BusinessSource):
         return self._cached((store_id, "orders"), load)
 
     def find_orders(self, store_id, buyer_key):
+        return [_order_row(o) for o in self._buyer_orders(store_id, buyer_key)]
+
+    def buyer_orders_raw(self, store_id: str, buyer_key: str) -> list[dict]:
+        """买家在本店最近 90 天的完整订单（含收件人姓名、地址、电话）。只给工作台右侧“相关信息 / 客户资料”
+        显示给客服看（customer_panel），不进工具结果、不发给模型、不写库。"""
+        return self._buyer_orders(store_id, buyer_key)
+
+    def _buyer_orders(self, store_id: str, buyer_key: str) -> list[dict]:
+        """买家在本店最近 90 天的订单。店铺订单列表最多拉最近 1000 单（单量大的店只覆盖一个月左右），
+        更早的用本地订单汇总表（ebay_orders，定时同步）补出订单号，再用本店授权逐单实时查完整订单。"""
         key = (buyer_key or "").lower()
-        return [_order_row(o) for o in self._recent_orders(store_id)
-                if ((o.get("buyer") or {}).get("username") or "").lower() == key]
+        if not key:
+            return []
+        recent = self._recent_orders(store_id)
+        found = [o for o in recent if ((o.get("buyer") or {}).get("username") or "").lower() == key]
+        if len(recent) < MAX_ORDER_PAGES * 200:
+            return found  # 没被 1000 单截断：列表已经是完整的 90 天
+        known = {o.get("orderId") for o in found} | {o.get("legacyOrderId") for o in found}
+        for order_id in self._older_order_ids(store_id, key):
+            if order_id in known:
+                continue
+            o = self._cached((store_id, "order", order_id),
+                             lambda oid=order_id: self._api(store_id).get(f"/sell/fulfillment/v1/order/{oid}"))
+            if o and ((o.get("buyer") or {}).get("username") or "").lower() == key:
+                found.append(o)
+        return found
+
+    @staticmethod
+    def _older_order_ids(store_id: str, buyer: str) -> list[str]:
+        from ..models import EbayOrder
+
+        since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=ORDER_LOOKBACK_DAYS)
+        try:
+            with session_scope() as db:
+                return list(db.scalars(select(EbayOrder.order_id).where(
+                    EbayOrder.store_id == store_id, EbayOrder.buyer == buyer, EbayOrder.created_at >= since)
+                    .order_by(EbayOrder.created_at.desc()).limit(20)))
+        except Exception:  # noqa: BLE001  本地表不可用时只用实时列表
+            return []
 
     def _owned_order(self, store_id: str, order_id: str) -> dict | None:
         for o in self._recent_orders(store_id):
@@ -254,7 +321,9 @@ class EbaySource(BusinessSource):
         order = self._owned_order(store_id, order_id)
         if not order:
             return []
-        data = self._api(store_id).get(f"/sell/fulfillment/v1/order/{order['orderId']}/shipping_fulfillment") or {}
+        oid = order["orderId"]
+        data = self._cached((store_id, "fulfillments", oid), lambda: (
+            self._api(store_id).get(f"/sell/fulfillment/v1/order/{oid}/shipping_fulfillment") or {}), ttl=0)
         return [{"order_id": order["orderId"], "package_id": f.get("fulfillmentId"),
                  "carrier": f.get("shippingCarrierCode"), "tracking_number": f.get("shipmentTrackingNumber"),
                  "tracking_status": "SHIPPED", "latest_event": "已发货（eBay 只提供承运商与跟踪号，沿途节点需查承运商）",

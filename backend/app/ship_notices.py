@@ -75,7 +75,13 @@ def carrier_link(carrier: str | None, tracking_no: str | None = None, marketplac
     for pattern, display, url in CARRIERS:
         if re.search(pattern, probe):
             return display, url
-    return name or "Carrier", (_track17_site(name) if name else None) or FALLBACK_URL
+    site = _track17_site(name) if name else None
+    if site:  # 17TRACK 表里的官网不在合规白名单时会被发送拦截：改给 17TRACK 首页，买家照样能按跟踪号查
+        from .guards.compliance import ComplianceChecker, _domain_allowed
+
+        if not _domain_allowed(site, ComplianceChecker().whitelist):
+            site = None
+    return name or "Carrier", site or FALLBACK_URL
 
 
 # ---------------------------------------------------------------- 消息模板（不写送达日期）
@@ -143,8 +149,11 @@ def _skip_reason(o: dict) -> str | None:
 def _ebay_stores(db: Session) -> list[Store]:
     from .ebay.stores import is_ebay_store
 
+    from .sending.channel import is_live_store
+
+    live_only = get_settings().ship_notice_live_only and get_settings().ebay_live_store_keys
     return [s for s in db.scalars(select(Store).where(Store.ebay_user_id.is_not(None)).order_by(Store.name))
-            if is_ebay_store(s.id)]
+            if is_ebay_store(s.id) and (not live_only or is_live_store(s))]
 
 
 def _warehouse_shipped(gc, order_id: str, cache: dict) -> bool:
@@ -282,13 +291,15 @@ def send(db: Session, n: ShipNotice, actor: str) -> ShipNotice:
     conv = conversation_for(db, n, create=True)
     if conv is None:
         raise NoticeError("找不到订单买家，无法发送")
-    msg = _append_message(db, conv, f"{SIMULATED_PREFIX}{uuid.uuid4().hex[:12]}", "SELLER", "OUT", text, None)
-    msg.zh_translation = n.text_zh
-    conv.row_version += 1
+    from .sending.outbox import enqueue
+
+    prev = n.status
     now = utcnow()
-    n.status, n.conversation_id, n.sent_message_id, n.sent_by, n.sent_at = "SENT", conv.id, msg.id, actor, now
-    db.add(AuditEvent(actor=actor, action="SIMULATED_SEND", store_id=n.store_id, conversation_id=conv.id,
-                      detail={"source": "ship_notice", "order_id": n.order_id, "message_id": msg.ebay_message_id,
+    n.status, n.conversation_id, n.sent_by, n.sent_at = "SENT", conv.id, actor, now
+    ob = enqueue(db, conv, text, actor=actor, source="ship_notice", zh=n.text_zh,
+                 meta={"notice_id": n.id, "prev_status": prev})
+    db.add(AuditEvent(actor=actor, action="SHIP_NOTICE_QUEUED", store_id=n.store_id, conversation_id=conv.id,
+                      detail={"source": "ship_notice", "order_id": n.order_id, "outbound_id": ob.id,
                               "compliance": check.result}))
     return n
 
@@ -305,9 +316,7 @@ class ShipNoticeWorker:
         self.last_at: datetime | None = None
 
     def start(self) -> bool:
-        if not get_settings().ship_notice_enabled:
-            return False
-        self._stop.clear()
+        self._stop.clear()  # 一直启动，开关每轮读（数据同步页上改了不用重启）
         self._thread = threading.Thread(target=self._loop, name="ship-notices", daemon=True)
         self._thread.start()
         return True
@@ -329,7 +338,8 @@ class ShipNoticeWorker:
         self._stop.wait(90)
         while not self._stop.is_set():
             try:
-                self.run_now()
+                if get_settings().ship_notice_enabled:
+                    self.run_now()
             except Exception:  # noqa: BLE001
                 log.exception("发货通知汇总出错")
             self._stop.wait(max(5, get_settings().ship_notice_interval_minutes) * 60)

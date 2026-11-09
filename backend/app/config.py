@@ -39,6 +39,7 @@ class Settings(BaseSettings):
         return init_settings, dotenv_settings, env_settings, file_secret_settings
 
     # LLM
+    llm_enabled: bool = True  # 大模型总开关：false 时回复草稿、翻译、识图、向量检索全部停用（数据同步、物流、查件单照常）
     llm_provider: str | None = None
     llm_base_url: str | None = None
     llm_chat_model: str | None = None
@@ -48,6 +49,9 @@ class Settings(BaseSettings):
     llm_temperature: float | None = None
     llm_timeout_seconds: int = 60
     llm_structured_output: str = "prompt_json"
+    # 翻译（买家来信译中文、草稿回译、改写译成买家语言）单独用的模型，同一个服务商和秘钥；留空 = 用 LLM_CHAT_MODEL
+    llm_translate_model: str | None = None
+    llm_translate_thinking: bool = False  # 翻译要不要开思考模式（开了每句都多出思考 token，翻译一般不需要）
     llm_extra_body: str | None = None  # JSON，原样透传给服务商（如百炼的 enable_thinking）
 
     # Embedding / Vision（当前未使用，仅做就绪检查）
@@ -90,7 +94,15 @@ class Settings(BaseSettings):
     redis_autostart_path: str | None = None  # 本机 redis-server.exe；REDIS_URL 指向本机且连不上时由启动类拉起
     vector_store_backend: str = "pgvector"
     business_source: str = "fixture"
-    ebay_channel: str = "mock"
+    ebay_channel: str = "mock"  # ebay = 对接 EBAY_LIVE_STORES 里的店铺真实发到 eBay；mock = 只记在本地
+    # 对接 eBay 真实收发的店铺（店铺名或 ID，逗号分隔）：只拉取这些店铺的消息、只有这些店铺真实发送；留空 = 拉取全部店铺、都不真实发送
+    ebay_live_stores: str = ""
+    # 议价：额外允许真实发报价的店铺（店铺名或 ID，逗号分隔）。“对接 eBay 的店铺”本来就能发；列在这里的只开议价，不会因此真实收发消息
+    offer_live_stores: str = ""
+    orders_sync_days: int = 180  # 客户列表：第一次拉近多少天的订单（之后按修改时间增量）
+    best_offer_sync_minutes: int = 15  # Best offer（买家报价，48 小时过期）每隔多少分钟拉一次；0 = 暂停
+    ebay_cases_sync_minutes: int = 60  # 售后管理（咨询、纠纷、退货、付款纠纷、评价、取消、退款单）每隔多少分钟从 eBay 拉一次；0 = 不自动拉
+    send_delay_seconds: int = 300  # 发给买家的消息延迟多少秒发出（期间可撤回）；0 = 立即发
     # 启动时导入的知识 JSONL（可选）。正式知识库通过工作台“知识库”页上传 Excel 维护，一般留空
     knowledge_seed_file: str | None = None
     demo_seed: bool = True
@@ -103,8 +115,6 @@ class Settings(BaseSettings):
     # eBay 实时推送（Notification API）接收地址：公网 HTTPS，经 Cloudflare 隧道转到本机；挑战校验同样用 EBAY_VERIFICATION_TOKEN
     ebay_notify_endpoint: str | None = None
     ebay_push_enabled: bool = True  # 实时推送开关；false = 收到推送只记录（仍回 204，免得 eBay 停用推送地址），不触发拉取
-    # 测试期用：工作台显示“删除会话”按钮，只能删测试会话（非 eBay 拉取）；正式上线前关掉，并移除相关接口与按钮
-    test_delete_enabled: bool = False
     auth_session_hours: int = 12  # 登录闲置多少小时后需要重新登录（有访问就顺延）
     ebay_notify_verify_signature: bool = True  # 校验 X-EBAY-SIGNATURE；只有本地调试才关
     # Cloudflare 隧道：两项都填了，main.py 启动时带起 cloudflared 子进程、停止时一起关（令牌只在 .env，经环境变量传给子进程）
@@ -135,7 +145,12 @@ class Settings(BaseSettings):
     aftersales_mail_done_folder: str = "已处理"  # 处理完移到这里（没有就自动建）
     aftersales_mail_poll_seconds: int = 300
     aftersales_mail_share_with_buyers: bool = True  # AI 能否把售后邮箱地址告诉买家（请买家发视频/大文件）
+    # 对买家说的售后邮箱（买家发视频、在 WeTransfer 里填的收件邮箱）；空 = 用 AFTERSALES_MAIL_USER。
+    # 填别的地址时，发到这个地址的邮件要能进系统读的邮箱（同一个邮箱，或设了自动转发）
+    aftersales_public_address: str | None = None
     aftersales_files_dir: str = "data/after_sales_files"  # 相对项目根目录
+    kb_docs_dir: str = "data/kb_documents"  # 参考文档库的文件存放目录（相对项目根目录，在 D 盘项目下）
+    kb_docs_max_mb: int = 30  # 参考文档单个文件大小上限（MB）
     aftersales_file_max_mb: int = 2048  # 单个文件上限，超过就丢弃并提醒人工
     aftersales_retention_days: int = 30  # 附件文件和“已处理”里的邮件保留天数
     aftersales_cleanup_time: str = "04:00"  # 每天清理时间（本机时间）
@@ -163,6 +178,10 @@ class Settings(BaseSettings):
     goodcang_app_token: str | None = None  # 谷仓 OMS 开放接口 app-token，只放 .env
     goodcang_app_key: str | None = None
     goodcang_min_request_interval_ms: int = 1200  # 谷仓按密钥限流：相邻请求最小间隔
+    # 回复页右侧栏（相关信息、客户资料、补充信息）里 eBay 订单 / 刊登 / 包裹、谷仓出库单可以用多久以内的缓存；
+    # 右上角“刷新”强制重查。AI 起草回复不受这个影响（仍按各自较短的缓存）
+    panel_cache_seconds: int = 3600
+    goodcang_cache_seconds: int = 600  # 同一 eBay 订单的谷仓出库单多少秒内直接用上次查到的（物流、收件信息共用）；0 = 不缓存
     track17_enabled: bool = False  # 填好 TRACK17_API_KEY 后改 true
     track17_api_key: str | None = None  # 17TRACK 密钥（请求头 17token），只放 .env
     track17_base_url: str = "https://api.17track.net/track/v2.4"
@@ -178,13 +197,27 @@ class Settings(BaseSettings):
     logistics_ticket_sync_days: int = 30  # 每次同步最近多少天创建的查件单（谷仓上限 186 天）
     logistics_ticket_sync_interval_minutes: int = 60  # 每隔多少分钟同步一次查件单；0 = 只按 LOGISTICS_TICKET_SYNC_TIME 每天一次
     logistics_ticket_auto_send: bool = False  # 谷仓回复后自动把查件结果（AI 起草的消息 + 附件）发给买家（目前为模拟发送）；需人工的不自动发
+    # 飞书售后群工单：需技术/售后判断的问题（质量问题、破损错发缺件、安装技术问题、买家发 VIN 核对适配）整理成工单发群，
+    # 群里在工单话题回复或 @ 机器人后，AI 起草买家回复，人工审核后才发
+    feishu_app_id: str | None = None  # 飞书企业自建应用（机器人），只放 .env
+    feishu_app_secret: str | None = None
+    feishu_domain: str = "https://open.feishu.cn"
+    feishu_case_enabled: bool = False  # 开启后工作台可把工单发到售后群，并定时读取群里的回复
+    feishu_case_chat_id: str | None = None  # 工单发到哪个群（chat_id，如 oc_xxx）；测试先用售后测试群
+    # 买家在 eBay 消息里发来的 WeTransfer 视频链接自动下载进售后附件（其他网盘链接登记提醒人工下载），飞书工单再发到话题
+    message_links_enabled: bool = True
+    feishu_case_auto_send: bool = False  # 资料齐全的工单自动发到售后群（不用在工作台点“发到售后群”）；缺资料的先请买家补，补齐后自动发
+    feishu_case_poll_seconds: int = 120  # 每隔多少秒读一次群里的回复（没开飞书事件订阅时用轮询）
     ship_notice_enabled: bool = False  # 汇总当天已发货的订单，生成发货通知（订单号、承运商、跟踪号、查件链接）待人工审核发送
+    ship_notice_live_only: bool = True  # 只给对接 eBay 的店铺（EBAY_LIVE_STORES）生成发货通知；其余店铺发不出去，生成了也没用
     ship_notice_interval_minutes: int = 60  # 每隔多少分钟汇总一次当天已发货的订单
     ship_notice_wait_for_warehouse: bool = True  # 等谷仓出库单真正“已发货”（或有揽收扫描）再生成通知，买家拿到单号就查得到
     ship_notice_lookback_days: int = 3  # 等仓库发出时，往回看几天内 eBay 标记发货、还没生成通知的订单
     auto_translate_buyer_messages: bool = False  # 买家来信自动译成中文（新拉到的和打开会话时还没译的），工作台显示原文 + 译文
     logistics_ticket_auto_draft: bool = False  # 物流需人工（断更、异常、妥投未收到）时自动起草查件单（只存本系统），客服在工作台核对后提交到谷仓
     logistics_pod_retention_days: int = 180  # 谷仓查件单回复附件（POD 签收证明等）保留天数（纠纷证据，比售后附件长）
+    # 发给买家的附件（妥投照片等）公网地址前缀，必须 HTTPS、经 Cloudflare 隧道到本机；留空用 EBAY_NOTIFY_ENDPOINT 的域名
+    public_media_base_url: str | None = None
     logistics_ticket_reply_days: int = 7  # 谷仓回复后几天内还没处理的照样处理（main.py 停机几天也不漏）；更早的不再通知买家
     logistics_ticket_followup_days: int = 3  # 查件单谷仓回复（或提交后没回复）超过几天、包裹问题还在：不再算“在跟”，转人工判断补发
     logistics_ticket_auto_submit: bool = False  # 起草后直接提交到谷仓（不用人工核对）；这类回复（告诉买家已发起查件）也不再因物流原因转人工
@@ -208,7 +241,7 @@ class Settings(BaseSettings):
     ebay_sync_enabled: bool = True  # 凭证齐全时后台定时拉取
     ebay_sync_interval_seconds: int = 300
     ebay_sync_lookback_days: int = 7  # 首次同步回溯天数
-    ebay_sync_stores: str | None = None  # 只同步这些店铺（店铺 ID 或 eBay 账号，逗号分隔）；留空为凭证表里的全部 eBay 店铺
+    ebay_sync_stores: str | None = None  # 只拉这些店铺（店铺名、ID 或 eBay 账号，逗号分隔；* = 全部店铺）；留空 = 拉“对接 eBay 的店铺”。发送范围另看 EBAY_LIVE_STORES
     ebay_sync_create_reply_jobs: bool = False  # 拉到的买家消息是否进入 AI 处理；默认否（合规确认前不把真实买家消息发给模型）
 
     # 运行边界
@@ -244,7 +277,10 @@ class Settings(BaseSettings):
     review_ack_max_age_hours: int = 24  # 超过多少小时的旧来信不再补发（刚开启时不给积压消息补发）
     review_ack_cooldown_hours: int = 12  # 发过回执还没正式回复时，买家追问多少小时内不重复发
     auto_reply_max_streak: int = 1  # 同一会话 AI 最多连续自动回复几次，达到后买家再来信交人工
-    auto_tag_enabled: bool = True  # 按 AI 识别的问题类型自动给会话打标记（适配咨询、物流查询、退货退款等）
+    # 同事人工跟进中：上一条店铺回复是人工发的（工作台人工发送或直接在 eBay 后台回复）且在这么多小时内，
+    # AI 判断要转人工时不再起草“已转交同事”的回复，直接留给跟进的同事；0 = 关闭
+    human_followup_hours: int = 72
+    auto_tag_enabled: bool = True  # 按 AI 识别的问题类型自动给会话打已有的标记（A待确认适配、查物流、退货等）
 
     compliance_extra_url_whitelist: str | None = None
 
@@ -278,6 +314,17 @@ class Settings(BaseSettings):
         from sqlalchemy.engine import make_url
 
         return make_url(self.database_url).render_as_string(hide_password=True)
+
+    @property
+    def translate_model_name(self) -> str | None:
+        return (self.llm_translate_model or "").strip() or self.llm_chat_model
+
+    def translate_extra_body(self) -> dict | None:
+        """翻译请求带的额外参数：沿用 LLM_EXTRA_BODY，但思考模式按 LLM_TRANSLATE_THINKING（默认关）。"""
+        body = dict(self.extra_body() or {})
+        if "enable_thinking" in body or (self.translate_model_name or "").startswith("qwen3"):
+            body["enable_thinking"] = bool(self.llm_translate_thinking)
+        return body or None
 
     def extra_body(self) -> dict | None:
         if not self.llm_extra_body:
@@ -313,6 +360,14 @@ class Settings(BaseSettings):
     @property
     def auto_send_listing_intent_set(self) -> set[str]:
         return {s.strip() for s in (self.auto_send_listing_intents or "").split(",") if s.strip()}
+
+    @property
+    def ebay_live_store_keys(self) -> set[str]:
+        return {s.strip().lower() for s in (self.ebay_live_stores or "").replace("，", ",").split(",") if s.strip()}
+
+    @property
+    def offer_live_store_keys(self) -> set[str]:
+        return {s.strip().lower() for s in (self.offer_live_stores or "").replace("，", ",").split(",") if s.strip()}
 
     @property
     def auto_send_clarify_intent_set(self) -> set[str]:
@@ -352,6 +407,8 @@ class Settings(BaseSettings):
 
     def agent_not_ready_reasons(self) -> list[str]:
         """AGENT_NOT_READY 的原因；空列表表示 Agent 可以生成草稿（第 15.2 节）。"""
+        if not self.llm_enabled:
+            return ["LLM_ENABLED=false：已停用全部大模型（不生成草稿、不翻译、不识图、不做向量检索）"]
         reasons = [f"{f} 未配置" for f in self.llm_missing_fields()]
         if self.llm_provider == "codex_cli":
             reasons.append("LLM_PROVIDER=codex_cli 已移除（不再支持 ChatGPT 账号通道），请改为 openai_compatible")
@@ -395,9 +452,18 @@ class Settings(BaseSettings):
         return path if path.is_absolute() else PROJECT_ROOT / path
 
     @property
+    def kb_docs_root(self) -> Path:
+        path = Path(self.kb_docs_dir)
+        return path if path.is_absolute() else PROJECT_ROOT / path
+
+    @property
     def aftersales_root(self) -> Path:
         path = Path(self.aftersales_files_dir)
         return path if path.is_absolute() else PROJECT_ROOT / path
+
+    @property
+    def feishu_ready(self) -> bool:
+        return bool(self.feishu_case_enabled and self.feishu_app_id and self.feishu_app_secret and self.feishu_case_chat_id)
 
     @property
     def goodcang_ready(self) -> bool:
@@ -442,7 +508,8 @@ class Settings(BaseSettings):
     @property
     def aftersales_public_email(self) -> str | None:
         """AI 可以告诉买家的售后邮箱（开启分享且配置了邮箱才有）。"""
-        return self.aftersales_mail_user if self.aftersales_mail_share_with_buyers and self.aftersales_mail_user else None
+        addr = (self.aftersales_public_address or self.aftersales_mail_user or "").strip()
+        return addr if self.aftersales_mail_share_with_buyers and addr else None
 
     def invoice_mail_not_ready_reasons(self) -> list[str]:
         """发票邮件不能真正发出的原因；空列表表示可以发。INVOICE_MAIL_ENABLED=false 时只模拟发送。"""
@@ -456,6 +523,8 @@ class Settings(BaseSettings):
     def vision_not_ready_reasons(self) -> list[str]:
         """视觉观察不可用的原因；空列表表示可以读图。VISION_ENABLED=false 也算不可用。"""
         reasons = []
+        if not self.llm_enabled:
+            reasons.append("LLM_ENABLED=false：已停用全部大模型")
         if not self.vision_enabled:
             reasons.append("VISION_ENABLED 未开启")
         for name, v in (("VISION_PROVIDER", self.vision_provider), ("VISION_MODEL", self.vision_model),

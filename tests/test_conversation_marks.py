@@ -1,4 +1,4 @@
-"""会话标记：默认标记项、一个会话多个标记与备注、单独去掉、按标记筛选、所有账号都能新建/删除标记项（管理员改名停用）、店铺范围、删会话时一起删。"""
+"""会话标记：默认标记项、一个会话多个标记与备注、单独去掉、按标记筛选、所有账号都能新建/删除标记项（管理员改名停用）、店铺范围。"""
 from fastapi.testclient import TestClient
 
 from conftest import login, make_user
@@ -17,29 +17,29 @@ def conv(store, key):
 
 def test_mark_conversation_and_filter(client):
     tags = client.get("/internal/message-tags").json()
-    assert [t["name"] for t in tags][:3] == ["查适配中", "不适配", "已适配"]
-    fit = next(t for t in tags if t["name"] == "查适配中")
+    assert [t["name"] for t in tags][:3] == ["已好评", "议价", "物流异常退回后需要重发"]
+    fit = next(t for t in tags if t["name"] == "已好评")
     cid, other = conv("STORE_A", "C1"), conv("STORE_A", "C2")
 
     r = client.put(f"/internal/conversations/{cid}/mark", json={"tag_id": fit["id"], "note": "等买家发 VIN"})
-    assert [(m["tag"], m["marked_by"]) for m in r.json()] == [("查适配中", "tester")]
+    assert [(m["tag"], m["marked_by"]) for m in r.json()] == [("已好评", "tester")]
     assert client.get(f"/internal/conversations/{cid}").json()["conversation"]["mark"]["note"] == "等买家发 VIN"
     ids = [i["id"] for i in client.get("/internal/conversations", params={"group": "all", "tag_id": fit["id"]}).json()]
     assert ids == [cid] and other not in ids
     card = next(i for i in client.get("/internal/conversations", params={"group": "all"}).json() if i["id"] == cid)
-    assert card["mark"]["tag"] == "查适配中"
+    assert card["mark"]["tag"] == "已好评"
 
     # 一个会话可以打多个标记；同一个标记再打一次是改备注，不会重复
-    no_fit = next(t for t in tags if t["name"] == "不适配")
+    no_fit = next(t for t in tags if t["name"] == "议价")
     marks = client.put(f"/internal/conversations/{cid}/mark", json={"tag_id": no_fit["id"]}).json()
-    assert [m["tag"] for m in marks] == ["查适配中", "不适配"]
+    assert [m["tag"] for m in marks] == ["已好评", "议价"]
     marks = client.put(f"/internal/conversations/{cid}/mark", json={"tag_id": fit["id"], "note": "VIN 已收到"}).json()
     assert len(marks) == 2 and marks[0]["note"] == "VIN 已收到"
     card = next(i for i in client.get("/internal/conversations", params={"group": "all"}).json() if i["id"] == cid)
-    assert [m["tag"] for m in card["marks"]] == ["查适配中", "不适配"]
+    assert [m["tag"] for m in card["marks"]] == ["已好评", "议价"]
     # 单独去掉一个，再全部去掉
     r = client.delete(f"/internal/conversations/{cid}/mark", params={"tag_id": fit["id"]}).json()
-    assert r["removed"] == 1 and [m["tag"] for m in r["marks"]] == ["不适配"]
+    assert r["removed"] == 1 and [m["tag"] for m in r["marks"]] == ["议价"]
     assert client.delete(f"/internal/conversations/{cid}/mark").json() == {"removed": 1, "marks": []}
     assert client.get(f"/internal/conversations/{cid}").json()["conversation"]["mark"] is None
 
@@ -64,9 +64,6 @@ def test_anyone_creates_and_deletes_tags_scope_and_delete_with_conversation(clie
     assert cs.put(f"/internal/conversations/{b}/mark", json={"tag_id": tag_id}).status_code == 404  # 不是自己的店铺
 
     client.put(f"/internal/conversations/{b}/mark", json={"tag_id": tag_id})
-    monkeypatch.setenv("TEST_DELETE_ENABLED", "true")
-    config.get_settings.cache_clear()
-    assert client.delete(f"/internal/conversations/{b}").status_code == 200  # 有标记的会话也能删（标记一起删）
     assert cs.patch(f"/internal/message-tags/{tag_id}", json={"is_active": False}).status_code == 403  # 改名、停用仍是管理员
     client.patch(f"/internal/message-tags/{tag_id}", json={"is_active": False})
     assert all(t["id"] != tag_id for t in cs.get("/internal/message-tags").json())
@@ -76,7 +73,7 @@ def test_filter_counts(client):
     from app.db import session_scope
     from app.models import Conversation
 
-    fit = next(t for t in client.get("/internal/message-tags").json() if t["name"] == "查适配中")
+    fit = next(t for t in client.get("/internal/message-tags").json() if t["name"] == "已好评")
     a, b, c = conv("STORE_A", "N1"), conv("STORE_A", "N2"), conv("STORE_B", "N3")
     client.put(f"/internal/conversations/{a}/mark", json={"tag_id": fit["id"]})
     client.put(f"/internal/conversations/{c}/mark", json={"tag_id": fit["id"]})

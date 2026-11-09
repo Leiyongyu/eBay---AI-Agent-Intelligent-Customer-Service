@@ -23,6 +23,7 @@ def get_business_source() -> BusinessSource:
 
 @lru_cache
 def get_ebay_source() -> BusinessSource:
+    """进程内共用一个 eBay 数据源（lru_cache）：它的缓存（刊登、订单、店铺资料）在多次请求之间复用。"""
     from .ebay import EbaySource
 
     return EbaySource()

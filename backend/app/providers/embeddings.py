@@ -15,6 +15,8 @@ PGVECTOR_HNSW_MAX_DIM = 2000
 
 def embedding_ready() -> tuple[bool, list[str]]:
     s = get_settings()
+    if not s.llm_enabled:
+        return False, ["LLM_ENABLED=false：已停用全部大模型"]
     problems = [f"{name} 未配置" for name, v in (
         ("EMBEDDING_PROVIDER", s.embedding_provider),
         ("EMBEDDING_MODEL", s.embedding_model),

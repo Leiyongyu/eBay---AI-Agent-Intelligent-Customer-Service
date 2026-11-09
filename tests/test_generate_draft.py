@@ -75,12 +75,6 @@ def test_simulated_send_regenerate_and_trace(client):
     assert r.status_code == 200 and r.json()["job_id"] is None
     assert client.post(f"/internal/conversations/{conv_id}/generate-draft").status_code == 409
 
-    # 清除模拟消息后可以对同一买家消息重新测试；真实消息不受影响
-    assert client.delete(f"/internal/conversations/{conv_id}/simulated-messages").json() == {"deleted": 2}
-    d = detail(client, conv_id)
-    assert [m["role"] for m in d["messages"]] == ["BUYER", "BUYER"]
-    r = client.post(f"/internal/conversations/{conv_id}/generate-draft")
-    assert r.status_code == 200 and r.json()["run_generation"] == 3
 
 
 def test_sent_message_keeps_chinese_for_reviewers(client):

@@ -10,7 +10,7 @@ import TicketDraftDialog from './TicketDraftDialog.vue'
 import type { LogisticsTicketItem, ReshipStock } from '../types'
 
 const props = defineProps<{ convId: number; refreshKey?: string }>()
-const emit = defineEmits<{ insert: [text: string] }>()
+const emit = defineEmits<{ insert: [text: string]; changed: [] }>()
 
 const items = ref<LogisticsTicketItem[]>([])
 const open = ref(true)
@@ -106,7 +106,7 @@ watch(() => [props.convId, props.refreshKey], load, { immediate: true })
         </div>
       </div>
     </div>
-    <TicketDraftDialog :ticket="editing" @close="editing = null" @changed="load" />
+    <TicketDraftDialog :ticket="editing" @close="editing = null" @changed="() => { load(); emit('changed') }" />
   </div>
 </template>
 

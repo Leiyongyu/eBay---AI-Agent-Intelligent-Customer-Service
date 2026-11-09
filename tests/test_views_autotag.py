@@ -37,7 +37,7 @@ def test_views_pending_auto_all_and_counts(client):
     assert counts["views"]["pending"] == 1 and counts["views"]["auto"] == 1 and counts["views"]["all"] >= 4
 
     # 页签里再按标记细分；下拉的数量按当前页签统计
-    fit = next(t for t in client.get("/internal/message-tags").json() if t["name"] == "查适配中")
+    fit = next(t for t in client.get("/internal/message-tags").json() if t["name"] == "已好评")
     for cid in (review, auto):
         client.put(f"/internal/conversations/{cid}/mark", json={"tag_id": fit["id"]})
     assert ids("pending", tag_id=fit["id"]) == {review}
@@ -57,24 +57,33 @@ def test_auto_tags_by_intent(client):
     cid = conv("STORE_A", "T1")
     with session_scope() as db:
         added = auto_tags.apply(db, db.get(Conversation, cid), ["fitment", "shipping_status", "delivery_delay", "thanks"])
-    assert added == ["适配咨询", "物流查询"]
+    assert added == ["A待确认适配", "查物流"]
     marks = client.get(f"/internal/conversations/{cid}").json()["conversation"]["marks"]
-    assert [(m["tag"], m["marked_by"]) for m in marks] == [("适配咨询", auto_tags.ACTOR), ("物流查询", auto_tags.ACTOR)]
+    assert [(m["tag"], m["marked_by"]) for m in marks] == [("查物流", auto_tags.ACTOR), ("A待确认适配", auto_tags.ACTOR)]  # 按标签排序
     with session_scope() as db:  # 已有的不重复打
         assert auto_tags.apply(db, db.get(Conversation, cid), ["fitment"]) == []
 
     # 客服手动去掉的，这个会话以后不再自动打；别的会话照打
-    fit = next(m for m in marks if m["tag"] == "适配咨询")
+    fit = next(m for m in marks if m["tag"] == "A待确认适配")
     client.delete(f"/internal/conversations/{cid}/mark", params={"tag_id": fit["tag_id"]})
     other = conv("STORE_A", "T2")
     with session_scope() as db:
         assert auto_tags.apply(db, db.get(Conversation, cid), ["fitment"]) == []
-        assert auto_tags.apply(db, db.get(Conversation, other), ["fitment"]) == ["适配咨询"]
+        assert auto_tags.apply(db, db.get(Conversation, other), ["fitment"]) == ["A待确认适配"]
 
-    # 有人删掉了标记项：不再自动建回来
+    # 只打已有的标记项，不自动新建：删掉的、对应不上的、停用的都不打
     client.delete(f"/internal/message-tags/{fit['tag_id']}")
+    from sqlalchemy import func, select
+
+    from app.models import MessageTag
+
+    t3, t5 = conv("STORE_A", "T3"), conv("STORE_A", "T5")
     with session_scope() as db:
-        assert auto_tags.apply(db, db.get(Conversation, conv("STORE_A", "T3")), ["fitment", "price_offer"]) == ["议价"]
+        before = db.scalar(select(func.count(MessageTag.id)))
+        assert auto_tags.apply(db, db.get(Conversation, t3), ["fitment", "price_offer", "item_spec"]) == ["议价"]
+        assert db.scalar(select(func.count(MessageTag.id))) == before
+        db.scalar(select(MessageTag).where(MessageTag.name == "要发票")).is_active = False
+        assert auto_tags.apply(db, db.get(Conversation, t5), ["invoice_vat", "address_change"]) == ["地址问题"]
 
 
 def test_auto_tags_switch_off(client, monkeypatch):
@@ -105,3 +114,42 @@ def test_situation_label_from_draft(client):
     card = next(i for i in client.get("/internal/conversations", params={"group": "all"}).json() if i["id"] == cid)
     assert card["situation"]["stage"] == "aftersales"
     assert client.get("/internal/conversations/filter-counts").json()["stages"]["aftersales"] == 1
+
+
+def test_sidebar_boxes_filter_and_counts(client):
+    """左侧菜单的消息箱：已处理 / 升级的消息 / 发送失败 / 暂未分配 / 我认领的。"""
+    from app.db import session_scope, utcnow
+    from app.models import Conversation, OutboundMessage
+
+    done, handed, failed, mine = (conv("STORE_A", k) for k in ("B1", "B2", "B3", "B4"))
+    _job(done, "SENT")
+    with session_scope() as db:
+        db.get(Conversation, handed).handoff_state = "HUMAN"
+        db.add(OutboundMessage(store_id="STORE_A", conversation_id=failed, body="x", source="MANUAL", actor="tester",
+                               state="FAILED", send_after=utcnow()))
+    assert client.post(f"/internal/conversations/{mine}/claim", json={"action": "claim"}).status_code == 200
+
+    def ids(group):
+        r = client.get("/internal/conversations", params={"group": group, "kind": "buyer", "view": "all"})
+        return {i["id"] for i in r.json()}
+
+    assert done in ids("resolved") and handed not in ids("resolved")
+    assert ids("handoff") == {handed}
+    assert ids("failed") == {failed}
+    assert ids("mine") == {mine}
+    assert mine not in ids("unassigned") and {done, handed, failed} <= ids("unassigned")
+    boxes = client.get("/internal/conversations/filter-counts").json()["boxes"]
+    assert boxes["handoff"] == 1 and boxes["failed"] == 1 and boxes["mine"] == 1 and boxes["resolved"] >= 1
+    assert boxes["unassigned"] >= 3
+
+
+def test_read_only_and_unread_only_split(client):
+    """平台消息的“未处理 / 已处理”：还有未读的和都读过的分开。"""
+    unread, read = conv("STORE_A", "R1"), conv("STORE_A", "R2")
+    assert client.post(f"/internal/conversations/{read}/read", json={"read": True}).status_code == 200
+
+    def ids(**kw):
+        return {i["id"] for i in client.get("/internal/conversations", params={"group": "all", **kw}).json()}
+
+    assert unread in ids(unread_only="true") and read not in ids(unread_only="true")
+    assert read in ids(read_only="true") and unread not in ids(read_only="true")

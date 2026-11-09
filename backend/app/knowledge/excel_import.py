@@ -8,6 +8,10 @@
 
 模板一行一条，列以表头名识别（顺序可调）：
   编号 | 标题* | 正文* | 适用站点* | 能否对买家说* | 主题 | 优先级 | 语言 | 生效日期 | 失效日期 | 相关SKU | 启用 | 负责人/来源
+  | 适用场景 | 适用店铺
+“适用店铺”留空或“全部” = 所有店铺；填店铺名（多个用英文逗号）= 只给这些店铺。同一个文件可以上传到“全部店铺”：
+每个店铺按这一列取自己的条款，各自生成一个新版本（各自可回滚）；上传到单个店铺时，不适用于它的行跳过。
+同一个编号可以出现多行，只要适用店铺不重叠（如通用版本 + 某个店铺的特殊版本）。
 """
 from __future__ import annotations
 
@@ -27,11 +31,13 @@ from ..guards.compliance import ComplianceChecker
 from ..models import AuditEvent, KnowledgeChunk, KnowledgeImport
 from . import vector_index
 from .retriever import estimate_tokens
+from .scenes import SCENES, parse_scenes
 from .tokenize import search_text
 
 MAX_ROWS = 2000
 MAX_FILE_BYTES = 10 * 1024 * 1024
 LONG_TEXT = 3000
+SOURCE_MAX = 64  # 与 knowledge_chunks.source 的长度一致
 CLAUSE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$")
 UPLOAD_DIR = DATA_DIR / "knowledge_uploads"
 
@@ -49,9 +55,15 @@ COLUMNS = [  # (表头, 是否必填, 说明)
     ("失效日期", False, "YYYY-MM-DD，留空表示长期有效"),
     ("相关SKU", False, "多个用英文逗号分隔"),
     ("启用", False, "是 / 否，默认是；否 = 上传但暂不生效"),
-    ("负责人/来源", False, "谁维护这条，或来自哪份制度"),
+    ("负责人/来源", False, "谁维护这条，或来自哪份制度；最长 64 个字"),
+    ("适用场景", False, "仅内部条款用：会话属于这些场景时，在会话页“内部参考”里列给客服看；多个用逗号分隔。"
+                    "可填 " + "、".join(SCENES) + "（常驻 = 每个会话都显示）"),
+    ("适用店铺", False, "全部（默认，留空也是全部），或店铺名，多个用英文逗号分隔；上传到单个店铺时，不适用于该店铺的行会跳过"),
+    ("参考文档", False, "引用的参考文档编号（在知识库页“参考文档”里上传后得到），多个用英文逗号分隔，如 DOC-0001,DOC-0003；"
+                    "知识库页和会话页“内部参考”里可以点开。AI 不读文档，也不会发给买家")
 ]
 REQUIRED = [c for c, req, _ in COLUMNS if req]
+ALL_STORE_WORDS = {"", "全部", "全部店铺", "all", "*"}
 
 TOPICS = {
     "发货": "shipping", "物流": "shipping", "退货": "return", "退款": "refund", "质保": "warranty",
@@ -85,11 +97,22 @@ class ParsedRow:
     sku: list[str]
     enabled: bool
     source: str | None
+    scenes: list[str] = field(default_factory=list)
+    stores: list[str] | None = None  # 适用店铺 ID；None = 全部店铺（不进内容哈希）
+    doc_refs: list[str] = field(default_factory=list)  # 引用的参考文档编号
+
+    def for_store(self, store_id: str) -> bool:
+        return self.stores is None or store_id in self.stores
 
     @property
     def content_hash(self) -> str:
-        key = "\x1f".join([self.title, self.text, ",".join(self.sites), self.audience, self.topic, str(self.priority),
-                           self.effective_at, self.expires_at or "", ",".join(self.sku), str(self.enabled)])
+        parts = [self.title, self.text, ",".join(self.sites), self.audience, self.topic, str(self.priority),
+                 self.effective_at, self.expires_at or "", ",".join(self.sku), str(self.enabled)]
+        if self.scenes:  # 没挂场景的条款哈希不变，加列前后上传不会显示成“变更”
+            parts.append(",".join(self.scenes))
+        if self.doc_refs:  # 同上：没引用文档的条款哈希不变
+            parts.append("docs:" + ",".join(self.doc_refs))
+        key = "\x1f".join(parts)
         return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
@@ -121,7 +144,7 @@ def build_template(sites: list[str]) -> bytes:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="C0392B" if req else "34495E")
         cell.alignment = Alignment(vertical="center", wrap_text=True)
-    widths = [12, 28, 60, 18, 14, 12, 8, 8, 12, 12, 18, 8, 16]
+    widths = [12, 28, 60, 18, 14, 12, 8, 8, 12, 12, 18, 8, 16, 18, 20, 18]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
     ws.freeze_panes = "A2"
@@ -141,6 +164,8 @@ def build_template(sites: list[str]) -> bytes:
     guide.append(["适用站点可填", "", "全部、" + "、".join(sites)])
     guide.append(["整体替换", "", "上传后会替换该店铺当前全部知识；旧版本保留在“历史版本”中，可回滚"])
     guide.append(["不要写进条款", "", "买家个人信息、站外联系方式（邮箱、电话、社交账号）、诱导站外交易或用利益换好评的内容"])
+    guide.append(["引用文档", "", "报表、手册、供应商资料等文件先在知识库页“参考文档”上传，得到编号（DOC-0001），"
+                              "再填到「参考文档」列；不要在正文里写本机文件路径（同事打不开）"])
     guide.column_dimensions["A"].width = 16
     guide.column_dimensions["C"].width = 100
     for row in guide.iter_rows(min_row=1, max_row=1):
@@ -178,7 +203,44 @@ def _date(v, result: ParseResult, row: int, column: str) -> str | None:
             return None
 
 
-def parse_workbook(data: bytes, allowed_sites: list[str], today: date | None = None) -> ParseResult:
+DOC_NO = re.compile(r"DOC-\d{4}")
+
+
+def _doc_refs(raw: str, text: str, audience: str | None, stores: list[str] | None, known: dict[str, dict] | None,
+              result: "ParseResult", row_no: int) -> list[str]:
+    """「参考文档」列：编号格式、是否存在、已归档、可对买家说的条款引用文档、敏感文档的适用店铺；正文提到编号却没填这一列。"""
+    refs: list[str] = []
+    for x in [x.strip().upper() for x in re.split(r"[,，、;；\s]+", raw or "") if x.strip()]:
+        if not DOC_NO.fullmatch(x):
+            result.error(row_no, "参考文档", f"“{x}”不是文档编号（应为 DOC-0001 这样的格式）")
+            continue
+        if x in refs:
+            continue
+        refs.append(x)
+        if known is None:
+            continue
+        doc = known.get(x)
+        if doc is None:
+            result.error(row_no, "参考文档", f"文档 {x} 不存在或已删除（先在知识库页“参考文档”里上传）")
+            continue
+        if doc.get("status") == "ARCHIVED":
+            result.warn(row_no, "参考文档", f"文档 {x} 已归档，仍然能打开；确认还要引用它")
+        scope = doc.get("store_ids") or None
+        if doc.get("sensitive") and scope and (stores is None or not set(stores) <= set(scope)):
+            result.warn(row_no, "参考文档", f"文档 {x} 是敏感文档，只适用于部分店铺，这条条款的适用店铺超出了它的范围")
+    if refs and audience == "PUBLIC_REPLY":
+        result.warn(row_no, "参考文档", "可对买家说的条款引用了文档：AI 不会读文档，也不会发给买家")
+    mentioned = [m for m in dict.fromkeys(DOC_NO.findall(text or "")) if m not in refs]
+    if mentioned:
+        result.warn(row_no, "参考文档", f"正文提到了 {'、'.join(mentioned)}，请在「参考文档」列填写，才能点开")
+    return refs
+
+
+def parse_workbook(data: bytes, allowed_sites: list[str], today: date | None = None,
+                   known_stores: dict[str, str] | None = None, known_docs: dict[str, dict] | None = None) -> ParseResult:
+    """known_stores：{店铺名或 ID 的小写: 店铺 ID}，用来识别“适用店铺”列；不传时这一列不起作用（全部当作所有店铺）。
+    allowed_sites：允许出现的站点（上传到多个店铺时是这些店铺站点的并集，各店铺的取舍见 for_store）。
+    known_docs：{文档编号: {status, sensitive, store_ids, title}}，校验「参考文档」列；不传时只检查编号格式。"""
     from openpyxl import load_workbook
 
     if len(data) > MAX_FILE_BYTES:
@@ -230,9 +292,18 @@ def parse_workbook(data: bytes, allowed_sites: list[str], today: date | None = N
                 clause_id = f"KB-{auto_no:03d}"
         elif not CLAUSE_ID.match(clause_id):
             result.error(row_no, "编号", "只能用字母、数字和 - _ .，最长 40 个字符")
-        if clause_id in seen:
-            result.error(row_no, "编号", f"与第 {seen[clause_id]} 行重复：{clause_id}")
         seen.setdefault(clause_id, row_no)
+
+        stores: list[str] | None = None
+        raw_stores = [x.strip() for x in re.split(r"[,，、;；\n]", _text(get("适用店铺"))) if x.strip()]
+        if known_stores is not None and raw_stores and not any(x.lower() in ALL_STORE_WORDS for x in raw_stores):
+            stores = []
+            for x in raw_stores:
+                sid = known_stores.get(x.lower())
+                if sid is None:
+                    result.error(row_no, "适用店铺", f"找不到店铺“{x}”（填店铺名，多个用英文逗号分隔，或填“全部”）")
+                elif sid not in stores:
+                    stores.append(sid)
 
         raw_sites = [s.strip() for s in re.split(r"[,，、;；]", _text(get("适用站点"))) if s.strip()]
         sites: list[str] = []
@@ -284,22 +355,69 @@ def parse_workbook(data: bytes, allowed_sites: list[str], today: date | None = N
         elif enabled_raw and enabled_raw not in YES:
             result.error(row_no, "启用", "只能填“是”或“否”")
 
+        source = _text(get("负责人/来源"))
+        if len(source) > SOURCE_MAX:
+            result.error(row_no, "负责人/来源", f"最长 {SOURCE_MAX} 个字，现在 {len(source)} 个字")
+
+        scenes, unknown = parse_scenes(_text(get("适用场景")))
+        if unknown:
+            result.error(row_no, "适用场景", f"不认识的场景：{'、'.join(unknown)}（可填 {'、'.join(SCENES)}）")
+        if scenes and audience == "PUBLIC_REPLY":
+            result.warn(row_no, "适用场景", "可对买家说的条款不会显示在“内部参考”里，适用场景对它不起作用")
+
         if audience == "PUBLIC_REPLY" and text:
             hits = [h for h in checker.check(text).hits if h.severity == "BLOCK"]
             if hits:
                 result.warn(row_no, "正文", "可对买家说的条款里含有可能违反 eBay 规则的内容："
                             + "；".join(f"{h.text}（{h.rule}）" for h in hits[:3]) + "。AI 可能照此回复，请确认")
 
+        doc_refs = _doc_refs(_text(get("参考文档")), text, audience, stores, known_docs, result, row_no)
+
         result.rows.append(ParsedRow(
             row_no=row_no, clause_id=clause_id, title=title[:300], text=text, sites=sites,
             audience=audience or "INTERNAL_SOP", topic=topic, priority=priority,
             language=_text(get("语言")) or "zh", effective_at=effective, expires_at=expires,
             sku=[s.strip().upper() for s in re.split(r"[,，、]", _text(get("相关SKU"))) if s.strip()],
-            enabled=enabled, source=_text(get("负责人/来源")) or None,
+            enabled=enabled, source=source[:SOURCE_MAX] or None, scenes=scenes, stores=stores, doc_refs=doc_refs,
         ))
+    # 同一编号可以有多行（通用版 + 某店铺的特殊版），但适用店铺不能重叠
+    by_id: dict[str, list[ParsedRow]] = {}
+    for r in result.rows:
+        by_id.setdefault(r.clause_id, []).append(r)
+    for cid, group in by_id.items():
+        for k, a in enumerate(group):
+            b = next((b for b in group[:k] if a.stores is None or b.stores is None or set(a.stores) & set(b.stores)), None)
+            if b is not None:
+                result.error(a.row_no, "编号", f"与第 {b.row_no} 行重复：{cid}" +
+                             ("（同一编号的多行，适用店铺不能重叠）" if a.stores is not None or b.stores is not None else ""))
     if not result.rows and not result.errors:
         result.error(None, None, "没有可导入的条款")
     return result
+
+
+def for_store(parsed: ParseResult, store_id: str, store_sites: list[str], strict: bool = True) -> ParseResult:
+    """取这个店铺的条款：适用店铺包含它的行；具体站点只保留店铺开通的。
+    strict（上传到单个店铺）：适用于它的行里有店铺没开通的站点 → 报错（和以前一样）；
+    非 strict（上传到全部店铺）：没开通的站点去掉，一个都不剩就跳过（那一行给别的店铺用）。"""
+    allowed = {x.upper() for x in store_sites}
+    out = ParseResult(errors=list(parsed.errors), warnings=list(parsed.warnings))
+    for r in parsed.rows:
+        if not r.for_store(store_id):
+            continue
+        if r.sites != ["ALL"]:
+            bad = [x for x in r.sites if x not in allowed]
+            if bad and strict:
+                out.error(r.row_no, "适用站点", f"站点 {'、'.join(bad)} 不在店铺开通的站点内（{'、'.join(sorted(allowed))}）")
+                continue
+            sites = [x for x in r.sites if x in allowed]
+            if not sites:
+                continue
+            if sites != r.sites:
+                r = ParsedRow(**{**r.__dict__, "sites": sites})
+        out.rows.append(r)
+    if not out.rows and not out.errors:
+        out.error(None, None, "没有适用于这个店铺的条款")
+    return out
 
 
 # ---------------------------------------------------------------- 预览
@@ -338,7 +456,9 @@ def preview(db: Session, store_id: str, parsed: ParseResult, sites: list[str], b
         "warnings": warnings,
         "rows": [{"row": r.row_no, "clause_id": r.clause_id, "title": r.title, "sites": r.sites,
                   "audience": r.audience, "topic": r.topic, "priority": r.priority, "effective_at": r.effective_at,
-                  "expires_at": r.expires_at, "enabled": r.enabled, "chars": len(r.text)} for r in parsed.rows],
+                  "expires_at": r.expires_at, "enabled": r.enabled, "chars": len(r.text), "scenes": r.scenes,
+                  "doc_refs": r.doc_refs}
+                 for r in parsed.rows],
         "counts": {"rows": len(parsed.rows),
                    "public": sum(r.audience == "PUBLIC_REPLY" for r in parsed.rows),
                    "internal": sum(r.audience == "INTERNAL_SOP" for r in parsed.rows),
@@ -413,7 +533,8 @@ def commit(db: Session, store_id: str, parsed: ParseResult, file_name: str, data
                 document_id=f"UPLOAD-{imp.id}", version=version, title=r.title, text=f"{r.title}\n{r.text}",
                 store_id=store_id, marketplace_id=site, audience=r.audience, language=r.language, topic=r.topic,
                 priority=r.priority, effective_at=r.effective_at, expires_at=r.expires_at,
-                review_state="PUBLISHED" if r.enabled else "DRAFT", sku=r.sku,
+                review_state="PUBLISHED" if r.enabled else "DRAFT", sku=r.sku, scenes=r.scenes or None,
+                doc_refs=r.doc_refs or None,
                 source=r.source or f"Excel:{file_name}"[:64], content_hash=r.content_hash, import_id=imp.id,
                 search_text=search_text(f"{r.title}\n{r.text}"),
             ))

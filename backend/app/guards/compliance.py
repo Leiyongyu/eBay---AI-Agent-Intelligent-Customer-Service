@@ -12,13 +12,36 @@ from dataclasses import dataclass, field
 
 from ..config import get_settings
 
-RULES_VERSION = "compliance-2026.11.03-1"
+RULES_VERSION = "compliance-2026.11.09-2"
+
+# 承运商官网：给买家物流信息时会带上（发货通知、AI 回复里的 carrier_website），各站点本地承运商都要在内
+CARRIER_DOMAINS = {
+    # 国际 / 美国 / 加拿大 / 澳洲
+    "dhl.com", "ups.com", "fedex.com", "usps.com", "tnt.com", "canadapost-postescanada.ca", "canadapost.ca",
+    "auspost.com.au", "17track.net", "yuntrack.com", "yunexpress.com",
+    # 德国 / 奥地利 / 瑞士
+    "dhl.de", "deutschepost.de", "dpd.de", "dpd.com", "dpd.at", "gls-pakete.de", "gls-group.com", "gls-group.eu",
+    "gls-austria.com", "hermes.de", "myhermes.de", "hermesworld.com", "post.at", "post.ch", "dhl.at",
+    # 英国
+    "royalmail.com", "parcelforce.com", "dpd.co.uk", "evri.com", "myhermes.co.uk", "yodel.co.uk", "inpost.co.uk",
+    "dhl.co.uk", "dhlparcel.co.uk", "dx.co.uk", "parcel2go.com",
+    # 法国
+    "laposte.fr", "colissimo.fr", "chronopost.fr", "dpd.fr", "gls-france.com", "colisprive.com", "mondialrelay.fr",
+    "dhl.fr",
+    # 意大利
+    "poste.it", "brt.it", "gls-italy.com", "sda.it", "nexive.it", "dhl.it",
+    # 西班牙
+    "correos.es", "seur.com", "mrw.es", "gls-spain.es", "nacex.es", "ctt.es", "dhl.es",
+    # 荷兰 / 比利时 / 波兰
+    "postnl.nl", "postnl.com", "dhlparcel.nl", "bpost.be", "inpost.pl", "poczta-polska.pl",
+}
 
 BUILTIN_URL_WHITELIST = {
     # eBay 自有域名
-    "ebay.com", "ebay.co.uk", "ebay.de", "ebay.fr", "ebay.it", "ebay.es", "ebay.com.au", "ebay.ca",
-    # 常见承运商官方查询页
-    "usps.com", "ups.com", "fedex.com", "dhl.com", "royalmail.com", "parcelforce.com", "dpd.co.uk", "evri.com",
+    "ebay.com", "ebay.co.uk", "ebay.de", "ebay.fr", "ebay.it", "ebay.es", "ebay.com.au", "ebay.ca", "ebay.at",
+    *CARRIER_DOMAINS,
+    # 售后视频：eBay 消息发不了视频，请买家传到 WeTransfer 后把订单号和链接发来（知识库 POL-ASV-001）
+    "wetransfer.com", "we.tl",
 }
 
 # 否定/拒绝语境：命中词出现在这些词附近时，多半是在婉拒（如“我们不能接受站外付款”），降级为 REVIEW
@@ -60,6 +83,30 @@ _FEEDBACK_TRADE = re.compile(
     r".{0,80}?(?:refund|discount|coupon|gift|cash ?back|money|compensat)"
     r"|(?:refund|discount|coupon|gift|cash ?back|compensat).{0,80}?(?:positive|good|5[- ]?star|five[- ]?star)\s+(?:feedback|review|rating)"
     r"|好评.{0,20}(?:返现|退款|折扣|补偿|红包)|(?:返现|退款|折扣|补偿|红包).{0,20}(?:好评|改评|删评|撤评)",
+    re.I | re.S,
+)
+# 引导买家撤销 eBay 退货申请、改选退货原因（知识库 CS-RISK-002）：改原因、说原因影响店铺、撤销退货后私下给标签/退款
+_RETURN_STEERING = re.compile(
+    r"(?:change|select|choose|pick|modify|update)\w*\s+(?:the\s+|your\s+|a\s+|another\s+|different\s+)*(?:return\s+)?reason"
+    r"|reason\s+(?:you\s+)?(?:selected|chose|chosen|picked).{0,80}?(?:affect|impact|harm|damage|hurt|negative|reputation|rating)"
+    r"|(?:cancel|close|withdraw)\w*\s+(?:the\s+|your\s+|this\s+)?return(?:\s+request)?.{0,120}?"
+    r"(?:we\s+will|we'll|then|after\s+that|afterwards).{0,80}?(?:label|refund)"
+    r"|(?:rückgabe|rücksende|retouren)?grund\s+(?:\w+\s+){0,3}(?:ändern|wechseln|anpassen)"
+    r"|grund.{0,60}?(?:beeinträchtig|schade[nt]|negativ|auswirk)"
+    r"|ändern\w*\s+(?:sie\s+)?(?:bitte\s+)?(?:\w+\s+){0,2}(?:rückgabe|rücksende|retouren)grund"
+    r"|(?:rücksendeanfrage|rückgabeanfrage|rücksendung|rückgabe)\w*\s+(?:\w+\s+){0,3}stornier.{0,120}?(?:etikett|erstatt)"
+    r"|stornier\w*\s+(?:sie\s+)?(?:bitte\s+)?(?:die|ihre)\s+(?:rücksendeanfrage|rückgabeanfrage|rücksendung|rückgabe).{0,120}?(?:etikett|erstatt)"
+    r"|退货原因.{0,10}(?:改|换|修改|选择)|(?:撤销|取消)(?:退货申请|退货请求).{0,40}(?:标签|退款)",
+    re.I | re.S,
+)
+# 提出保留商品+部分退款、退款比例（知识库 CS-RISK-004）：比例和金额只能由人定，AI 草稿命中一律人工审核
+_REFUND_OFFER = re.compile(
+    r"\d{1,2}\s?%\s*(?:of\s+the\s+(?:price|payment|amount)\s+)?(?:as\s+(?:a\s+)?)?(?:refund|partial\s+refund|compensation|discount"
+    r"|rückerstattung|erstattung|entschädigung|rabatt|remboursement|rimborso|reembolso)"
+    r"|(?:refund|erstatten|rückerstatten)\w*\s+(?:you\s+|ihnen\s+)?\d{1,2}\s?%"
+    r"|keep\s+(?:it|the\s+item|the\s+product|this(?:\s+item)?).{0,80}?(?:refund|compensation|discount)"
+    r"|behalten.{0,80}?(?:erstatt|entschädigung|rabatt|nachlass)"
+    r"|partial\s+refund|teilerstattung|teilweise\s+(?:rück)?erstattung|部分退款|退.{0,4}\d{1,2}\s?%",
     re.I | re.S,
 )
 _INTERNAL = re.compile(
@@ -199,6 +246,13 @@ class ComplianceChecker:
                 add("feedback_manipulation", "BLOCK", m)
         for m in _INTERNAL.finditer(t):
             add("internal_info", "REVIEW", m)
+        for m in _RETURN_STEERING.finditer(t):
+            if _negated(t, m.start(), m.end()):
+                add("return_reason_steering", "REVIEW", m, "出现在否定语境中，请人工确认")
+            else:
+                add("return_reason_steering", "BLOCK", m, "不得让买家撤销退货申请或改选退货原因")
+        for m in _REFUND_OFFER.finditer(t):
+            add("refund_offer", "REVIEW", m, "部分退款、退款比例只能由人定")
 
         hits.sort(key=lambda h: h.start)
         if any(h.severity == "BLOCK" for h in hits):

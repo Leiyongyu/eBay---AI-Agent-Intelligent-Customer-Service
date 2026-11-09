@@ -53,3 +53,26 @@ def test_tool_returns_new_fields_and_drops_empty():
     assert (status, ref) == ("FOUND", "order:07-15359-46775")
     assert data["ship_by_date"] and data["estimated_delivery"] and data["title"] == "Cylinder Head"
     assert "items" not in data and "guaranteed_delivery" not in data  # 空值不给模型
+
+
+def test_busy_store_finds_older_order_from_local_table(monkeypatch):
+    """单量大的店最近 1000 单只覆盖一个月：更早的订单从本地订单表补出订单号，再逐单实时查。"""
+    from app.sources import ebay as ebay_src
+
+    recent = [{"orderId": f"R-{i}", "buyer": {"username": "other"}} for i in range(ebay_src.MAX_ORDER_PAGES * 200)]
+    older = {**ORDER, "orderId": "04-15163-40358", "legacyOrderId": "04-15163-40358"}
+    calls = []
+
+    class Api:
+        def get(self, path, params=None):
+            calls.append(path)
+            return older if path.endswith("/04-15163-40358") else None
+
+    src = ebay_src.EbaySource(api_factory=lambda sid: Api())
+    monkeypatch.setattr(src, "_recent_orders", lambda sid: recent)
+    monkeypatch.setattr(ebay_src.EbaySource, "_older_order_ids",
+                        staticmethod(lambda sid, buyer: ["04-15163-40358"] if buyer == "real_buyer" else []))
+    assert [o["order_id"] for o in src.find_orders("s1", "Real_Buyer")] == ["04-15163-40358"]
+    assert src.find_orders("s1", "nobody") == []
+    src.find_orders("s1", "real_buyer")  # 第二次走缓存，不再查接口
+    assert calls == ["/sell/fulfillment/v1/order/04-15163-40358"]

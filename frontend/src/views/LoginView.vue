@@ -27,7 +27,7 @@ async function submit() {
 <template>
   <div class="login-page">
     <form class="login-card" @submit.prevent="submit">
-      <div class="title"><span class="brand-mark" aria-hidden="true" />eBay 客服工作台</div>
+      <div class="title"><img class="brand-mark" src="/logo-512.png" alt="" aria-hidden="true" />Ebay智能AI客服</div>
       <div class="sub">使用管理员分配的账号登录</div>
       <el-input v-model="username" size="large" placeholder="账号" autocomplete="username" autofocus />
       <el-input v-model="password" size="large" type="password" show-password placeholder="密码" autocomplete="current-password" />
@@ -69,10 +69,9 @@ async function submit() {
   letter-spacing: 0.02em;
 }
 .brand-mark {
-  width: 15px;
-  height: 20px;
-  border-radius: 2px;
-  background: linear-gradient(135deg, var(--brand) 0 62%, var(--sage) 62% 100%);
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
 }
 .sub {
   color: var(--muted);

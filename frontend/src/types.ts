@@ -59,7 +59,11 @@ export interface ConversationItem {
   situation?: SituationInfo | null // AI 判断的会话情况（阶段 + 一句话概括）
   mark: MessageMarkInfo | null // 第一个会话标记（兼容旧字段）
   marks?: MessageMarkInfo[] // 会话上的全部标记（可以多个）
+  starred?: boolean // 星标（同事共用）
   invoice_status: 'WAITING_EMAIL' | 'OPEN' | 'DONE' | 'CANCELLED' | null // 发票申请：OPEN 待审核发送
+  outbox_pending?: number // 发件箱里还没发出的条数（可撤回）
+  blacklist?: { id: number; reason: string | null; created_by: string | null } | null // 黑名单买家
+  outbox_problem?: boolean // 有发不出或结果不确定的消息
   item_url: string | null
   unread_count: number // 团队未读条数（收到的消息）
   platform_unread_count: number | null // eBay 后台的未读条数（只读同步）
@@ -258,6 +262,13 @@ export interface JobTrace extends DraftTrace {
 }
 
 /** 对话里的查件记录（发起查件 / 收到反馈），按时间插在聊天记录中 */
+/** 会话页把右侧栏“当前对话待处理”需要的状态传上去 */
+export interface ConvContext {
+  jobKey: string // 回复任务 id-状态：变了就刷新查件单、发票、售后工单
+  messages: number
+  af: AftersalesInfo | null // 客服标记的售后状态
+}
+
 export interface TicketTimelineItem {
   kind: 'opened' | 'replied'
   key: string
@@ -300,6 +311,26 @@ export interface InvoiceTimelineItem {
   created_at: string | null
   sent_at: string | null
   pdf_url: string | null
+}
+
+/** 发件箱里的消息：延迟发出，发出前可撤回 */
+export interface OutboxItem {
+  id: number
+  conversation_id: number
+  body: string
+  zh_translation: string | null
+  source: string
+  actor: string
+  state: 'PENDING' | 'SENDING' | 'SENT' | 'RECALLED' | 'FAILED' | 'UNCERTAIN'
+  send_after: string
+  created_at: string
+  sent_at: string | null
+  channel: string | null
+  error: string | null
+  recalled_by: string | null
+  recalled_at: string | null
+  job_id: number | null
+  has_media: boolean
 }
 
 /** 系统配置页的一项 */
@@ -345,6 +376,8 @@ export interface ConversationDetail extends DraftTrace {
   messages: ChatMessage[]
   ticket_timeline?: TicketTimelineItem[]
   invoice_timeline?: InvoiceTimelineItem[]
+  outbox?: OutboxItem[]
+  blacklist?: { id: number; reason: string | null; created_by: string | null } | null
   events: { id: number; event_type: string; source: string; case_id: string | null; detail: string | null; occurred_at: string }[]
   jobs: { id: number; state: string; run_generation: number; created_at: string }[]
   job: JobInfo | null
@@ -359,7 +392,7 @@ export interface Meta {
   gate_info_reasons: string[]
   review_reason_codes: Record<string, string>
   marketplaces: string[]
-  test_delete_enabled: boolean // 测试期的“删除会话”按钮（正式上线前移除）
+  send_delay_seconds?: number // 发出前可撤回的时长（秒）
   aftersales: { types: string[]; status_labels: Record<string, string>; intent_hint: Record<string, string> }
   roles: Record<string, string>
 }
@@ -382,7 +415,7 @@ export interface Me {
 export interface MessageTag {
   id: number
   name: string
-  color: 'primary' | 'success' | 'warning' | 'danger' | 'info'
+  color: string // #rrggbb / none（无色）；早期的 primary / success / warning / danger / info 也认
   sort: number
   is_active: boolean
   created_by?: string | null
@@ -654,4 +687,72 @@ export interface LogisticsTicketRow extends LogisticsTicketItem {
   buyer_key: string | null
   conversation_id: number | null
   open_same_order: number
+}
+
+/** 会话页右侧（GET /internal/conversations/{id}/customer）：订单、客户资料、历史会话 */
+export interface Money {
+  value: string
+  currency: string
+}
+export interface CustomerOrder {
+  order_id: string
+  legacy_order_id: string | null
+  record_no: string | null
+  marketplace_id: string | null
+  created_at: string | null
+  paid_at: string | null
+  payment_status: string | null
+  order_status: string | null
+  cancel_state: string | null
+  total: Money | null
+  refunds: { amount: Money | null; date: string | null; status: string | null }[]
+  items: { item_id: string | null; sku: string | null; title: string | null; quantity: number | null; status: string | null }[]
+  quantity: number
+  shipping_service: string | null
+  buyer_note: string | null
+  ship_to: { name: string | null; company: string | null; address: string | null; country: string | null; phone: string | null; email: string | null }
+}
+export interface CustomerPackage {
+  order_id: string
+  package_id: string | null
+  carrier: string | null
+  tracking_number: string | null
+  tracking_status: string | null
+  latest_event: string | null
+  event_time: string | null
+}
+export interface CustomerHistoryItem {
+  id: number
+  store_id: string
+  store_name: string
+  marketplace_id: string
+  item_id: string | null
+  item_url: string | null
+  title: string | null
+  last_message_at: string | null
+  preview: string
+  order_id: string | null
+}
+export interface CustomerPanelData {
+  buyer_key: string
+  related_order: CustomerOrder | null
+  packages: CustomerPackage[]
+  packages_error: string | null
+  orders: CustomerOrder[]
+  profile: {
+    buyer_key: string
+    name: string | null
+    email: string | null
+    phone: string | null
+    stores: { store_id: string; store_name: string; orders: number }[]
+    total_quantity: number
+    order_count: number
+    amounts: { currency: string; total: string; count: number; avg: string }[]
+    first_order_at: string | null
+    last_order_at: string | null
+    refund_count: number
+    refund_amounts: { currency: string; total: string; count: number; avg: string }[]
+  }
+  history: CustomerHistoryItem[]
+  errors: { store_id: string; store_name: string; error: string }[]
 }

@@ -1,102 +1,106 @@
 /* 主题：温和护眼型。主色深青（按钮、链接、选中态），墨绿只用于品牌标识和少量强调，避免和"成功"混淆 */
 :root {
+  /* 主题：ERP 风格。白色面板 + 浅灰底，橙色只用于主操作、选中和数字，其余保持中性 */
   /* 业务色 */
-  --brand: #2f6b5e;          /* 墨绿：品牌、标题强调 */
-  --accent: #246b6b;         /* 深青：主按钮、选中、链接 */
-  --accent-soft: #e6f0ef;    /* 深青浅底：选中行、提示条 */
-  --sage: #8fbc8f;           /* 鼠尾草绿：辅助装饰 */
-  --aqua: #a8dadc;           /* 浅青：辅助边框（AI 草稿、引用） */
+  --brand: #ff6b1a;          /* 品牌橙 */
+  --accent: #ff6b1a;         /* 主按钮、选中、链接 */
+  --accent-soft: #fff4ec;    /* 橙色浅底：选中行、数字底 */
+  --accent-line: #ffd3ba;    /* 橙色浅边框 */
+  --sage: #8fbc8f;
+  --aqua: #ffd3ba;           /* 辅助边框（AI 草稿、引用） */
 
-  --bg: #f7f5f2;             /* 浅豆沙：页面底 */
-  --panel: #fdfcfa;          /* 米白：面板 */
-  --sunken: #f3f1ec;         /* 面板内的凹陷区（聊天区、代码块） */
-  --line: #e4e1da;
-  --line-soft: #eeebe5;
-  --text: #2d3a3a;
-  --text-2: #4a5858;
-  --muted: #6b7b7b;
+  --bg: #f4f5f7;             /* 页面底 */
+  --panel: #ffffff;          /* 面板 */
+  --sunken: #f7f8fa;         /* 面板内的凹陷区（聊天区、代码块） */
+  --hover: #f5f6f8;          /* 菜单悬停 */
+  --active-bg: #eef0f3;      /* 菜单选中 */
+  --line: #e4e7ec;
+  --line-soft: #eff1f4;
+  --text: #1f2329;
+  --text-2: #4e5969;
+  --muted: #86909c;
 
-  --ok: #4caf50;
-  --ok-text: #3d8c40;
-  --warn: #e6a23c;
-  --warn-text: #a8731f;
-  --warn-soft: #fbf4e6;
-  --danger: #e05a5a;
-  --danger-text: #b34848;
-  --danger-soft: #fbeeee;
+  --ok: #2fae5b;
+  --ok-text: #23864a;
+  --warn: #f59a23;
+  --warn-text: #b86e0f;
+  --warn-soft: #fff7e8;
+  --danger: #e5484d;
+  --danger-text: #c33237;
+  --danger-soft: #fdeeee;
 
   /* 聊天气泡 */
-  --buyer: #efefe9;
-  --seller: #e3eeec;
-  --system: #f8f1e2;
+  --buyer: #f2f3f5;
+  --seller: #fff1e7;
+  --system: #fdf6e3;
 
   /* Element Plus 主题覆盖 */
-  --el-color-primary: #246b6b;
-  --el-color-primary-light-3: #669797;
-  --el-color-primary-light-5: #92b5b5;
-  --el-color-primary-light-7: #bdd3d3;
-  --el-color-primary-light-8: #d3e1e1;
-  --el-color-primary-light-9: #e9f0f0;
-  --el-color-primary-dark-2: #1d5656;
-  --el-color-success: #4caf50;
-  --el-color-success-light-3: #82c784;
-  --el-color-success-light-5: #a6d7a8;
-  --el-color-success-light-7: #c9e7ca;
-  --el-color-success-light-8: #dbefdc;
-  --el-color-success-light-9: #edf7ee;
-  --el-color-success-dark-2: #3d8c40;
-  --el-color-warning: #e6a23c;
-  --el-color-warning-light-3: #eebe76;
-  --el-color-warning-light-5: #f2d09e;
-  --el-color-warning-light-7: #f8e3c4;
-  --el-color-warning-light-8: #faecd8;
-  --el-color-warning-light-9: #fcf6ec;
-  --el-color-warning-dark-2: #b88230;
-  --el-color-danger: #e05a5a;
-  --el-color-danger-light-3: #e98c8c;
-  --el-color-danger-light-5: #f0acac;
-  --el-color-danger-light-7: #f6cece;
-  --el-color-danger-light-8: #f9dede;
-  --el-color-danger-light-9: #fceeee;
-  --el-color-danger-dark-2: #b34848;
-  --el-color-error: #e05a5a;
-  --el-color-error-light-3: #e98c8c;
-  --el-color-error-light-5: #f0acac;
-  --el-color-error-light-7: #f6cece;
-  --el-color-error-light-8: #f9dede;
-  --el-color-error-light-9: #fceeee;
-  --el-color-error-dark-2: #b34848;
-  --el-color-info: #7f8c8c;
-  --el-color-info-light-3: #a5aeae;
-  --el-color-info-light-5: #bfc6c6;
-  --el-color-info-light-7: #d9dcdc;
-  --el-color-info-light-8: #e5e8e8;
-  --el-color-info-light-9: #f2f4f4;
-  --el-color-info-dark-2: #667070;
+  --el-color-primary: #ff6b1a;
+  --el-color-primary-light-3: #ff975f;
+  --el-color-primary-light-5: #ffb58d;
+  --el-color-primary-light-7: #ffd3ba;
+  --el-color-primary-light-8: #ffe1d1;
+  --el-color-primary-light-9: #fff0e8;
+  --el-color-primary-dark-2: #cc5615;
+  --el-color-success: #2fae5b;
+  --el-color-success-light-3: #6dc68c;
+  --el-color-success-light-5: #97d7ad;
+  --el-color-success-light-7: #c1e7ce;
+  --el-color-success-light-8: #d5efde;
+  --el-color-success-light-9: #eaf7ef;
+  --el-color-success-dark-2: #268b49;
+  --el-color-warning: #f59a23;
+  --el-color-warning-light-3: #f8b865;
+  --el-color-warning-light-5: #facd91;
+  --el-color-warning-light-7: #fce1bd;
+  --el-color-warning-light-8: #fdebd3;
+  --el-color-warning-light-9: #fef5e9;
+  --el-color-warning-dark-2: #c47b1c;
+  --el-color-danger: #e5484d;
+  --el-color-danger-light-3: #ed7f82;
+  --el-color-danger-light-5: #f2a4a6;
+  --el-color-danger-light-7: #f7c8ca;
+  --el-color-danger-light-8: #fadadb;
+  --el-color-danger-light-9: #fceded;
+  --el-color-danger-dark-2: #b73a3e;
+  --el-color-error: #e5484d;
+  --el-color-error-light-3: #ed7f82;
+  --el-color-error-light-5: #f2a4a6;
+  --el-color-error-light-7: #f7c8ca;
+  --el-color-error-light-8: #fadadb;
+  --el-color-error-light-9: #fceded;
+  --el-color-error-dark-2: #b73a3e;
+  --el-color-info: #86909c;
+  --el-color-info-light-3: #aab1ba;
+  --el-color-info-light-5: #c3c8ce;
+  --el-color-info-light-7: #dbdee1;
+  --el-color-info-light-8: #e7e9eb;
+  --el-color-info-light-9: #f3f4f5;
+  --el-color-info-dark-2: #6b737d;
 
-  --el-bg-color: #fdfcfa;
-  --el-bg-color-page: #f7f5f2;
-  --el-bg-color-overlay: #fdfcfa;
+  --el-bg-color: #ffffff;
+  --el-bg-color-page: #f4f5f7;
+  --el-bg-color-overlay: #ffffff;
   --el-fill-color-blank: #ffffff;
-  --el-fill-color: #f0eee9;
-  --el-fill-color-light: #f4f2ee;
-  --el-fill-color-lighter: #f7f5f2;
-  --el-fill-color-extra-light: #faf9f6;
-  --el-fill-color-dark: #e9e6e0;
-  --el-text-color-primary: #2d3a3a;
-  --el-text-color-regular: #3f4d4d;
-  --el-text-color-secondary: #6b7b7b;
-  --el-text-color-placeholder: #a3adab;
-  --el-text-color-disabled: #b8c0be;
-  --el-border-color: #dcd9d2;
-  --el-border-color-light: #e4e1da;
-  --el-border-color-lighter: #eeebe5;
-  --el-border-color-extra-light: #f3f1ec;
-  --el-border-color-dark: #cfcbc3;
-  --el-border-radius-base: 5px;
-  --el-box-shadow-light: 0 2px 10px rgba(45, 58, 58, 0.08);
-  --el-box-shadow: 0 6px 20px rgba(45, 58, 58, 0.1);
-  --el-mask-color: rgba(253, 252, 250, 0.85);
+  --el-fill-color: #f0f2f5;
+  --el-fill-color-light: #f5f7fa;
+  --el-fill-color-lighter: #f7f8fa;
+  --el-fill-color-extra-light: #fafbfc;
+  --el-fill-color-dark: #e9ecf0;
+  --el-text-color-primary: #1f2329;
+  --el-text-color-regular: #4e5969;
+  --el-text-color-secondary: #86909c;
+  --el-text-color-placeholder: #a9aeb8;
+  --el-text-color-disabled: #c0c4cc;
+  --el-border-color: #dcdfe6;
+  --el-border-color-light: #e4e7ec;
+  --el-border-color-lighter: #eff1f4;
+  --el-border-color-extra-light: #f5f6f8;
+  --el-border-color-dark: #d0d4db;
+  --el-border-radius-base: 4px;
+  --el-box-shadow-light: 0 2px 10px rgba(31, 35, 41, 0.08);
+  --el-box-shadow: 0 6px 20px rgba(31, 35, 41, 0.1);
+  --el-mask-color: rgba(255, 255, 255, 0.85);
 
   /* 字体：西文先用系统 UI 字体（Windows 上是 Segoe UI，比微软雅黑自带的西文清楚），中文按平台取最好的黑体 */
   --font-sans: 'Segoe UI Variable Text', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'HarmonyOS Sans SC',
@@ -149,7 +153,7 @@ body,
 }
 
 ::selection {
-  background: #cfe3e1;
+  background: #ffe1d1;
 }
 
 a {
@@ -164,7 +168,7 @@ a {
 /* 滚动条：细、浅，长时间看不扎眼 */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #d6d2ca transparent;
+  scrollbar-color: #d5d9e0 transparent;
 }
 
 .panel {
@@ -253,19 +257,20 @@ mark.review {
 
 /* ---- Element Plus 细节收敛：去掉默认的蓝色光晕和过重的阴影 ---- */
 .el-table {
-  --el-table-header-bg-color: #f3f1ec;
-  --el-table-header-text-color: #4a5858;
-  --el-table-row-hover-bg-color: #eef4f2;
-  --el-table-current-row-bg-color: #e6f0ef;
-  --el-table-border-color: #e9e6e0;
+  --el-table-header-bg-color: #f5f6f8;
+  --el-table-header-text-color: #4e5969;
+  --el-table-row-hover-bg-color: #fafbfc;
+  --el-table-current-row-bg-color: #fff4ec;
+  --el-table-border-color: #eceef2;
 }
 
 .el-table th.el-table__cell {
-  font-weight: 600;
+  font-weight: 500;
+  font-size: 13px;
 }
 
 .el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell {
-  background: #faf9f6;
+  background: #fafbfc;
 }
 
 .el-tag {

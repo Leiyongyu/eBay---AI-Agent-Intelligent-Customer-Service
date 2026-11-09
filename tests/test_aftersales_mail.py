@@ -173,8 +173,9 @@ def test_cleanup_after_retention(as_env, tmp_path):
     purged = []
 
     class Box:
-        def purge_done(self, before):
+        def purge_done(self, before, message_ids):
             purged.append(before)
+            assert "<m1@example.de>" in message_ids  # 只删本系统处理过的邮件
             return 3
 
     with session_scope() as db:
@@ -190,13 +191,29 @@ def test_cleanup_after_retention(as_env, tmp_path):
     assert as_env.get(f"/internal/aftersales-files/{f.id}/content").status_code == 410
 
 
-def test_run_once_moves_processed_mail(as_env, monkeypatch):
+def test_run_once_only_takes_aftersales_mail(as_env, monkeypatch):
+    """售后邮箱可能就是同事的工作邮箱：只收和售后有关的（订单号、WeTransfer、视频、发票邮箱、买家用户名），
+    系统告警、内部往来、谷仓通知、广告不记录、不移动；按 UID 进度只看新邮件，第一次往回看几天。"""
     from app.aftersales_mail import mailbox, service
+    from app.db import session_scope
+    from app.models import AftersalesMail, MailboxCursor
+    from sqlalchemy import func, select
 
     monkeypatch.setenv("AFTERSALES_MAIL_ENABLED", "true")
     monkeypatch.setenv("AFTERSALES_MAIL_PASSWORD", "x")
     config.get_settings.cache_clear()
-    moved = []
+    moved, calls = [], []
+    inbox = {
+        7: mail(files=[("p.jpg", "image/jpeg", b"jpg")]),  # 主题有订单号
+        8: mail(subject="[JMH] 同步告警 步骤：谷仓链路同步", body="job:230 失败", sender="me@shop.example",
+                msg_id="<alert@shop.example>"),  # 本公司系统告警
+        9: mail(subject="查件服务进度通知", body=f"订单 {ORDER}", sender="e-mail@service.goodcang.com",
+                files=[("G10645-查件服务进度.xls", "application/vnd.ms-excel", b"xls")], msg_id="<gc@goodcang>"),
+        10: mail(subject="Newsletter", body="Big sale!", sender="news@shop-ads.example", msg_id="<ad@x>",
+                 files=[("banner.jpg", "image/jpeg", b"jpg" * 100)]),  # 广告：只有图、没订单号
+        11: mail(subject="Video", body="see attached", sender="someone@gmail.example", msg_id="<v@x>",
+                 files=[("clip.mp4", "video/mp4", b"mp4")]),  # 陌生人发视频：收（进待认领）
+    }
 
     class Box:
         def __enter__(self):
@@ -205,15 +222,61 @@ def test_run_once_moves_processed_mail(as_env, monkeypatch):
         def __exit__(self, *a):
             return False
 
-        def fetch_all(self, limit=50):
-            return [("7", mail(files=[("p.jpg", "image/jpeg", b"jpg")])), ("8", b"not a mail but parses")]
+        def fetch_new(self, after_uid, uidvalidity, since, limit=50):
+            calls.append(after_uid)
+            return "V1", [(str(u), raw) for u, raw in sorted(inbox.items()) if after_uid is None or u > after_uid]
 
         def move_done(self, uid):
             moved.append(uid)
 
     monkeypatch.setattr(mailbox, "ImapMailbox", Box)
-    assert service.run_once() == {"processed": 2, "failed": 0}
-    assert moved == ["7", "8"]
+    assert service.run_once() == {"processed": 2, "failed": 0, "skipped": 3}
+    assert moved == ["7", "11"]  # 无关的留在收件箱，不移动
+    with session_scope() as db:
+        assert db.scalar(select(func.count()).select_from(AftersalesMail)) == 2
+        cur = db.get(MailboxCursor, "INBOX")
+        assert (cur.last_uid, cur.uidvalidity, cur.skipped) == (11, "V1", 3)
+    inbox[12] = mail(subject=f"Re: {ORDER}", msg_id="<m12@example.de>")
+    assert service.run_once() == {"processed": 1, "failed": 0, "skipped": 0}  # 只看新邮件
+    assert calls == [None, 11] and moved[-1] == "12"
+
+
+def test_run_once_retries_a_failing_mail_then_moves_on(as_env, monkeypatch):
+    """处理出错的邮件留在收件箱下轮再试；连续 3 次失败就跳过，不挡后面的邮件。"""
+    from app.aftersales_mail import mailbox, service
+
+    monkeypatch.setenv("AFTERSALES_MAIL_ENABLED", "true")
+    monkeypatch.setenv("AFTERSALES_MAIL_PASSWORD", "x")
+    config.get_settings.cache_clear()
+    moved = []
+    inbox = {1: mail(msg_id="<bad@x>"), 2: mail(msg_id="<good@x>")}
+
+    class Box:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def fetch_new(self, after_uid, uidvalidity, since, limit=50):
+            return "V1", [(str(u), raw) for u, raw in sorted(inbox.items()) if after_uid is None or u > after_uid]
+
+        def move_done(self, uid):
+            moved.append(uid)
+
+    real = service.process
+
+    def flaky(db, uid, raw, http=None, pm=None):
+        if uid == "1":
+            raise RuntimeError("boom")
+        return real(db, uid, raw, http, pm)
+
+    monkeypatch.setattr(service, "process", flaky)
+    monkeypatch.setattr(mailbox, "ImapMailbox", Box)
+    assert service.run_once()["failed"] == 1 and moved == []
+    assert service.run_once()["failed"] == 1 and moved == []
+    r = service.run_once()
+    assert r["failed"] == 1 and r["processed"] == 1 and moved == ["2"]  # 第 3 次跳过坏的，后面的照收
 
 
 def test_compliance_allows_own_aftersales_mailbox(as_env):

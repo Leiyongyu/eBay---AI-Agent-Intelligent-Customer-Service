@@ -51,6 +51,26 @@ def _host(url: str) -> str:
     return (m.group(1) if m else "").lower()
 
 
+_WT_DOWNLOAD = re.compile(r"/downloads/([0-9a-f]+)", re.I)
+_WT_SHORT = re.compile(r"^https?://we\.tl/t-[A-Za-z0-9]+", re.I)
+
+
+def wetransfer_downloads(links: list[str]) -> list[str]:
+    """只要真正的文件链接（wetransfer.com/downloads/… 或 we.tl/t-…），不要通知邮件里的首页、退订等链接；
+    同一个传输出现多次（邮件里同一链接常有两种编码）只留一个；纯文本里被折行截断的半截链接
+    （传输号是另一个链接传输号的前缀）也丢掉，不然会多出一条“下载失败”。"""
+    found: list[tuple[str, str]] = []
+    for u in links:
+        if not _host_in(u, WETRANSFER_HOSTS):
+            continue
+        m = _WT_DOWNLOAD.search(u)
+        key = m.group(1).lower() if m else (_WT_SHORT.match(u).group(0).lower() if _WT_SHORT.match(u) else None)
+        if key and key not in {k for k, _ in found}:
+            found.append((key, u))
+    keys = [k for k, _ in found]
+    return [u for k, u in found if not any(o != k and o.startswith(k) for o in keys)]
+
+
 def _host_in(url: str, hosts: tuple[str, ...]) -> bool:
     h = _host(url)
     return any(h == x or h.endswith("." + x) for x in hosts)
@@ -91,7 +111,7 @@ def parse(raw: bytes) -> ParsedMail:
         date=date,
         text=text,
         attachments=attachments,
-        wetransfer_links=[u for u in links if _host_in(u, WETRANSFER_HOSTS)],
+        wetransfer_links=wetransfer_downloads(links),
         other_links=[u for u in links if _host_in(u, OTHER_SHARE_HOSTS)],
         order_ids=list(dict.fromkeys(ORDER_RE.findall(subject + "\n" + text))),
     )

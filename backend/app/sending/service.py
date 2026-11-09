@@ -93,6 +93,9 @@ def request_send(db: Session, *, job: ReplyJob, draft: Draft, final_text: str, a
                       detail={"job_id": job.id, "draft_id": draft.id, "edit_ratio": ratio,
                               "compliance": compliance.result}))
     db.flush()
+    from .outbox import enqueue  # 进发件箱：延迟发出、发出前可撤回；发出后发件箱把意图和任务标为已发送
+
+    enqueue(db, db.get(Conversation, job.conversation_id), text, actor=actor, source="manual", job_id=job.id)
     return intent
 
 
@@ -150,13 +153,15 @@ def auto_reply_message_ids(db: Session, platform_message_ids: list[str]) -> set[
 
 def auto_reply_streak(db: Session, conv_id: int) -> int:
     """会话末尾连续几条店铺回复是 AI 自动回复（遇到人工回复就停）。"""
-    outs = list(db.scalars(select(Message.ebay_message_id).where(Message.conversation_id == conv_id,
-                                                                 Message.direction == "OUT")
-                           .order_by(Message.conversation_seq.desc()).limit(20)))
+    rows = db.execute(select(Message.ebay_message_id, Message.auto_kind).where(Message.conversation_id == conv_id,
+                                                                               Message.direction == "OUT")
+                      .order_by(Message.conversation_seq.desc()).limit(20)).all()
+    outs = [r[0] for r in rows]
+    acks = {r[0] for r in rows if r[1] == "ACK"}
     autos = auto_reply_message_ids(db, outs)
     n = 0
     for mid in outs:
-        if is_ack(mid):
+        if is_ack(mid) or mid in acks:
             continue  # “已收到”回执不算回复：不打断、也不计入连续自动回复
         if mid not in autos:
             break
@@ -170,12 +175,15 @@ def last_reply_was_auto(db: Session, conv_id: int) -> bool:
 
 def simulate_send(db: Session, *, conv: Conversation, text: str, actor: str,
                   handling_ms: int | None = None, text_zh: str | None = None,
-                  auto: bool = False) -> tuple[Message, ReplyJob | None]:
-    """工作台“发送”：模拟发送，只在本地会话追加一条店铺消息（平台消息 ID 以 SIM-OUT- 开头），绝不调用 eBay。
+                  auto: bool = False, file_ids: list[int] | None = None) -> tuple[Message, ReplyJob | None]:
+    """工作台“发送”与 AI 自动回复：放进发件箱（sending/outbox.py），延迟 SEND_DELAY_SECONDS 后发出，期间可撤回。
+    对接了 eBay 的店铺真实发到 eBay，其余只记在本地。返回 (待发消息, 任务)。
 
-    有待审任务时一并结案：AI 草稿记为已批准并记录修改比例（没有草稿则记为人工撰写），
-    写一条状态为 SENT 的发送意图，用它把这条消息和生成依据关联起来。合规 BLOCK 同样不能发送。
+    有待审任务时：AI 草稿记为已批准并记录修改比例（没有草稿则记为人工撰写），任务进入“发送中”，
+    写一条排队中的发送意图，发出后用它把消息和生成依据关联起来；撤回则回到待审核。合规 BLOCK 同样不能发送。
     """
+    from .outbox import enqueue
+
     if conv.conversation_type == "FROM_EBAY":
         raise SendError(409, "eBay 系统消息会话不能回复")
     text = text.strip()
@@ -184,16 +192,20 @@ def simulate_send(db: Session, *, conv: Conversation, text: str, actor: str,
     compliance = ComplianceChecker().check(text)
     if compliance.result == "BLOCK":
         raise SendError(422, "合规硬阻断：请修改命中内容后再发送（不可跳过）", compliance.to_dict())
+    media_meta = None
+    if file_ids:  # 回复里带的图片：先检查，有问题直接报错，不改任务状态
+        from .reply_media import build_meta
+
+        media_meta = build_meta(db, conv, file_ids)
 
     job = db.scalar(select(ReplyJob).where(ReplyJob.conversation_id == conv.id,
                                            ReplyJob.state != JobState.CANCELLED_STALE)
                     .order_by(ReplyJob.id.desc()).limit(1))
-    if job is not None and job.state in GENERATING:
+    if job is not None and job.state in (JobState.RECEIVED, JobState.RUNNING):
         raise SendError(409, "AI 正在生成草稿，请等生成完成后再发送")
     if job is not None and job.state not in (*JobState.PENDING_REVIEW, JobState.RETRYABLE_ERROR):
         job = None  # 上一个任务已结束：这是一条与 AI 任务无关的人工消息
 
-    mid = f"{SIMULATED_PREFIX}{uuid.uuid4().hex[:12]}"
     ratio = None
     draft_zh = None
     if job is not None:
@@ -216,30 +228,24 @@ def simulate_send(db: Session, *, conv: Conversation, text: str, actor: str,
         if intent is None:
             intent = SendIntent(job_id=job.id)
             db.add(intent)
-        intent.draft_id, intent.idempotency_key, intent.actor = draft.id, f"sim-{uuid.uuid4().hex}", actor
-        intent.text, intent.content_hash, intent.state = text, content_hash, "SENT"
-        intent.platform_message_id, intent.last_error, intent.sent_at = mid, None, utcnow()
+        intent.draft_id, intent.idempotency_key, intent.actor = draft.id, f"out-{uuid.uuid4().hex}", actor
+        intent.text, intent.content_hash, intent.state = text, content_hash, "QUEUED"
+        intent.platform_message_id, intent.last_error, intent.sent_at = None, None, None
         db.flush()
-        attempt_no = len(db.scalars(select(SendAttempt).where(SendAttempt.intent_id == intent.id)).all()) + 1
-        db.add(SendAttempt(intent_id=intent.id, attempt_no=attempt_no, outcome="SENT", response_status="simulated",
-                           completed_at=utcnow()))
         for d in db.scalars(select(Draft).where(Draft.job_id == job.id, Draft.status == "ACTIVE", Draft.id != draft.id)):
             d.status = "SUPERSEDED"
         draft.status = "APPROVED"
-        job.state = JobState.SENT
+        job.state = JobState.SENDING
         job.lock_version += 1
         if not auto:  # 自动回复没有人审核，不计入审核反馈与效率指标
             action = "MANUAL" if draft.author != "agent" else ("APPROVE" if ratio == 0 else "EDIT_APPROVE")
             db.add(ReviewFeedback(draft_id=draft.id, job_id=job.id, reviewer=actor, action=action,
                                   reason_codes=[], edit_ratio=ratio, handling_ms=handling_ms))
 
-    msg = _append_message(db, conv, mid, "SELLER", "OUT", text, None)
-    # 中文只供审核员对照，买家收到的始终是 text 原文
-    msg.zh_translation = (text_zh or "").strip() or draft_zh
-    conv.row_version += 1
-    db.add(AuditEvent(actor=actor, action="AUTO_SIMULATED_SEND" if auto else "SIMULATED_SEND",
+    db.add(AuditEvent(actor=actor, action="AUTO_SEND_QUEUED" if auto else "SEND_QUEUED",
                       store_id=conv.store_id, conversation_id=conv.id,
-                      detail={"message_id": mid, "job_id": job.id if job else None, "edit_ratio": ratio,
-                              "compliance": compliance.result}))
-    db.flush()
-    return msg, job
+                      detail={"job_id": job.id if job else None, "edit_ratio": ratio, "compliance": compliance.result}))
+    # 中文只供审核员对照，买家收到的始终是 text 原文
+    ob = enqueue(db, conv, text, actor=actor, source="auto" if auto else "manual",
+                 zh=(text_zh or "").strip() or draft_zh, job_id=job.id if job else None, meta=media_meta)
+    return ob, job

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 账号管理（只有管理员）：新建账号、分配负责店铺、改角色、重置密码、停用/启用、解锁
+// 账号管理（只有管理员）：新建账号（登录名系统随机生成）、分配负责店铺、改角色、重置密码、停用/启用、解锁、删除
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, get, post, session } from '../api'
@@ -32,11 +32,20 @@ const form = reactive({ username: '', display_name: '', role: 'CS', password: ''
                         can_aftersales_files: false })
 const saving = ref(false)
 
+async function newUsername() {
+  try {
+    form.username = (await get<{ username: string }>('/api/admin/users/new-username')).username
+  } catch (e) {
+    ElMessage.error(errorText(e))
+  }
+}
+
 function openCreate() {
   editing.value = null
   Object.assign(form, { username: '', display_name: '', role: 'CS', password: '', all_stores: false, store_ids: [],
                         can_aftersales_files: false })
   dialog.value = true
+  newUsername()
 }
 
 function openEdit(u: UserRow) {
@@ -58,7 +67,9 @@ async function save() {
       ElMessage.success('已保存')
     } else {
       await post('/api/admin/users', { ...form })
-      ElMessage.success(`已创建账号 ${form.username}，对方首次登录需修改密码`)
+      ElMessageBox.alert(`登录名：${form.username}
+请把登录名和你设置的初始密码告诉对方；对方首次登录需修改密码。`,
+                         '账号已创建', { confirmButtonText: '知道了' })
     }
     dialog.value = false
     load()
@@ -98,6 +109,23 @@ async function toggleActive(u: UserRow) {
     }
   }
   patch(u, { is_active: !u.is_active }, u.is_active ? '已停用' : '已启用')
+}
+
+async function remove(u: UserRow) {
+  try {
+    await ElMessageBox.confirm(
+      `删除账号「${u.display_name}」（${u.username}）？删除后不能登录、不能恢复；历史回复和记录里的名字保留。只想暂时不让登录的话用“停用”。`,
+      '删除账号', { type: 'warning', confirmButtonText: '删除', confirmButtonClass: 'el-button--danger' })
+  } catch {
+    return
+  }
+  try {
+    await api('DELETE', `/api/admin/users/${u.id}`)
+    ElMessage.success('已删除')
+    load()
+  } catch (e) {
+    ElMessage.error(errorText(e))
+  }
 }
 
 const fmt = (v: string | null) => (v ? new Date(v).toLocaleString('zh-CN', { hour12: false }) : '—')
@@ -142,7 +170,7 @@ onMounted(load)
           </template>
         </el-table-column>
         <el-table-column label="最近登录" width="150"><template #default="{ row }">{{ fmt(row.last_login_at) }}</template></el-table-column>
-        <el-table-column label="操作" width="250">
+        <el-table-column label="操作" width="290">
           <template #default="{ row }">
             <el-button link size="small" type="primary" @click="openEdit(row)">编辑</el-button>
             <el-button link size="small" @click="resetPassword(row)">重置密码</el-button>
@@ -150,6 +178,7 @@ onMounted(load)
             <el-button v-if="row.id !== session.user?.id" link size="small" :type="row.is_active ? 'danger' : 'success'" @click="toggleActive(row)">
               {{ row.is_active ? '停用' : '启用' }}
             </el-button>
+            <el-button v-if="row.id !== session.user?.id" link size="small" type="danger" @click="remove(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -158,7 +187,12 @@ onMounted(load)
     <el-dialog v-model="dialog" :title="editing ? '编辑账号' : '新建账号'" width="560px">
       <el-form label-width="90px">
         <el-form-item label="登录名">
-          <el-input v-model="form.username" :disabled="!!editing" placeholder="字母、数字、_ . @ -" />
+          <el-input v-if="editing" v-model="form.username" disabled />
+          <template v-else>
+            <el-input v-model="form.username" readonly class="mono" style="flex: 1" placeholder="生成中…" />
+            <el-button style="margin-left: 8px" @click="newUsername">换一个</el-button>
+            <div class="muted" style="width: 100%">登录名由系统随机生成（字母 + 数字），创建后不能改</div>
+          </template>
         </el-form-item>
         <el-form-item label="显示名"><el-input v-model="form.display_name" placeholder="工作台署名，如 客服小王" /></el-form-item>
         <el-form-item label="角色">

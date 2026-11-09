@@ -16,8 +16,14 @@ from .sources.fixture import FixtureSource
 log = logging.getLogger(__name__)
 
 
-DEFAULT_MESSAGE_TAGS = [("查适配中", "warning"), ("不适配", "danger"), ("已适配", "success"), ("等买家回复", "info"),
-                        ("等仓库/物流反馈", "warning"), ("已处理", "success")]
+# 会话标记的默认选项（名称, 颜色 #rrggbb / none 无色），顺序即排序
+DEFAULT_MESSAGE_TAGS = [
+    ("已好评", "#a78bcf"), ("议价", "#f5b90a"), ("物流异常退回后需要重发", "#26a69a"), ("不适配联系取消", "none"),
+    ("周一需要发到售后群", "none"), ("地址问题", "#f59ac0"), ("需跟进/回复", "#d1008a"), ("物流异常", "#5b8def"),
+    ("快过期/过期", "#5e6b8c"), ("缺货联系", "#d1008a"), ("要发票", "#f59ac0"), ("查件", "#26a69a"), ("退货", "#f2462e"),
+    ("黑名单", "#5e6b8c"), ("查物流", "#26a69a"), ("更新物流单号", "#5dd6a8"), ("自退回", "#ef6a50"),
+    ("待咨询群回复", "#f5a055"), ("差评纠纷", "#f2462e"), ("产品问题", "#13a3ad"), ("A待确认适配", "#73c6ec"), ("要VIN", "#0aa2f2"),
+]
 
 
 def bootstrap() -> dict:
@@ -34,6 +40,10 @@ def bootstrap() -> dict:
             for i, (name, color) in enumerate(DEFAULT_MESSAGE_TAGS):
                 db.add(MessageTag(name=name, color=color, sort=(i + 1) * 10, created_by="初始化"))
             report["message_tags"] = len(DEFAULT_MESSAGE_TAGS)
+        from .message_templates import seed_system
+
+        if n := seed_system(db):  # 系统预定义的消息模板（只在一条都没有时写入）
+            report["message_templates"] = n
         if s.demo_seed:
             for row in FixtureSource().stores():
                 store = db.get(Store, row["id"])

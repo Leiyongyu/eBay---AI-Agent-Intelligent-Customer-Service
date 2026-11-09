@@ -756,12 +756,12 @@ def test_ticket_result_auto_reply_rereply_tags_and_unknown(client, monkeypatch, 
         assert (t1.outcome, t1.needs_human, t1.send_status) == ("IN_TRANSIT", False, "SENT")
         a = db.get(Conversation, convs["A"])
         assert "【已催派 / 运输中，请留意轨迹】" in a.aftersales_note and "已自动回复买家" in a.aftersales_note
-        assert "需判断补发" not in tags(db, a.id)
+        assert "物流异常退回后需要重发" not in tags(db, a.id)
         t2 = db.scalar(select(LogisticsTicket).where(LogisticsTicket.io_code == "CJR2"))
         assert (t2.outcome, t2.send_status, t2.sent_message_id) == ("UNKNOWN", "NEEDS_HUMAN", None)  # 看不懂：不发
         b = db.get(Conversation, convs["B"])
         assert (b.aftersales_status, b.aftersales_type) == ("PENDING", "物流异常/未收到")
-        assert "需人工审核" in tags(db, b.id)
+        assert "物流异常" in tags(db, b.id)
         first_msg = t1.sent_message_id
 
     rows[0] = row("CJR1", "09-15357-80001", "您好，轨迹久未更新，未收到请考虑包裹丢失")  # 谷仓第二次回复
@@ -773,7 +773,7 @@ def test_ticket_result_auto_reply_rereply_tags_and_unknown(client, monkeypatch, 
         assert (t1.outcome, t1.needs_human, t1.send_status) == ("LOST", True, "SENT") and t1.sent_message_id != first_msg
         a = db.get(Conversation, convs["A"])
         assert a.aftersales_type == "物流问题需判断补发" and a.aftersales_note.startswith("谷仓查件单 CJR1（断更）已回复【包裹疑似丢失")
-        assert "补发库存" in a.aftersales_note and "需判断补发" in tags(db, a.id)
+        assert "补发库存" in a.aftersales_note and "物流异常退回后需要重发" in tags(db, a.id)
     row1 = next(x for x in client.get(f"/internal/conversations/{convs['A']}/logistics-tickets").json()
                 if x["io_code"] == "CJR1")
     assert (row1["outcome"], row1["handling"]) == ("LOST", "需判断补发")
@@ -826,7 +826,148 @@ def test_submit_notice_reassures_buyer_and_closes_pending_job(client, monkeypatc
         monkeypatch.setattr(get_settings(), "logistics_ticket_submit_notice", False)
         _, _, t5 = setup("5", "EBAY_IT", ["shipping_status"], [], language="it")
         assert followup.send_submit_notice(db, [t5]).startswith("未开启")
+        # 开关关着，但客服在工作台提交时勾了“通知买家”：提交即审核通过，照发；“同事在跟进”不挡（跟进的就是提交的人）
+        assert followup.send_submit_notice(db, [t5], approved_by="tester") == "SENT"
+        _, _, t6 = setup("6", "EBAY_GB", ["shipping_status"], ["HUMAN_FOLLOWING", "TRACKING_DELIVERED_NOT_RECEIVED"],
+                         language="en")
+        assert followup.send_submit_notice(db, [t6]).startswith("未开启")
+        assert followup.send_submit_notice(db, [t6], approved_by="tester") == "SENT"
+        _, _, t7 = setup("7", "EBAY_GB", ["shipping_status"], ["INVOICE_EMAIL_RECEIVED"], language="en")
+        assert followup.send_submit_notice(db, [t7], approved_by="tester").startswith("还有其他需人工的原因")
     for lang, text in followup.NOTICE_TEXT.items():  # 固定话术本身要能通过合规检查
         from app.guards.compliance import ComplianceChecker
 
         assert ComplianceChecker().check(text).result != "BLOCK", lang
+
+
+# ---------------------------------------------------------------- 异常包裹修复（测试输出/异常包裹修复方案_20261109.md）
+def test_not_received_colloquial_phrases():
+    """问题 1（含复测发现的误判）：已签收 + 买家说包裹没收到 → TRACKING_DELIVERED_NOT_RECEIVED；
+    “nicht da”“have the package”单独出现不算；说的是发票、回复、安装说明没收到 / 找不到也不算，
+    但同一句里也说了包裹没收到的仍然算。"""
+    from app.agent.nodes import _tracking_problems
+
+    pkg = {"tracking_number": "RM1", "tracking": {"status": "Delivered"},
+           "assessment": {"stage": "DELIVERED", "needs_human": False}}
+    state = {"observations": [{"tool_name": "get_package_status", "status": "FOUND", "data": pkg}]}
+    for text in ("Ich habe nichts bekommen!", "Paket nicht bekommen!", "Das Paket ist weg, nirgends zu finden.",
+                 "Das Paket ist nicht da, der Briefkasten ist leer.", "I can't find my parcel anywhere.",
+                 "It says delivered but I never received it.", "I haven't received my order.", "Je n'ai rien reçu.",
+                 "Paket nicht bekommen und auch keine Rechnung", "I don't have the package, nobody has it.",
+                 "I don’t have my parcel.", "Non è arrivato niente.", "No me ha llegado nada."):
+        assert _tracking_problems(state, text) == ["TRACKING_DELIVERED_NOT_RECEIVED"], text
+    for text in ("Ich habe die Rechnung nicht bekommen.", "Ich habe noch keine Antwort bekommen.",
+                 "Ich habe die Einbauanleitung nicht gefunden.", "I haven't received the invoice yet.", "I didn't get a reply.",
+                 "Wo ist mein Paket? Wann kommt es?", "Ich bin morgen nicht da, bitte beim Nachbarn abgeben.",
+                 "Thanks, I have the package now.", "Ich habe das Paket bekommen, danke."):
+        assert _tracking_problems(state, text) == [], text
+
+
+def test_classify_negated_delivery_and_failed_delivery():
+    """问题 2：“未妥投 / 未断更”不算已妥投，“投递失败 / 地址无法访问”是地址问题；“多次妥投失败后被退回”仍是退回。"""
+    from types import SimpleNamespace
+
+    from app.logistics.tickets import classify
+
+    cases = [
+        ("申请POD", "官网时有轨迹异常情况 但实际包裹在途未断更未妥投 请留意后续轨迹", "IN_TRANSIT"),  # CJ202605061435
+        ("妥投未收到", "您好，未妥投，轨迹显示包裹因地址无法访问投递失败，建议收件人及时联系当地核实处理", "ADDRESS"),  # CJ202607091808
+        ("退回原因", "您好，多次妥投失败后被退回寄件人", "RETURNED"),  # CJ202607012226
+        ("断更", "您好，签收失败，请联系收件人", "UNKNOWN"),
+    ]
+    for typ, reply, want in cases:
+        assert classify(SimpleNamespace(type_name=typ, reply=reply, attachments=None)) == want, reply
+
+
+class CaseProvider:
+    def structured(self, messages, schema):
+        from app.providers.chat import StructuredResult
+
+        parsed = schema(language="en", reply_text="The carrier confirms delivery, please check with your neighbours.",
+                        reply_zh="承运商确认已妥投。", needs_human=False, reason="")
+        return StructuredResult(parsed, "", None, {"total_tokens": 5})
+
+
+def _case_sync(monkeypatch, tmp_path, find_cases, *, ticket_type="断更",
+               reply="您好，经核实包裹已妥投，麻烦与收件人核实是否已收到包裹", reasons=None, tag="1",
+               order="09-15357-84924"):
+    """跑一遍查件单同步（自动回复、需人工也照样回复都打开，最严格的情况），返回（查件单, 会话）的字段。"""
+    from sqlalchemy import select
+
+    from app.aftersales_mail.service import Located
+    from app.db import session_scope
+    from app.ingestion.service import _append_message, get_or_create_conversation
+    from app.logistics import tickets
+    from app.logistics.assess import CN
+    from app.models import Conversation, LogisticsTicket, ReplyJob
+
+    s = get_settings()
+    for k, v in {"aftersales_files_dir": str(tmp_path / "files"), "aftersales_virus_scan": False,
+                 "logistics_ticket_auto_send": True, "logistics_ticket_send_needs_human": True}.items():
+        monkeypatch.setattr(s, k, v)
+    monkeypatch.setattr(tickets, "_find_cases", find_cases)
+    recent = (datetime.now(CN) - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+    io_code = f"CJ-CASE-{tag}"
+    rows = [{"io_code": io_code, "reference_no": order, "tracking_no": "GN1", "it_type_name": ticket_type,
+             "io_status": 7, "io_status_text": "已回复待完结", "customer_service_reply": reply,
+             "add_time": recent, "reply_time": recent}]
+    with session_scope() as db:
+        conv = get_or_create_conversation(db, "STORE_A", f"C-CASE-{tag}", f"buyer_c{tag}", None, "EBAY_GB", None)
+        _append_message(db, conv, f"MC{tag}", "BUYER", "IN", "Where is my parcel?", None)
+        if reasons:
+            db.add(ReplyJob(store_id="STORE_A", conversation_id=conv.id, anchor_source_message_id=f"MC{tag}",
+                            decision_reasons=reasons))
+        conv_id = conv.id
+    with session_scope() as db:
+        tickets.sync(db, client=FakeTickets(rows), provider=CaseProvider(),
+                     locate=lambda db, ref: Located(ref, "STORE_A", f"buyer_c{tag}", conv_id, "order_api"),
+                     http=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(404))))
+    with session_scope() as db:
+        t = db.scalar(select(LogisticsTicket).where(LogisticsTicket.io_code == io_code))
+        c = db.get(Conversation, conv_id)
+        return ({k: getattr(t, k) for k in ("outcome", "needs_human", "send_status", "send_error")},
+                {k: getattr(c, k) for k in ("aftersales_status", "aftersales_note")})
+
+
+def test_open_ebay_case_hands_ticket_result_to_human(app_env, monkeypatch, tmp_path):
+    """问题 3：有未结 eBay case → OPEN_CASE、需人工审核、不自动发给买家，备注写原本的类别和 case 类型。"""
+    from app.logistics.tickets import REVIEW, handling
+
+    calls = []
+
+    def open_inr(store_id, order_id):
+        calls.append((store_id, order_id))
+        return [{"case_type": "INR", "case_id": "5123", "status": "OPEN", "last_action": "OPEN"}]
+
+    t, c = _case_sync(monkeypatch, tmp_path, open_inr)
+    assert calls == [("STORE_A", "09-15357-84924")]
+    assert (t["outcome"], t["needs_human"], t["send_status"]) == ("OPEN_CASE", True, "NEEDS_HUMAN")
+    assert handling(t["outcome"]) == REVIEW
+    assert "未收到货咨询" in t["send_error"] and "承运商确认已妥投" in t["send_error"]
+    assert c["aftersales_status"] == "PENDING" and "原本判为【承运商确认已妥投" in c["aftersales_note"]
+
+
+def test_closed_case_keeps_original_rule(app_env, monkeypatch, tmp_path):
+    """case 已结 → 按原规则自动回复。"""
+    closed = lambda s, o: [{"case_type": "INR", "case_id": "1", "status": "CLOSED"}]  # noqa: E731
+    t, _ = _case_sync(monkeypatch, tmp_path, closed)
+    assert (t["outcome"], t["needs_human"]) == ("DELIVERED", False) and t["send_status"] in ("QUEUED", "SENT")
+
+
+def test_case_lookup_error_does_not_block(app_env, monkeypatch, tmp_path):
+    """查 case 报错 → 不拦，照常处理。"""
+    def boom(s, o):
+        raise RuntimeError("eBay 503")
+
+    t, _ = _case_sync(monkeypatch, tmp_path, boom)
+    assert (t["outcome"], t["needs_human"]) == ("DELIVERED", False) and t["send_status"] in ("QUEUED", "SENT")
+
+
+def test_pod_request_after_not_received_goes_to_human(app_env, monkeypatch, tmp_path):
+    """问题 4：会话之前识别出过“已签收但没收到”，员工手动建的“申请POD”拿到已妥投结果 → DELIVERED_DISPUTE，转人工。"""
+    t, _ = _case_sync(monkeypatch, tmp_path, lambda s, o: [], ticket_type="申请POD", reply="您好，包裹已妥投，请查收妥投图片。",
+                      reasons=["TRACKING_DELIVERED_NOT_RECEIVED"], tag="a")
+    assert (t["outcome"], t["needs_human"]) == ("DELIVERED_DISPUTE", True)
+    t2, _ = _case_sync(monkeypatch, tmp_path, lambda s, o: [], ticket_type="申请POD", reply="您好，包裹已妥投，请查收妥投图片。", tag="b",
+                      order="09-15357-84925")
+    assert t2["outcome"] == "DELIVERED"  # 没说过没收到：照旧

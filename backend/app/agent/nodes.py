@@ -387,8 +387,10 @@ def build_messages(state: AgentState, deps: AgentDeps) -> list[BaseMessage]:
         "<runtime_context>",
         f"店铺：{deps.store.name}（{run.store_id}）；站点：{run.marketplace_id}；店铺当地时间：{_store_now(deps)}",
         *([f"当前商品：{run.item_id}（{state['snapshot'].get('conversation_title') or '标题未知'}）"] if run.item_id else []),
-        *([f"本店售后邮箱：{deps.settings.aftersales_public_email}（买家需要发视频或大文件时可以提供，请买家在邮件主题写上订单号）"]
+        *([f"本店售后邮箱：{deps.settings.aftersales_public_email}（买家需要发视频或大文件时可以提供，"
+           "请买家在邮件主题写上 eBay 用户名或订单号；视频太大的用 WeTransfer 发到这个邮箱）"]
           if deps.settings.aftersales_public_email else []),
+        *_video_link_context(state, deps),
         *(["物流查件：包裹轨迹多天未更新、轨迹异常、或已签收但买家说没收到时，系统会自动向仓库和承运商发起查件。"
            "这时告诉买家我们已经联系承运商核实包裹情况，有结果会第一时间通知；不给具体时间，不承诺退款、补发或赔偿"]
           if deps.settings.logistics_ticket_auto_submit and deps.settings.goodcang_ready else []),
@@ -418,6 +420,16 @@ def build_messages(state: AgentState, deps: AgentDeps) -> list[BaseMessage]:
 @step
 def compose_reply(state: AgentState, deps: AgentDeps):
     problems = list(state["problems"])
+    from ..customers import blacklist_entry
+
+    if blacklist_entry(deps.db, deps.run.store_id, deps.run.buyer_key):
+        # 黑名单买家：AI 不起草回复，直接交人工
+        return {"skip_generation": True, "problems": [*problems, "BUYER_BLACKLISTED"], "_status": "SKIPPED",
+                "_detail": {"reason": "黑名单买家"}}
+    if state["snapshot"].get("handoff_state") == "HUMAN":
+        # 已人工接管：AI 不再生成回复，新来信直接进待审核由客服处理
+        return {"skip_generation": True, "problems": [*problems, "HUMAN_HANDOFF"], "_status": "SKIPPED",
+                "_detail": {"reason": "已人工接管"}}
     if deps.llm is None:
         problems.append("AGENT_NOT_READY")
     if any(p in problems for p in ("AGENT_NOT_READY", "RAG_NOT_READY", "KNOWLEDGE_OVER_BUDGET", "CONTEXT_OVER_BUDGET")):
@@ -583,10 +595,55 @@ def _open_cases(state: AgentState) -> list[dict]:
     return cases
 
 
-_NOT_RECEIVED = re.compile(
-    r"not (yet )?(been )?(received|arrived|delivered)|never (arrived|received|came)|haven'?t (got|received)|"
-    r"didn'?t (get|receive|arrive)|nicht (angekommen|erhalten|bekommen|zugestellt)|nie angekommen|"
+# 买家说没收到（配合“轨迹已签收”判 TRACKING_DELIVERED_NOT_RECEIVED，进而起草“妥投未收到”查件单、标售后）。
+# 三类说法分开判，避免把“没收到发票 / 找不到安装说明 / 没收到回复”当成没收到包裹：
+# 1. 说法本身就点名了包裹（Paket ist weg、can't find my parcel……）：算；
+# 2. “什么都没收到”（nichts bekommen、rien reçu……）：算，除非这句只提到了别的东西（发票、回复、退款……）而没提包裹；
+# 3. 宽泛说法（nicht bekommen、haven't received、never received……）：前后几个词里要有包裹 / 货物 / 订单类的词，
+#    而且它比“别的东西”离得更近（“Paket nicht bekommen und auch keine Rechnung”算，“die Rechnung nicht bekommen”不算）。
+_NR_PACKAGE = re.compile(
+    r"(paket|päckchen|sendung|lieferung|ware|artikel)\W+(\w+\W+){0,3}(ist )?(nicht da|nicht hier|nirgends|weg)\b|"
+    r"kein (paket|päckchen)|"
+    r"(don['’]?t|do not) have (the|my|any) (package|parcel|item|order)|"
+    r"(can['’]?t|cannot|could not|couldn['’]?t) find (the|my|any) (package|parcel)|"
+    r"no (package|parcel) (arrived|here|was delivered)|(package|parcel) (is )?(not|isn['’]?t) here|"
+    r"(colis|paquet) (n['’]est )?pas l[àa]", re.I)
+_NR_NOTHING = re.compile(
+    r"nichts (bekommen|erhalten|angekommen)|nie angekommen|nothing (arrived|came|was delivered)|"
+    r"rien re[çc]u|non [èe] arrivato niente|no me ha llegado nada", re.I)
+_NR_BROAD = re.compile(
+    r"not (yet )?(been )?(received|arrived|delivered)|never (arrived|received|came|got)|haven['’]?t (yet )?(got|received)|"
+    r"didn['’]?t (get|receive|arrive)|nicht (angekommen|erhalten|bekommen|zugestellt|gefunden|auffindbar)|"
     r"pas (re[çc]u|arriv)|non (ho )?ricevut|no (he )?recibido|no ha llegado", re.I)
+_NR_PARCEL = re.compile(
+    r"\b(paket|päckchen|sendung|lieferung|bestellung|ware|artikel|teil|teile|package|parcel|order|item|items|it|shipment|"
+    r"delivery|goods|colis|paquet|commande|pacco|ordine|paquete|pedido)\b", re.I)
+_NR_OTHER = re.compile(
+    r"rechnung|anleitung|antwort|erstattung|gutschrift|trackingnummer|sendungsnummer|nachricht|"
+    r"invoice|receipt|manual|instructions|reply|answer|refund|tracking ?number|message|e-?mail|"
+    r"facture|remboursement|fattura|rimborso|factura|reembolso", re.I)
+# 只用于“要不要先查包裹”（多查一次没坏处），宽松；判“妥投未收到”用 buyer_says_not_received
+_NOT_RECEIVED = re.compile("|".join(r.pattern for r in (_NR_PACKAGE, _NR_NOTHING, _NR_BROAD)), re.I)
+
+
+def buyer_says_not_received(text: str | None) -> bool:
+    """买家说的是“包裹没收到 / 找不到”（不是发票、回复、退款、说明书没收到）。"""
+    t = text or ""
+    if _NR_PACKAGE.search(t):
+        return True
+    if _NR_NOTHING.search(t) and (not _NR_OTHER.search(t) or _NR_PARCEL.search(t)):
+        return True
+    for m in _NR_BROAD.finditer(t):
+        lo, hi = max(0, m.start() - 60), min(len(t), m.end() + 60)
+
+        def nearest(rx: re.Pattern) -> int | None:
+            ds = [min(abs(x.end() + lo - m.start()), abs(x.start() + lo - m.end())) for x in rx.finditer(t[lo:hi])]
+            return min(ds) if ds else None
+
+        parcel, other = nearest(_NR_PARCEL), nearest(_NR_OTHER)
+        if parcel is not None and (other is None or parcel <= other):
+            return True
+    return False
 
 
 # 损坏、丢件、退回、空包裹、轨迹未更新/长时间没更新、买家要求补发 → 需判断补发；其余物流问题 → 物流异常/未收到
@@ -679,7 +736,7 @@ def _tracking_problems(state: AgentState, buyer_text: str) -> list[str]:
             elif t.get("status") in TRACK_RISKY_STATUS:
                 out.append("TRACKING_EXCEPTION")
             delivered = t.get("status") == "Delivered" or a.get("stage") == "DELIVERED"  # 含谷仓回传妥投
-            if delivered and _NOT_RECEIVED.search(buyer_text or ""):
+            if delivered and buyer_says_not_received(buyer_text):
                 out.append("TRACKING_DELIVERED_NOT_RECEIVED")
     return list(dict.fromkeys(out))
 
@@ -732,6 +789,10 @@ def validate_output(state: AgentState, deps: AgentDeps):
                                  parsed["action"], parsed["intent"])
         compliance = ComplianceChecker().check(parsed["reply_text"], allowed_tokens=tokens).to_dict()
 
+    suppress = False  # 规则：会话最后一句永远是我们发的——不再因为“同事在跟进”压掉草稿，只标出来请跟进的同事核对后再发
+    if parsed and parsed["action"] == "handoff" and _human_following(deps):
+        problems.append("HUMAN_FOLLOWING")
+
     gate = risk.evaluate(risk.GateInput(
         intents=parsed["intents"] if parsed else [],
         buyer_text="\n".join(snap["buyer_texts"]),
@@ -772,6 +833,7 @@ def validate_output(state: AgentState, deps: AgentDeps):
         "rule_version": gate.rule_version,
         "invoice_email": invoice_email,
         "invoice_auto": invoice_auto,
+        "suppress_draft": suppress,
         "invoice_vat": inv_mode == "VAT",
     }
     return {"route": "persist", "result": result, "problems": problems,
@@ -790,7 +852,7 @@ def persist_candidate(state: AgentState, deps: AgentDeps):
 
     res = state["result"]
     existing = db.scalar(select(Draft).where(Draft.job_id == job.id, Draft.run_generation == run.run_generation))
-    if res["has_draft"] and existing is None:
+    if res["has_draft"] and existing is None and not res.get("suppress_draft"):
         for d in db.scalars(select(Draft).where(Draft.job_id == job.id, Draft.status == "ACTIVE")):
             d.status = "SUPERSEDED"
         out = res["draft"]
@@ -847,6 +909,16 @@ def persist_candidate(state: AgentState, deps: AgentDeps):
         follow = {"error": type(e).__name__}
     if follow:
         detail["logistics_followup"] = follow
+    try:  # 异常包裹跟进表：物流需要人工的自动登记 / 补写（失败不影响草稿落库）
+        from .. import parcel_auto
+
+        with db.begin_nested():
+            pf = parcel_auto.from_reply(db, db.get(Conversation, job.conversation_id), state, res["reasons"],
+                                        follow if isinstance(follow, dict) else None)
+        if pf:
+            detail["parcel_followups"] = pf
+    except Exception:  # noqa: BLE001
+        log.exception("异常包裹跟进登记失败 job=%s", job.id)
     if res["has_draft"]:  # 会话情况标签：AI 看整段会话给出的阶段和一句话概括，列表里醒目显示
         conv = db.get(Conversation, job.conversation_id)
         stage, label = res["draft"].get("situation_stage"), (res["draft"].get("situation_zh") or "").strip()
@@ -860,6 +932,15 @@ def persist_candidate(state: AgentState, deps: AgentDeps):
                 detail["auto_tags"] = tagged
         except Exception:  # noqa: BLE001
             log.exception("自动打标记失败 job=%s", job.id)
+        try:  # 需技术/售后判断的（质量问题、破损错发缺件、安装技术问题、发 VIN 核对适配）：起草飞书售后群工单（资料齐全且开了自动发送的直接发群）
+            from ..feishu import cases as feishu_cases
+
+            with db.begin_nested():
+                case = feishu_cases.suggest(db, db.get(Conversation, job.conversation_id), state, res["draft"])
+            if case is not None:
+                detail["aftersales_case"] = {"id": case.id, "status": case.status, "category": case.category}
+        except Exception:  # noqa: BLE001
+            log.exception("起草售后群工单失败 job=%s", job.id)
     handled = _apply_logistics_auto(db, job, run.run_generation, res, follow)
     if handled:
         detail["logistics_auto_handled"] = sorted(handled)
@@ -905,6 +986,33 @@ def _apply_logistics_auto(db, job: ReplyJob, generation: int, res: dict, follow:
         if draft is not None:
             draft.decision = "AUTO_ELIGIBLE"
     return handled
+
+
+def _human_following(deps: AgentDeps) -> bool:
+    """上一条店铺回复是不是同事人工发的、且在 HUMAN_FOLLOWUP_HOURS 内（工作台人工发送，或直接在 eBay 后台回复）。
+    AI 自动回复、已收到回执、查件结果、发货通知等系统消息不算。"""
+    from datetime import timedelta
+
+    from ..models import OutboundMessage, SendIntent
+    from ..sending.service import SIMULATED_PREFIX, is_ack
+
+    hours = deps.settings.human_followup_hours
+    if hours <= 0:
+        return False
+    db = deps.db
+    last = db.scalar(select(Message).where(Message.conversation_id == deps.run.conversation_id,
+                                           Message.sender_role == "SELLER", Message.auto_kind.is_(None))
+                     .order_by(Message.conversation_seq.desc()).limit(1))
+    if last is None or is_ack(last.ebay_message_id) or last.sent_at < utcnow() - timedelta(hours=hours):
+        return False
+    ob = db.scalar(select(OutboundMessage).where(OutboundMessage.platform_message_id == last.ebay_message_id).limit(1))
+    if ob is not None:
+        return ob.source == "manual"
+    intent = db.scalar(select(SendIntent).where(SendIntent.platform_message_id == last.ebay_message_id).limit(1))
+    if intent is not None:
+        return intent.actor != AUTO_ACTOR
+    # 不是本系统发的：同事直接在 eBay 后台回复的；本地模拟消息（查件、发货通知等）不算
+    return not last.ebay_message_id.startswith(SIMULATED_PREFIX)
 
 
 def _order_candidates(state: AgentState) -> list[str]:
@@ -971,6 +1079,33 @@ def _invoice_mode(state: AgentState, deps: AgentDeps, intents: list[str]) -> str
     if suggest_type([*buyer, *history_buyer]) == "VAT":
         return "VAT"
     return "AUTO_SEND" if deps.settings.invoice_auto_send else None
+
+
+def _video_link_context(state: AgentState, deps: AgentDeps) -> list[str]:
+    """买家这次在 eBay 消息里直接发来了视频 / 网盘链接：对得上订单的告诉模型“已收到、已转技术”；
+    没写订单号、也对不上是哪笔订单的，回复里请买家补订单号（系统按订单号把视频转到售后群）。"""
+    from ..aftersales_mail.message_links import ORDER_RE, links_in
+    from ..models import AftersalesCase
+
+    text = "\n".join(state["snapshot"]["buyer_texts"])
+    wt, other = links_in(text)
+    if not (wt or other):
+        return []
+    kind = "WeTransfer 视频链接" if wt else "网盘链接"
+    m = ORDER_RE.search(text)
+    orders = _order_candidates(state)
+    order = m.group(0) if m else (orders[0] if len(orders) == 1 else None)
+    conv_id = getattr(getattr(deps, "run", None), "conversation_id", None)
+    if order is None and conv_id is not None and getattr(deps, "db", None) is not None:
+        order = deps.db.scalar(select(AftersalesCase.order_id).where(AftersalesCase.conversation_id == conv_id,
+                                                                     AftersalesCase.order_id.is_not(None))
+                               .order_by(AftersalesCase.id.desc()).limit(1))
+    if order:
+        return [f"买家这次发来了{kind}（对应订单 {order}）：系统会自动下载并转给技术同事。回复确认已收到视频，"
+                "已转技术同事查看，会尽快回复；不用再要订单号"]
+    pick = f"（买家有 {len(orders)} 笔订单：{'、'.join(orders[:5])}，可以列出来让买家选）" if orders else ""
+    return [f"买家这次发来了{kind}，但没写订单号，系统对不上是哪笔订单{pick}。回复确认已收到视频，并请买家回复这个视频对应的"
+            " eBay 订单号（例如“我的订单号是：12-34567-89012”），收到后马上转给技术同事"]
 
 
 def _remembered_invoice_email(state: AgentState) -> str | None:

@@ -4,7 +4,9 @@
 - 直接连主程序同一个数据库（读根目录 .env 的 DATABASE_URL 等），复用主程序的接入代码写入买家消息，
   所以消息去重、合并窗口、回复任务与真实来信完全一样；主程序的 Worker 运行时会自动认领并生成回复。
 - 主程序没在运行时，消息先排队（任务状态“排队中”），主程序启动后自动处理。
-- 只在 .env 为 EBAY_CHANNEL=mock 时允许发送：此时店铺回复只写本地数据库，绝不会发到 eBay。
+- 模拟模式（.env 为 EBAY_CHANNEL=mock）：所有店铺都能发，店铺回复只写本地数据库，绝不会发到 eBay。
+- 正式模式（EBAY_CHANNEL=ebay）：只能给非对接店铺发（对接店铺 EBAY_LIVE_STORES 锁住）。测试会话不是从 eBay 拉来的，
+  店铺回复同样只记本地（真实发送只给“对接店铺 + 从 eBay 拉来的会话”），不会发到 eBay。
 - 测试用户（买家身份）和会话记录保存在本目录 data/test_users.json；删用户只删本地记录，不删数据库里的会话。
 - 商品链接粘贴 eBay 刊登地址即可（如 https://www.ebay.de/itm/123456789012），发送前会实时核对是不是所选店铺的刊登。
 - 本程序默认端口 8100，被占用时顺延。可选反向开关：--no-browser（不自动打开浏览器）
@@ -126,9 +128,20 @@ def lookup_listing(store_id: str, item_id: str) -> dict | None:
         raise HTTPException(502, f"查询刊登失败：{e}") from None
 
 
-def require_mock() -> None:
-    if get_settings().ebay_channel != "mock":
-        raise HTTPException(403, "根目录 .env 不是 EBAY_CHANNEL=mock：为免测试回复发到真实 eBay，已禁止发送")
+def _live(store: Store | None) -> bool:
+    from app.sending.channel import is_live_store
+
+    return get_settings().ebay_channel != "mock" and is_live_store(store)
+
+
+def require_sendable(store_id: str | None) -> None:
+    """正式模式下对接 eBay 的店铺不能在测试系统发消息（免得和真实买家消息混在一起）；其余店铺照常测试。"""
+    if not store_id or get_settings().ebay_channel == "mock":
+        return
+    with session_scope() as db:
+        store = db.get(Store, store_id)
+        if _live(store):
+            raise HTTPException(403, f"{store.name} 是对接 eBay 的店铺，正式模式下不能在测试系统发消息，请选其他店铺")
 
 
 app = FastAPI(title="客户测试消息系统")
@@ -143,7 +156,7 @@ def index():
 def meta():
     s = get_settings()
     out = {"database": s.database_display, "db_ok": False, "channel": s.ebay_channel,
-           "send_enabled": s.ebay_channel == "mock", "error": None}
+           "send_enabled": True, "notice": None, "error": None}
     try:
         with session_scope() as db:
             db.execute(text("SELECT 1"))
@@ -151,8 +164,11 @@ def meta():
     except Exception as e:
         out["error"] = f"连接数据库失败：{str(getattr(e, 'orig', e)).strip().splitlines()[0]}"
         return out
-    if not out["send_enabled"]:
-        out["error"] = f".env 是 EBAY_CHANNEL={s.ebay_channel}，为免回复发到真实 eBay，已禁止发送"
+    if s.ebay_channel != "mock":
+        with session_scope() as db:
+            live = sorted(x.name for x in db.scalars(select(Store)) if _live(x))
+        out["notice"] = ("正式模式：只能给非对接店铺发测试消息，店铺回复只记本地、不会发到 eBay"
+                         + (f"（对接店铺 {'、'.join(live)} 不能测）" if live else ""))
     return out
 
 
@@ -161,7 +177,7 @@ def stores():
     with session_scope() as db:
         rows = sorted(db.scalars(select(Store)), key=lambda s: (s.ebay_user_id is None, s.name.lower()))
         return [{"id": s.id, "name": s.name, "default_marketplace_id": s.default_marketplace_id,
-                 "is_ebay": bool(s.ebay_user_id), "auto_send_enabled": s.auto_send_enabled} for s in rows]
+                 "is_ebay": bool(s.ebay_user_id), "auto_send_enabled": s.auto_send_enabled, "is_live": _live(s)} for s in rows]
 
 
 # ------------------------------------------------------------------ 测试用户
@@ -265,12 +281,12 @@ def decode_image(img: ImageBody) -> bytes:
 
 @app.post("/api/send")
 def send(body: SendBody):
-    require_mock()
     data = local.load()
     user = next((u for u in data["users"] if u["id"] == body.user_id), None)
     if user is None:
         raise HTTPException(404, "测试用户不存在")
     session = next((s for s in data["sessions"] if s["id"] == body.session_id), None) if body.session_id else None
+    require_sendable(session["store_id"] if session else body.store_id)
     images = [(img.name, decode_image(img)) for img in body.images]
     listing = None
     if session:

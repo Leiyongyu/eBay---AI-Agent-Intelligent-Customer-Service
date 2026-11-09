@@ -125,7 +125,7 @@ def meta():
         "review_reason_codes": REVIEW_REASON_CODES,
         # 下拉框用的站点：店铺开通的站点 + 演示店铺用到的站点
         "marketplaces": sorted(set(get_settings().ebay_marketplace_set) | {"EBAY_US", "EBAY_GB"}),
-        "test_delete_enabled": get_settings().test_delete_enabled,  # 测试期的“删除会话”按钮
+        "send_delay_seconds": get_settings().send_delay_seconds,  # 发出前可撤回的时长
         "aftersales": {"types": Aftersales.TYPES, "status_labels": Aftersales.STATUS_LABELS,
                        "intent_hint": Aftersales.INTENT_HINT},
         "roles": Role.LABELS,

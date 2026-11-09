@@ -27,12 +27,12 @@ from .track17 import ALREADY_REGISTERED, Track17Client, Track17Error, carrier_co
 log = logging.getLogger(__name__)
 NOT_YET = (None, "NotFound")  # 刚注册还没结果：只缓存 5 分钟
 LIMIT_NOTE = "暂不查轨迹"
-_quota: dict = {"remain": None, "at": 0.0}
+_quota: dict = {"remain": None, "at": None}  # at=None：还没查过（开机不到一小时 monotonic 也小于 3600，不能用 0 表示）
 
 
 def _quota_remain(client: Track17Client) -> int | None:
     """17TRACK 剩余额度（每小时查一次，查额度不扣费）；查不到返回 None（不拦）。"""
-    if time.monotonic() - _quota["at"] > 3600:
+    if _quota["at"] is None or time.monotonic() - _quota["at"] > 3600:
         try:
             _quota["remain"] = int((client.quota() or {}).get("quota_remain"))
         except Exception:  # noqa: BLE001  查不到额度就不拦

@@ -15,6 +15,8 @@ const typeId = ref<number | null>(null)
 const desc = ref('')
 const busy = ref(false)
 const typeError = ref('')
+// 提交时同时给买家发查件安抚消息（已向承运商发起查询，有结果马上通知）；点提交即审核通过
+const notifyBuyer = ref(true)
 
 watch(
   () => props.ticket,
@@ -24,6 +26,7 @@ watch(
     desc.value = t.io_desc || ''
     types.value = []
     typeError.value = ''
+    notifyBuyer.value = true
     try {
       types.value = await get<{ value: number; name: string }[]>(`/internal/logistics-tickets/${t.id}/types`)
     } catch (e) {
@@ -62,9 +65,17 @@ async function run(kind: 'save' | 'submit' | 'discard') {
       kind === 'save'
         ? await api<LogisticsTicketItem>('PATCH', `/internal/logistics-tickets/${t.id}`, body.value)
         : kind === 'submit'
-          ? await post<LogisticsTicketItem>(`/internal/logistics-tickets/${t.id}/submit`, body.value)
+          ? await post<LogisticsTicketItem & { notice?: string }>(`/internal/logistics-tickets/${t.id}/submit`, {
+              ...body.value,
+              notify_buyer: notifyBuyer.value,
+            })
           : await post<LogisticsTicketItem>(`/internal/logistics-tickets/${t.id}/discard`, {})
-    ElMessage.success(kind === 'save' ? '已保存' : kind === 'submit' ? `已提交，谷仓查件单号 ${r.io_code}` : '已废弃')
+    if (kind === 'submit') {
+      const notice = (r as { notice?: string }).notice
+      if (notice === 'SENT') ElMessage.success(`已提交，谷仓查件单号 ${r.io_code}；已给买家发查件安抚消息`)
+      else if (notifyBuyer.value) ElMessage.warning(`已提交，谷仓查件单号 ${r.io_code}；没给买家发消息：${notice || '未知原因'}`)
+      else ElMessage.success(`已提交，谷仓查件单号 ${r.io_code}（未通知买家）`)
+    } else ElMessage.success(kind === 'save' ? '已保存' : '已废弃')
     emit('changed', r)
     if (kind !== 'save') emit('close')
   } catch (e) {
@@ -96,6 +107,13 @@ async function run(kind: 'save' | 'submit' | 'discard') {
         <el-form-item label="查件需求">
           <el-input v-model="desc" type="textarea" :rows="5" maxlength="300" show-word-limit />
           <div class="muted">写给谷仓客服看的（中文），5–300 字</div>
+        </el-form-item>
+        <el-form-item label="通知买家">
+          <el-checkbox v-model="notifyBuyer">提交后给买家发查件安抚消息</el-checkbox>
+          <div class="muted">
+            按买家语言发：“已把您的问题转给物流同事，已就包裹向承运商发起查询，一收到回复马上通知您。”点提交即视为审核通过；
+            谷仓回复后，查件结果在“查件单”页审核后发给买家
+          </div>
         </el-form-item>
       </el-form>
     </template>

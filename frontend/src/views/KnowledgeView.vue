@@ -3,6 +3,8 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ApiError, get, isAdmin, post, session } from '../api'
 import { errorText, fmtTime } from '../format'
+import DocLinks, { type DocRef } from '../components/DocLinks.vue'
+import KbDocsPanel from '../components/KbDocsPanel.vue'
 
 interface Row {
   chunk_id: string
@@ -19,6 +21,8 @@ interface Row {
   effective_at: string
   expires_at: string | null
   review_state: string
+  scenes: string[]
+  docs?: DocRef[] // 引用的参考文档
   applicable: boolean
   excluded_reason: string | null
   tokens: number
@@ -32,14 +36,17 @@ interface Preview {
   ok: boolean
   errors: Issue[]
   warnings: Issue[]
-  rows: { row: number; clause_id: string; title: string; sites: string[]; audience: string; topic: string; priority: number; effective_at: string; expires_at: string | null; enabled: boolean; chars: number }[]
-  counts: { rows: number; public: number; internal: number; disabled: number }
+  rows: { row: number; clause_id: string; title: string; doc_refs?: string[]; sites: string[]; audience: string; topic: string; priority: number; effective_at: string; expires_at: string | null; enabled: boolean; chars: number }[]
+  counts: { rows: number; public: number; internal: number; disabled: number; stores?: number; all_store_rows?: number }
   site_tokens: Record<string, number>
   budget_tokens: number
   diff: { added: string[]; removed: string[]; changed: string[]; unchanged: number }
   current_import: { id: number; file_name: string; uploaded_at: string } | null
   file_sha256: string
   sites: string[]
+  // 上传到全部店铺时：各店铺的变化、文件里没有条款而不动的店铺数
+  stores?: { store_id: string; name: string; rows: number; added: number; changed: number; removed: number; unchanged: number }[]
+  untouched_stores?: number
 }
 interface IndexStatus {
   knowledge_mode: string
@@ -87,6 +94,13 @@ const IMPORT_LABELS: Record<string, [string, 'success' | 'info' | 'warning']> = 
 const BACKEND_LABELS: Record<string, string> = { pgvector: 'PostgreSQL + pgvector', sqlite: 'SQLite（仅开发测试）', unavailable: '不可用' }
 
 const stores = ref<{ id: string; name: string }[]>([])
+const pageTab = ref<'clauses' | 'docs'>('clauses')
+// 上传预览里引用了参考文档的条款（同一编号多行只列一次）
+const previewDocRefs = computed(() => {
+  const seen = new Set<string>()
+  return (preview.value?.rows || []).filter((r) => r.doc_refs?.length && !seen.has(r.clause_id) && seen.add(r.clause_id))
+    .map((r) => ({ clause_id: r.clause_id, refs: r.doc_refs as string[] }))
+})
 const filter = reactive({ store_id: '', marketplace_id: '', on: '', only: 'all' })
 const data = ref<{ date: string; items: Row[]; applicable_count: number; applicable_tokens: number; budget_tokens: number } | null>(null)
 const keyword = ref('')
@@ -100,7 +114,12 @@ const searching = ref(false)
 const searchResult = ref<{ query_tokens: string[]; candidates: number; tokens: number; hits: Hit[] } | null>(null)
 const searchError = ref<string[]>([])
 
-// 上传
+// 上传：全部店铺（按“适用店铺”列分给各店铺）或当前店铺
+const uploadScope = ref<'all' | 'store'>('all')
+const uploadSid = computed(() => (uploadScope.value === 'all' ? '*' : filter.store_id))
+const uploadTarget = computed(() => (uploadScope.value === 'all' ? '全部店铺' : `【${storeName.value}】`))
+const changedStores = computed(() => (preview.value?.stores || []).filter((x) => x.added || x.changed || x.removed))
+const showStores = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const file = ref<{ name: string; dataUrl: string } | null>(null)
 const preview = ref<Preview | null>(null)
@@ -164,6 +183,60 @@ const rows = computed(() =>
 )
 const usage = computed(() => (data.value ? Math.min(100, Math.round((data.value.applicable_tokens / data.value.budget_tokens) * 100)) : 0))
 const templateUrl = computed(() => `/internal/knowledge/template?store_id=${encodeURIComponent(filter.store_id)}`)
+const exportUrl = (sid: string) => `/internal/knowledge/export?store_id=${encodeURIComponent(sid)}`
+
+// ---- 清理（管理员）：只删历史版本 / 清空全部知识；本店铺或全部店铺 ----
+interface CleanStats {
+  stores: number
+  current_clauses: number
+  current_rows: number
+  history_rows: number
+  active_imports: number
+  history_imports: number
+}
+const clean = reactive({ open: false, scope: 'store' as 'store' | 'all', mode: 'history' as 'history' | 'all', confirm: '',
+                         loading: false, running: false, stats: null as CleanStats | null })
+const cleanSid = computed(() => (clean.scope === 'all' ? '*' : filter.store_id))
+const cleanTarget = computed(() => (clean.scope === 'all' ? '全部店铺' : `【${storeName.value}】`))
+async function loadCleanStats() {
+  clean.loading = true
+  clean.stats = null
+  try {
+    clean.stats = await get<CleanStats>(`/internal/knowledge/cleanup/preview?store_id=${encodeURIComponent(cleanSid.value)}`)
+  } catch (e) {
+    ElMessage.error(errorText(e))
+  } finally {
+    clean.loading = false
+  }
+}
+function openClean() {
+  Object.assign(clean, { open: true, scope: 'store', mode: 'history', confirm: '' })
+  loadCleanStats()
+}
+const cleanReady = computed(() => !!clean.stats && (clean.mode === 'history'
+  ? clean.stats.history_rows + clean.stats.history_imports > 0
+  : clean.confirm.trim() === '清空' && clean.stats.current_rows + clean.stats.history_rows + clean.stats.active_imports + clean.stats.history_imports > 0))
+async function runClean() {
+  const what = clean.mode === 'history' ? `${cleanTarget.value}的历史版本` : `${cleanTarget.value}的全部知识`
+  try {
+    await ElMessageBox.confirm(`确定删除${what}？删除后不能恢复。`, '确认清理', {
+      type: 'warning', confirmButtonText: '删除', confirmButtonClass: 'el-button--danger' })
+  } catch {
+    return
+  }
+  clean.running = true
+  try {
+    const r = await post<{ deleted_rows: number; deleted_imports: number; deleted_files: number; deleted_vectors: number }>(
+      '/internal/knowledge/cleanup', { store_id: cleanSid.value, mode: clean.mode, confirm: clean.confirm })
+    ElMessage.success(`已删除：条款记录 ${r.deleted_rows} 条、上传版本 ${r.deleted_imports} 个、原文件 ${r.deleted_files} 个、不再使用的检索向量 ${r.deleted_vectors} 个`)
+    clean.open = false
+    await load()
+  } catch (e) {
+    ElMessage.error(errorText(e))
+  } finally {
+    clean.running = false
+  }
+}
 const storeName = computed(() => stores.value.find((s) => s.id === filter.store_id)?.name || filter.store_id)
 
 function pickFile() {
@@ -192,7 +265,7 @@ async function runPreview() {
   preview.value = null
   try {
     preview.value = await post<Preview>('/internal/knowledge/upload/preview', {
-      store_id: filter.store_id,
+      store_id: uploadSid.value,
       file_name: file.value.name,
       data_base64: file.value.dataUrl,
     })
@@ -210,9 +283,14 @@ async function commit() {
     return
   }
   const d = preview.value.diff
+  const msg = preview.value.stores
+    ? `将用“${file.value.name}”更新 ${preview.value.stores.length} 个店铺的知识（每个店铺按“适用店铺”取自己的条款，各自生成一个新版本）：` +
+      `${changedStores.value.length} 个店铺有变化，${preview.value.stores.length - changedStores.value.length} 个不变` +
+      `${preview.value.untouched_stores ? `；${preview.value.untouched_stores} 个店铺文件里没有它的条款，保持不动` : ''}。旧版本会保留，可在各店铺“历史版本”回滚。`
+    : `将用“${file.value.name}”整体替换【${storeName.value}】的知识：新增 ${d.added.length}、修改 ${d.changed.length}、删除 ${d.removed.length}、不变 ${d.unchanged}。旧版本会保留，可在“历史版本”回滚。`
   try {
     await ElMessageBox.confirm(
-      `将用“${file.value.name}”整体替换【${storeName.value}】的知识：新增 ${d.added.length}、修改 ${d.changed.length}、删除 ${d.removed.length}、不变 ${d.unchanged}。旧版本会保留，可在“历史版本”回滚。`,
+      msg,
       '确认替换',
       { type: 'warning', confirmButtonText: '确认替换' },
     )
@@ -222,14 +300,14 @@ async function commit() {
   committing.value = true
   try {
     const r = await post('/internal/knowledge/upload/commit', {
-      store_id: filter.store_id,
+      store_id: uploadSid.value,
       file_name: file.value.name,
       data_base64: file.value.dataUrl,
       expected_sha256: preview.value.file_sha256,
     })
     const idx = r.index || {}
     const note = idx.embedded !== undefined ? `，向量新生成 ${idx.embedded} 条、复用 ${idx.reused} 条` : idx.skipped || idx.error ? `（检索索引未生成：${idx.skipped || idx.error}）` : ''
-    ElMessage.success(`已生效：版本 #${r.import_id}${note}`)
+    ElMessage.success(r.stores > 1 ? `已生效：${r.stores} 个店铺各生成一个新版本${note}` : `已生效：版本 #${r.import_id}${note}`)
     file.value = null
     preview.value = null
     await load()
@@ -272,6 +350,13 @@ onMounted(async () => {
 
 <template>
   <div class="kb">
+    <!-- 页签：知识条款（Excel 上传维护）/ 参考文档（文件库，条款按编号引用） -->
+    <div class="page-tabs">
+      <button :class="{ on: pageTab === 'clauses' }" @click="pageTab = 'clauses'">知识条款</button>
+      <button :class="{ on: pageTab === 'docs' }" @click="pageTab = 'docs'">参考文档</button>
+    </div>
+    <KbDocsPanel v-if="pageTab === 'docs'" :stores="stores" />
+    <template v-else>
     <div class="row filters">
       <span class="muted">店铺</span>
       <el-select v-model="filter.store_id" style="width: 200px" @change="(file = null), (preview = null), load()">
@@ -287,23 +372,50 @@ onMounted(async () => {
         <div class="panel-body">
           <div class="row">
             <a :href="templateUrl"><el-button>下载模板</el-button></a>
+            <a :href="exportUrl('*')" title="全部店铺导出成一个 Excel：相同的条款合并成一行，“适用店铺”列写它在哪些店铺"><el-button>导出知识库（Excel）</el-button></a>
+            <el-button type="danger" plain @click="openClean">清理知识库</el-button>
+            <el-radio-group v-model="uploadScope" size="small" @change="(file = null), (preview = null)">
+              <el-radio-button value="all">上传到全部店铺</el-radio-button>
+              <el-radio-button value="store">只上传到【{{ storeName }}】</el-radio-button>
+            </el-radio-group>
             <el-button type="primary" :loading="previewing" @click="pickFile">选择 .xlsx 文件</el-button>
             <input ref="fileInput" type="file" accept=".xlsx" style="display: none" @change="onFile" />
             <span v-if="file" class="mono">{{ file.name }}</span>
           </div>
-          <p class="muted">上传后先校验预览，不会立即生效；确认后整体替换【{{ storeName }}】当前全部知识，旧版本保留可回滚。</p>
+          <p class="muted">上传后先校验预览，不会立即生效；确认后整体替换{{ uploadTarget }}当前的知识，旧版本保留可回滚。
+            <template v-if="uploadScope === 'all'">全部店铺：每个店铺按 Excel 的“适用店铺”列（全部 / 店铺名）取自己的条款，各自生成一个新版本；文件里一条都不适用的店铺不动。</template>
+            <template v-else>只取“适用店铺”为全部或包含这个店铺的行。</template>
+            导出的 Excel 和模板格式一样，删掉不要的行、改好后可以直接再上传。</p>
 
           <template v-if="preview">
             <div class="row stats">
               <el-tag :type="preview.ok ? 'success' : 'danger'">{{ preview.ok ? '校验通过' : `有 ${preview.errors.length} 处错误` }}</el-tag>
               <span>共 {{ preview.counts.rows }} 条：可对买家说 {{ preview.counts.public }}，仅内部 {{ preview.counts.internal }}，未启用 {{ preview.counts.disabled }}</span>
             </div>
+            <div v-if="previewDocRefs.length" class="row stats">
+              <span class="muted">引用参考文档：</span>
+              <span v-for="x in previewDocRefs" :key="x.clause_id" class="mono">{{ x.clause_id }} → {{ x.refs.join('、') }}</span>
+            </div>
+            <template v-if="preview.stores">
+              <div class="row stats">
+                <span>涉及 {{ preview.stores.length }} 个店铺（所有店铺通用 {{ preview.counts.all_store_rows }} 条）：
+                  <b>{{ changedStores.length }}</b> 个有变化，{{ preview.stores.length - changedStores.length }} 个不变<template v-if="preview.untouched_stores">，{{ preview.untouched_stores }} 个文件里没有它的条款、不动</template></span>
+                <el-button v-if="preview.stores.length" link type="primary" size="small" @click="showStores = !showStores">{{ showStores ? '收起' : '各店铺明细' }}</el-button>
+              </div>
+              <el-table v-if="showStores" :data="preview.stores" size="small" max-height="260" class="store-diff">
+                <el-table-column prop="name" label="店铺" min-width="150" />
+                <el-table-column prop="rows" label="条款" width="60" />
+                <el-table-column prop="added" label="新增" width="60" />
+                <el-table-column prop="changed" label="修改" width="60" />
+                <el-table-column prop="removed" label="删除" width="60" />
+              </el-table>
+            </template>
             <div class="row stats">
-              <span class="muted">与当前版本相比：</span>
+              <span class="muted">{{ preview.stores ? '与各店铺当前版本相比（编号合计）：' : '与当前版本相比：' }}</span>
               <el-tag type="success" effect="plain">新增 {{ preview.diff.added.length }}</el-tag>
               <el-tag type="warning" effect="plain">修改 {{ preview.diff.changed.length }}</el-tag>
               <el-tag type="danger" effect="plain">删除 {{ preview.diff.removed.length }}</el-tag>
-              <el-tag type="info" effect="plain">不变 {{ preview.diff.unchanged }}</el-tag>
+              <el-tag v-if="!preview.stores" type="info" effect="plain">不变 {{ preview.diff.unchanged }}</el-tag>
             </div>
             <div class="section-title">各站点可对买家说的条款长度（预算 {{ preview.budget_tokens }} token）</div>
             <div v-for="(n, site) in preview.site_tokens" :key="site" class="row site">
@@ -452,6 +564,18 @@ onMounted(async () => {
           <el-table-column label="版本" width="70">
             <template #default="{ row }">{{ row.import_id ? `#${row.import_id}` : '—' }}</template>
           </el-table-column>
+          <el-table-column label="内部参考场景" width="150">
+            <template #default="{ row }">
+              <span v-if="row.audience === 'INTERNAL_SOP' && row.scenes?.length">{{ row.scenes.join('、') }}</span>
+              <span v-else class="muted">—</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="参考文档" min-width="160">
+            <template #default="{ row }">
+              <DocLinks v-if="row.docs?.length" :docs="row.docs" />
+              <span v-else class="muted">—</span>
+            </template>
+          </el-table-column>
           <el-table-column label="给 AI 用" width="200">
             <template #default="{ row }">
               <el-tag v-if="row.applicable" type="success" size="small">会用</el-tag>
@@ -461,6 +585,41 @@ onMounted(async () => {
         </el-table>
       </div>
     </div>
+    </template>
+      <!-- 清理知识库（管理员） -->
+    <el-dialog v-model="clean.open" title="清理知识库" width="520px">
+      <div class="clean-row">
+        <span class="muted">范围</span>
+        <el-radio-group v-model="clean.scope" @change="loadCleanStats">
+          <el-radio-button value="store">【{{ storeName }}】</el-radio-button>
+          <el-radio-button value="all">全部店铺</el-radio-button>
+        </el-radio-group>
+      </div>
+      <div v-loading="clean.loading" class="clean-stats">
+        <template v-if="clean.stats">
+          <div>当前生效：<b>{{ clean.stats.current_clauses }}</b> 条知识（{{ clean.stats.active_imports }} 个店铺版本）</div>
+          <div>历史版本：<b>{{ clean.stats.history_imports }}</b> 个，被替换下线的条款记录 <b>{{ clean.stats.history_rows }}</b> 条</div>
+        </template>
+      </div>
+      <el-radio-group v-model="clean.mode" class="clean-modes">
+        <el-radio value="history">
+          <b>只清理历史版本</b>
+          <div class="muted">删掉被替换下线的旧条款、旧的上传记录和原文件；当前生效的知识不动，AI 回复不受影响。删掉的版本不能再回滚。</div>
+        </el-radio>
+        <el-radio value="all">
+          <b class="danger-text">清空全部知识</b>
+          <div class="muted">当前和历史全部删除。之后 AI 回复没有任何知识依据（需要知识的消息会转人工），直到重新上传。建议先导出备份。</div>
+        </el-radio>
+      </el-radio-group>
+      <el-input v-if="clean.mode === 'all'" v-model="clean.confirm" placeholder="请输入“清空”两个字确认" class="clean-confirm" />
+      <template #footer>
+        <a :href="exportUrl('*')" class="backup"><el-button>先导出备份</el-button></a>
+        <el-button @click="clean.open = false">取消</el-button>
+        <el-button type="danger" :disabled="!cleanReady" :loading="clean.running" @click="runClean">
+          {{ clean.mode === 'history' ? '清理历史版本' : '清空' }}
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -532,5 +691,72 @@ b.err {
   .top {
     grid-template-columns: 1fr;
   }
+}
+.dd-link {
+  color: inherit;
+  text-decoration: none;
+}
+.clean-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.clean-stats {
+  min-height: 48px;
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-radius: 4px;
+  background: var(--sunken);
+  line-height: 1.8;
+}
+.clean-modes {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+}
+.clean-modes :deep(.el-radio) {
+  height: auto;
+  align-items: flex-start;
+  white-space: normal;
+  margin-right: 0;
+}
+.clean-modes :deep(.el-radio__label) {
+  line-height: 1.6;
+}
+.danger-text {
+  color: var(--danger);
+}
+.clean-confirm {
+  margin-top: 12px;
+}
+.backup {
+  margin-right: 12px;
+}
+.store-diff {
+  margin: 6px 0 4px;
+}
+.page-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.page-tabs button {
+  height: 38px;
+  padding: 0 16px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  background: none;
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.page-tabs button.on {
+  color: var(--accent);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
 }
 </style>

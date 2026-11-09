@@ -27,6 +27,11 @@ PURPOSE_LABELS = {
 }
 
 
+def translate_model(s: Settings) -> tuple[str | None, str | None]:
+    """翻译用的（通道, 模型名）：LLM_TRANSLATE_MODEL，没配用回复模型。"""
+    return s.llm_provider, s.translate_model_name
+
+
 def chat_model(s: Settings) -> tuple[str | None, str | None]:
     """当前回复模型的（通道, 模型名）。"""
     return s.llm_provider, s.llm_chat_model

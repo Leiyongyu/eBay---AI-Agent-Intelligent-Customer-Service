@@ -88,3 +88,46 @@ def test_evidence_tracking_number_not_flagged_as_phone(checker):
     assert checker.check(text, allowed_tokens={"4155550132"}).result == "PASS"
     # 超过 15 位一定不是电话（E.164 上限），不需要证据也放行
     assert checker.check("Tracking number 9400100000000000010001 shows it is in transit.").result == "PASS"
+
+
+
+def test_wetransfer_allowed_for_aftersales_videos():
+    """售后请买家用 WeTransfer 发视频：wetransfer.com / we.tl 不算站外链接；其他网盘照样拦。"""
+    from app.guards.compliance import ComplianceChecker
+
+    ok = ComplianceChecker().check("Please upload the video at WeTransfer (wetransfer.com, “Get a link”) and send "
+                                   "us the link, e.g. https://we.tl/t-abc123 with your order number.")
+    assert ok.result == "PASS", ok.to_dict()
+    assert ComplianceChecker().check("Please upload it to dropbox.com and send the link").result == "BLOCK"
+
+
+def test_carrier_sites_of_all_marketplaces_pass():
+    """各站点本地承运商官网（dhl.de、dpd.de、gls-pakete.de、myhermes.de、post.at、laposte.fr、poste.it、correos.es 等）
+    不算站外链接；系统自己给出的承运商官网（发货通知、carrier_website）一律能通过合规检查。"""
+    from app.guards.compliance import ComplianceChecker
+    from app.ship_notices import CARRIERS, FALLBACK_URL, carrier_link
+
+    checker = ComplianceChecker()
+    for url in ("https://www.dhl.de/", "https://www.dpd.de/", "https://www.gls-pakete.de/", "https://www.myhermes.de/",
+                "https://www.hermes.de/", "https://www.post.at/", "https://www.laposte.fr/", "https://www.colissimo.fr/",
+                "https://www.poste.it/", "https://www.brt.it/", "https://www.correos.es/", "https://www.seur.com/",
+                "https://www.postnl.nl/", "https://www.yodel.co.uk/"):
+        r = checker.check(f"Sie können die Sendung hier verfolgen: {url}")
+        assert r.result == "PASS", (url, r.to_dict())
+    for _, _, url in CARRIERS:
+        assert checker.check(f"Website: {url}").result == "PASS", url
+    assert checker.check(f"Website: {FALLBACK_URL}").result == "PASS"
+    assert checker.check("Tracking: https://dhl.de.evil-track.com/x").result == "BLOCK"  # 冒充域名照样拦
+    for carrier, site in (("DHL", "EBAY_DE"), ("Deutsche Post", "EBAY_DE"), ("DPD", "EBAY_GB"), ("GLS", "EBAY_DE"),
+                          ("Hermes", "EBAY_DE"), ("Unknown Courier", "EBAY_FR")):
+        assert checker.check(f"Website: {carrier_link(carrier, None, site)[1]}").result == "PASS", carrier
+
+
+def test_track17_site_outside_whitelist_falls_back(monkeypatch):
+    """17TRACK 运输商表里的官网不在白名单：改给 17TRACK 首页，不让发送被合规拦截。"""
+    from app import ship_notices
+
+    monkeypatch.setattr(ship_notices, "_track17_site", lambda name: "https://www.some-local-courier.example/")
+    assert ship_notices.carrier_link("Some Local Courier")[1] == ship_notices.FALLBACK_URL
+    monkeypatch.setattr(ship_notices, "_track17_site", lambda name: "https://www.colisprive.com/")
+    assert ship_notices.carrier_link("Colis Prive")[1] == "https://www.colisprive.com/"

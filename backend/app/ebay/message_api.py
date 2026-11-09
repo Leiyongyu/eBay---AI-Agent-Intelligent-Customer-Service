@@ -3,7 +3,8 @@
 只实现两个 GET：
   GET /commerce/message/v1/conversation                       getConversations（每页最多 50）
   GET /commerce/message/v1/conversation/{conversation_id}     getConversation
-sendMessage / updateConversation 等写接口有意不实现。
+  POST /commerce/message/v1/send_message                      sendMessage（只由发件箱 sending/outbox.py 调用，延迟发出、发出前可撤回）
+updateConversation 等其他写接口有意不实现。
 字段以 https://developer.ebay.com/develop/api/spec/message_api.json（2026-10-24 下载）为准。
 """
 from __future__ import annotations
@@ -100,6 +101,52 @@ class MessageApiClient:
             if not page or not data.get("next") or offset >= int(data.get("total") or 0):
                 break
         return meta, messages
+
+
+class EbaySendUncertain(RuntimeError):
+    """请求可能已经到了 eBay（超时、连接中断、5xx）：不能确定买家有没有收到，不能自动重发。"""
+
+
+def send_message(client: "MessageApiClient", *, text: str, conversation_id: str | None = None,
+                 other_party: str | None = None, item_id: str | None = None, media: list[dict] | None = None) -> dict:
+    """发一条消息：已有会话用 conversationId 回复；没有会话（如发货通知）用 otherPartyUsername 新开，并关联商品。
+    返回 eBay 的 SendMessageResponse（含 messageId、createdDate）。4xx 抛 EbayApiError（明确没发出），
+    超时 / 连接中断 / 5xx 抛 EbaySendUncertain（结果不确定，不重发）。"""
+    if not conversation_id and not other_party:
+        raise EbayApiError("没有 eBay 会话 ID，也没有买家用户名，无法发送")
+    body: dict = {"messageText": text[:2000]}
+    if media:  # 最多 5 个，地址必须 HTTPS（mediaName、mediaType IMAGE/PDF/DOC/TXT、mediaUrl）
+        body["messageMedia"] = [{"mediaName": m["mediaName"], "mediaType": m["mediaType"], "mediaUrl": m["mediaUrl"]}
+                                for m in media[:5]]
+    if conversation_id:
+        body["conversationId"] = conversation_id
+    else:
+        body["otherPartyUsername"] = other_party
+        if item_id:
+            body["reference"] = {"referenceId": item_id, "referenceType": "LISTING"}
+    url = f"{get_settings().ebay_api_base}/commerce/message/v1/send_message"
+    for refreshed in (False, True):
+        client.calls += 1
+        try:
+            resp = client._http().post(url, json=body, headers={
+                "Authorization": f"Bearer {client.tokens.access_token()}",
+                "Content-Type": "application/json", "Accept": "application/json"})
+        except httpx.ConnectError as e:  # 连不上 eBay：请求没有发出去
+            raise EbayApiError(f"连接 eBay 失败：{type(e).__name__}") from None
+        except httpx.HTTPError as e:
+            raise EbaySendUncertain(f"发送请求中断（{type(e).__name__}），不确定是否已发出") from None
+        if resp.status_code in (200, 201):
+            try:
+                return resp.json()
+            except ValueError:
+                return {}
+        if resp.status_code == 401 and not refreshed:
+            client.tokens.invalidate()  # 令牌过期：eBay 已拒绝，刷新后重发一次是安全的
+            continue
+        if resp.status_code >= 500:
+            raise EbaySendUncertain(f"eBay 返回 HTTP {resp.status_code}，不确定是否已发出")
+        raise _api_error(resp)
+    raise EbayApiError("令牌刷新后仍被拒绝")
 
 
 def _api_error(resp: httpx.Response) -> EbayApiError:

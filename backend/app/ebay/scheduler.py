@@ -1,4 +1,5 @@
-"""定时拉取 eBay 消息（第 9.3 节“补偿拉取”，默认每 5 分钟）。凭证不齐或 EBAY_SYNC_ENABLED=false 时不运行。"""
+"""定时拉取 eBay 消息（第 9.3 节“补偿拉取”，默认每 5 分钟）。凭证不齐时不启动；
+EBAY_SYNC_ENABLED、EBAY_SYNC_INTERVAL_SECONDS 每轮都重新读（数据同步页上改了不用重启）。"""
 from __future__ import annotations
 
 import logging
@@ -16,12 +17,13 @@ class EbaySyncScheduler:
         self._now = threading.Event()
         self._thread: threading.Thread | None = None
         self.last_result: dict | None = None
+        self.last_at = None
+        self.running_now = False
 
     def start(self) -> bool:
-        s = get_settings()
         from .stores import ebay_not_ready_reasons
 
-        if not s.ebay_sync_enabled or ebay_not_ready_reasons():
+        if ebay_not_ready_reasons():
             return False
         self._thread = threading.Thread(target=self._loop, name="ebay-sync", daemon=True)
         self._thread.start()
@@ -38,15 +40,34 @@ class EbaySyncScheduler:
     def trigger(self) -> None:
         self._now.set()
 
+    def run_once(self, force: bool = False) -> dict | None:
+        """拉一轮；关着时只有 force（数据同步页“立即运行”）才拉。"""
+        from ..db import utcnow
+
+        if not force and not get_settings().ebay_sync_enabled:
+            return None
+        self.running_now = True
+        try:
+            self.last_result = EbayMessageSync().run()
+            log.info("eBay 同步：%s", _summary(self.last_result))
+        except Exception as e:
+            log.exception("eBay 同步异常")
+            self.last_result = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:300]}"}
+        finally:
+            self.last_at = utcnow()
+            self.running_now = False
+        return self.last_result
+
+    def run_in_background(self) -> bool:
+        if self.running_now:
+            return False
+        threading.Thread(target=self.run_once, kwargs={"force": True}, name="ebay-sync-now", daemon=True).start()
+        return True
+
     def _loop(self) -> None:
-        interval = max(60, get_settings().ebay_sync_interval_seconds)
         while not self._stop.is_set():
-            try:
-                self.last_result = EbayMessageSync().run()
-                log.info("eBay 同步：%s", _summary(self.last_result))
-            except Exception:
-                log.exception("eBay 同步异常")
-            self._now.wait(interval)
+            self.run_once()
+            self._now.wait(max(60, get_settings().ebay_sync_interval_seconds))
             self._now.clear()
 
 

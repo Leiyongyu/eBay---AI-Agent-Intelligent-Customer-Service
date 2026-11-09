@@ -33,7 +33,13 @@ export async function api<T = any>(method: string, path: string, body?: unknown)
   const resp = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
   if (resp.status === 401 && !path.startsWith('/api/auth/login')) setUser(null) // 登录过期：回到登录页
   const text = await resp.text()
-  const data = text ? JSON.parse(text) : null
+  let data: any = null
+  try {
+    data = text ? JSON.parse(text) : null
+  } catch {
+    // 拿到的是网页而不是数据：多半是后端还是旧版本、没有这个接口
+    throw new ApiError(resp.status, `接口 ${path.split('?')[0]} 没有返回数据：后端可能还是旧版本，请重启 main.py`, null)
+  }
   if (!resp.ok) {
     const detail = data?.detail
     const message =

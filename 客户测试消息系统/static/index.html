@@ -218,14 +218,14 @@ async function loadMeta() {
   const el = $('health')
   if (m.db_ok && m.send_enabled) {
     el.className = 'health ok'
-    el.textContent = `独立运行 · 数据库 ${m.database}`
+    el.textContent = m.notice || `独立运行 · 数据库 ${m.database}`
   } else {
     el.className = 'health bad'
     el.textContent = m.error || '数据库不可用'
   }
   if (m.db_ok && !state.stores.length) {
     state.stores = await api('/api/stores').catch(() => [])
-    if (!state.stores.some((s) => s.id === state.draftStore)) state.draftStore = state.stores[0]?.id || ''
+    if (!state.stores.some((s) => s.id === state.draftStore && !s.is_live)) state.draftStore = state.stores.find((s) => !s.is_live)?.id || ''
     renderTopbar()
   }
 }
@@ -322,7 +322,7 @@ function selectSession(id) {
 
 function storeOptions() {
   const group = (label, list) => list.length ? `<optgroup label="${label}">${list.map((s) =>
-    `<option value="${esc(s.id)}" ${s.id === state.draftStore ? 'selected' : ''}>${esc(s.name)}${s.auto_send_enabled ? '' : '（未开自动回复）'}</option>`).join('')}</optgroup>` : ''
+    `<option value="${esc(s.id)}" ${s.id === state.draftStore ? 'selected' : ''} ${s.is_live ? 'disabled' : ''}>${esc(s.name)}${s.is_live ? '（对接 eBay，正式模式下不能测）' : s.auto_send_enabled ? '' : '（未开自动回复）'}</option>`).join('')}</optgroup>` : ''
   return group('真实店铺', state.stores.filter((s) => s.is_ebay)) + group('演示店铺', state.stores.filter((s) => !s.is_ebay))
 }
 

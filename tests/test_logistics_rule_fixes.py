@@ -251,10 +251,10 @@ def test_track17_quota_savings(app_env, monkeypatch):
         t = Track()
         out = service.lookup(db, "STORE_A", "01-1", [], settings=s, goodcang=GC("2026-11-02 12:00:00"), track=t)
         assert t.registered == [] and "省额度" in out["packages"][0]["tracking_note"]  # 已妥投：不注册
-    service._quota.update(remain=None, at=0.0)
+    service._quota.update(remain=None, at=None)
     with session_scope() as db:
         t = Track(remain=5)
         out = service.lookup(db, "STORE_A", "01-2", [], settings=s, goodcang=GC(None), track=t)
         p = out["packages"][0]
         assert t.registered == [] and p["tracking_limited"] and "剩余额度 5" in p["tracking_note"]
-    service._quota.update(remain=None, at=0.0)
+    service._quota.update(remain=None, at=None)

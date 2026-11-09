@@ -116,12 +116,10 @@ class Worker:
             job.lock_version += 1
 
     def dispatch_sends(self) -> int:
-        count = 0
-        with session_scope() as db:
-            for intent in db.scalars(select(SendIntent).where(SendIntent.state == "QUEUED").limit(20)).all():
-                dispatch(db, intent)
-                count += 1
-        return count
+        from .sending.outbox import dispatch_due
+
+        # 发件箱里到点的消息（人工回复、批准的草稿、自动回复、回执、查件、发货通知……）；发送意图不再单独派发
+        return dispatch_due()
 
     def recover_stuck(self) -> None:
         """进程重启：RUNNING 的生成任务从头重跑；SENDING 的意图无法确认是否已发出，转 SEND_UNCERTAIN。"""

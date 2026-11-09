@@ -128,10 +128,14 @@ def scan(rel_path: str) -> tuple[str, str | None]:
     """Windows Defender 扫描单个文件，返回 (结果, 说明)：CLEAN / THREAT / SKIPPED / ERROR。
     只有扫描输出明确报告发现威胁（或文件被实时防护隔离）才算 THREAT 并删文件；
     Defender 服务没运行、扫描失败等一律不删，记 SKIPPED / ERROR 给人看。"""
+    return scan_file(get_settings().aftersales_root / rel_path)
+
+
+def scan_file(path: Path) -> tuple[str, str | None]:
+    """按完整路径扫描（售后附件、参考文档库共用）；结果含义同 scan()。不改系统安全设置。"""
     if not get_settings().aftersales_virus_scan:
         return "SKIPPED", "未开启病毒扫描（AFTERSALES_VIRUS_SCAN=false）"
     exe = _defender()
-    path = get_settings().aftersales_root / rel_path
     if exe is None:
         return "SKIPPED", "本机没有 Windows Defender，未做病毒扫描"
     if not path.exists():

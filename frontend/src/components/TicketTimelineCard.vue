@@ -1,9 +1,32 @@
 <script setup lang="ts">
-// 对话里的查件记录：什么时候向谷仓发起了查件、什么时候收到反馈（以及是否已自动回复买家），按时间插在聊天记录中间
-import { fmtTime } from '../format'
-import type { TicketTimelineItem } from '../types'
+// 对话里的查件记录：什么时候向谷仓发起了查件、什么时候收到反馈（以及是否已自动回复买家），按时间插在聊天记录中间。
+// 本系统起草、还没提交的查件单可以直接在这里审核：改查件类型和需求、保存、提交到谷仓或废弃（不用去查件单页）
+import { ref } from 'vue'
+import { ElMessage } from 'element-plus'
+import { get } from '../api'
+import { errorText, fmtTime } from '../format'
+import type { LogisticsTicketItem, TicketTimelineItem } from '../types'
+import TicketDraftDialog from './TicketDraftDialog.vue'
 
-defineProps<{ item: TicketTimelineItem }>()
+const props = defineProps<{ item: TicketTimelineItem; convId: number }>()
+const emit = defineEmits<{ changed: [] }>()
+const editing = ref<LogisticsTicketItem | null>(null)
+const opening = ref(false)
+
+async function review() {
+  opening.value = true
+  try {
+    const list = await get<LogisticsTicketItem[]>(`/internal/conversations/${props.convId}/logistics-tickets`)
+    const t = list.find((x) => x.id === props.item.ticket_id)
+    if (!t) ElMessage.warning('没找到这张查件单，可能已被废弃')
+    else if (!t.is_local_draft) ElMessage.info('这张查件单已经提交过了')
+    else editing.value = t
+  } catch (e) {
+    ElMessage.error(errorText(e))
+  } finally {
+    opening.value = false
+  }
+}
 </script>
 
 <template>
@@ -20,6 +43,10 @@ defineProps<{ item: TicketTimelineItem }>()
         <div v-if="item.tracking_no" class="small muted">跟踪号 <span class="mono">{{ item.tracking_no }}</span></div>
         <div v-if="item.desc" class="small">{{ item.desc }}</div>
         <div class="small muted">{{ item.by }}{{ item.status ? ` · ${item.status}` : '' }}</div>
+        <div v-if="item.draft" class="actions">
+          <el-button size="small" type="warning" :loading="opening" @click="review">审核 / 修改并提交</el-button>
+          <span class="small muted">提交后才会在谷仓建单、联系承运商</span>
+        </div>
       </template>
       <template v-else>
         <div class="reply">{{ item.reply || '（服务商只回了附件）' }}</div>
@@ -38,6 +65,7 @@ defineProps<{ item: TicketTimelineItem }>()
         </div>
       </template>
     </div>
+    <TicketDraftDialog :ticket="editing" @close="editing = null" @changed="emit('changed')" />
   </div>
 </template>
 
@@ -69,6 +97,12 @@ defineProps<{ item: TicketTimelineItem }>()
 }
 .reply {
   white-space: pre-wrap;
+}
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
 }
 .small {
   font-size: var(--fs-xs, 12px);

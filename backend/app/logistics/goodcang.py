@@ -5,8 +5,10 @@
 查询按接口文档：POST /order/get_order_list，code_type=reference_no（参考号 = eBay 订单号）+ order_code，
 传了单号时其他筛选条件会被忽略；可查待发货、已发货、异常、问题件、废弃的订单。
 一个 eBay 订单可能对应多个出库单，一票多箱时每箱有各自的跟踪号（orderBoxInfo[].tracking_number）。
-返回值只保留物流相关字段，收件人姓名、地址、电话、邮箱一律不取（美国站、欧洲站订单谷仓本来也以 *** 返回）。
+物流查询（orders_by_reference）只保留物流相关字段，收件人姓名、地址、电话、邮箱不取；
+收件信息只有 consignee_by_reference 取，专给会话右侧“收件地址”在 eBay 没返回时兜底显示给客服（不写库、不发给模型）。
 时间字段为谷仓系统时间（东八区）。
+同一订单的出库单在 GOODCANG_CACHE_SECONDS（默认 10 分钟）内只查一次，物流和收件信息共用，只存在本进程内存里（重启清空）。
 """
 from __future__ import annotations
 
@@ -81,16 +83,37 @@ class GoodcangClient:
                 raise GoodcangError("谷仓接口返回的不是 JSON") from None
         raise GoodcangError("谷仓接口限流，重试后仍失败")
 
-    def orders_by_reference(self, reference_no: str) -> list[dict]:
-        """按平台订单号（参考号）查出库单；查不到返回空列表。"""
-        data = self._post("/order/get_order_list", {"page": 1, "pageSize": 20, "code_type": "reference_no",
-                                                     "order_code": reference_no.strip()})
+    def _rows_by_reference(self, reference_no: str) -> list[dict]:
+        """按平台订单号（参考号）取出库单原始数据，带缓存；查询失败不缓存（下次重试）。"""
+        from ..cache_age import current
+
+        ref = reference_no.strip()
+        ttl = current(max(0, int(self.s.goodcang_cache_seconds or 0)))  # 回复页右侧栏放宽到 1 小时；“刷新”时为 0
+        now = time.monotonic()
+        with _cache_lock:
+            hit = _order_cache.get(ref)
+        if ttl and hit and now - hit[0] < ttl:
+            return hit[1]
+        data = self._post("/order/get_order_list", {"page": 1, "pageSize": 20, "code_type": "reference_no", "order_code": ref})
         if str(data.get("ask", "")).lower() != "success":
             raise GoodcangError(f"谷仓查询失败：{str(data.get('message') or '')[:200]}")
-        rows = data.get("data") or []
-        ref = reference_no.strip()
         # 只认参考号完全一致的（防止接口忽略单号时把别的订单当成这一单）
-        return [_slim(r) for r in rows if (r.get("reference_no") or "").strip() == ref]
+        rows = [r for r in data.get("data") or [] if (r.get("reference_no") or "").strip() == ref]
+        with _cache_lock:  # 记加载时刻；ttl 为 0（刷新）时也更新缓存，之后一小时内别的请求直接用
+            _order_cache.pop(ref, None)
+            _order_cache[ref] = (now, rows)
+            while len(_order_cache) > CACHE_MAX:
+                _order_cache.pop(next(iter(_order_cache)))
+        return rows
+
+    def orders_by_reference(self, reference_no: str) -> list[dict]:
+        """按平台订单号（参考号）查出库单（只含物流字段）；查不到返回空列表。"""
+        return [_slim(r) for r in self._rows_by_reference(reference_no)]
+
+    def consignee_by_reference(self, reference_no: str) -> dict | None:
+        """出库单上的收件信息（姓名、公司、地址、国家、电话、邮箱）。只给会话右侧显示用；*** 打码的字段当作没有。"""
+        rows = self._rows_by_reference(reference_no)
+        return _consignee(rows[0]) if rows else None
 
     # ------------------------------------------------------------ 查件单（只读）
     def ticket_types(self, sm_code: str | None = None) -> list[dict]:
@@ -149,6 +172,33 @@ class GoodcangClient:
             if not rows or page * 200 >= int(data.get("count") or 0):
                 return out
             page += 1
+
+
+# 出库单缓存：参考号 → (加载时刻, 原始行)。含收件信息，只在内存里，不写库
+_order_cache: dict[str, tuple[float, list[dict]]] = {}
+_cache_lock = threading.Lock()
+CACHE_MAX = 1000
+
+
+def clear_cache() -> None:
+    with _cache_lock:
+        _order_cache.clear()
+
+
+def _consignee(r: dict) -> dict:
+    def v(k):
+        x = str(r.get(k) or "").strip()
+        return None if not x or set(x) <= {"*"} else x
+
+    street = " ".join(x for x in (v("consignee_address1"), v("consignee_doorplate")) if x)
+    city = ", ".join(x for x in (v("consignee_city"), v("consignee_state")) if x)
+    address = ", ".join(x for x in (street, v("consignee_address2"), v("consignee_address3"), v("consignee_district"),
+                                    city, v("consignee_zipcode")) if x)
+    name = " ".join(x for x in (v("consignee_name"), v("consignee_last_name")) if x)
+    phone = " ".join(x for x in (v("area_code"), v("consignee_phone")) if x)
+    return {"name": name or None, "company": v("consignee_company"), "address": address or None,
+            "country": v("consignee_country_code"), "country_name": v("consignee_country_name"),
+            "phone": phone or None, "email": v("consignee_email"), "warehouse_order": v("order_code")}
 
 
 def _int(v) -> int:

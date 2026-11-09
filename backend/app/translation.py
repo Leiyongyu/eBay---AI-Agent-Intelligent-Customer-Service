@@ -39,7 +39,8 @@ class BuyerTranslator:
 
     @property
     def enabled(self) -> bool:
-        return get_settings().auto_translate_buyer_messages
+        s = get_settings()
+        return s.auto_translate_buyer_messages and s.llm_enabled
 
     def start(self) -> bool:
         if not self.enabled:
@@ -92,7 +93,7 @@ class BuyerTranslator:
             if m is None or not needs_translation(m):
                 return False
             text, store_id, conv_id = (m.body or "")[:MAX_CHARS], m.store_id, m.conversation_id
-        name, model = usage_log.chat_model(get_settings())
+        name, model = usage_log.translate_model(get_settings())
         started = time.perf_counter()
         try:
             out, usage = llm.translate_with_usage(text, "中文")

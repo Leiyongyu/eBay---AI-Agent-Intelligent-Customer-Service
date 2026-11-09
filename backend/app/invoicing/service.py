@@ -431,7 +431,8 @@ def send_with_notice(db: Session, req: InvoiceRequest, inv: Invoice, email: str,
 
             try:
                 with db.begin_nested():
-                    simulate_send(db, conv=conv, text=text, actor=actor, text_zh=zh if not message else None)
+                    ob, _ = simulate_send(db, conv=conv, text=text, actor=actor, text_zh=zh if not message else None)
+                    ob.source = "invoice_notice"
                 notice["sent"] = True
             except SendError as e:
                 notice["error"] = e.message

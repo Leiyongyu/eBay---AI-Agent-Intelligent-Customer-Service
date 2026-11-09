@@ -67,7 +67,7 @@ class Aftersales:
     TYPES = ["退货", "退款", "赔偿/部分退款", "不适配", "破损/错发/缺件", "质量问题", "物流异常/未收到", "物流问题需判断补发", "延迟发货", "取消订单",
              "改地址", "其他"]
     # AI 识别的意图 → 标记时默认选中的类型（只是建议，客服可改）
-    INTENT_HINT = {"return_refund": "退货", "refund_status": "退款", "damaged_wrong": "破损/错发/缺件",
+    INTENT_HINT = {"return_refund": "退货", "refund_status": "退款", "damaged_wrong": "破损/错发/缺件", "quality_issue": "质量问题",
                    "cancel_request": "取消订单", "address_change": "改地址", "delivery_delay": "物流异常/未收到",
                    "fitment": "不适配"}
 
@@ -175,6 +175,9 @@ class Conversation(Base):
     aftersales_marked_at: Mapped[datetime | None] = mapped_column(DateTime, comment="标记转售后时间（UTC）")
     aftersales_handled_by: Mapped[str | None] = mapped_column(String(64), comment="接手处理的售后")
     aftersales_updated_at: Mapped[datetime | None] = mapped_column(DateTime, comment="售后状态最近变更时间（UTC）")
+    starred: Mapped[bool | None] = mapped_column(Boolean, default=False, index=True, comment="星标（同事共用，工作台可按星标筛选）")
+    starred_by: Mapped[str | None] = mapped_column(String(64), comment="标星的人")
+    starred_at: Mapped[datetime | None] = mapped_column(DateTime, comment="标星时间（UTC）")
     situation_stage: Mapped[str | None] = mapped_column(
         String(16), index=True, comment="会话情况阶段（AI 每次起草时更新）：presale 售前 / shipping 物流 / aftersales 售后 / invoice 发票 / other 其他")
     situation_label: Mapped[str | None] = mapped_column(String(64), comment="会话情况一句话概括（AI 起草时给出，中文）")
@@ -205,6 +208,7 @@ class Message(Base):
     subject: Mapped[str | None] = mapped_column(String(500), comment="eBay 消息主题")
     sender_key: Mapped[str | None] = mapped_column(String(128), comment="发送方 eBay 用户名或不可变用户 ID（不透明键）")
     media: Mapped[list | None] = mapped_column(JSON, comment="附件元数据原样（eBay messageMedia：名称、类型、地址）；处理状态见 message_attachments")
+    auto_kind: Mapped[str | None] = mapped_column(String(16), comment="系统自动发的消息类型：ACK 转人工后的“已收到”回执（不算正式回复）；空 = 普通消息")
     platform_read: Mapped[bool | None] = mapped_column(
         Boolean, comment="入库时 eBay 侧是否已读（readStatus）；之后的变化以会话的 platform_unread_count 为准")
 
@@ -216,7 +220,7 @@ class MessageTag(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
     name: Mapped[str] = mapped_column(String(32), unique=True, comment="标记名称")
     color: Mapped[str] = mapped_column(String(16), default="primary",
-                                       comment="颜色：primary 蓝 / success 绿 / warning 橙 / danger 红 / info 灰")
+                                       comment="颜色：#rrggbb 任意颜色 / none 无色（早期的 primary 蓝、success 绿、warning 橙、danger 红、info 灰也认）")
     sort: Mapped[int] = mapped_column(Integer, default=100, comment="排序，小的在前")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, comment="是否可选；停用后已有标记照常显示，不能再选")
     created_by: Mapped[str | None] = mapped_column(String(64), comment="创建人")
@@ -385,6 +389,260 @@ class Draft(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="创建时间（UTC）")
 
 
+class EbayOrder(Base):
+    __tablename__ = "ebay_orders"
+    __table_args__ = (UniqueConstraint("store_id", "order_id"),
+                      {"comment": "客户管理用的订单汇总（只读拉自 eBay getOrders）：只存买家账号、国家、金额、状态、商品，不存姓名地址电话"})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    store_id: Mapped[str] = mapped_column(String(64), index=True, comment="店铺 ID")
+    order_id: Mapped[str] = mapped_column(String(64), comment="eBay 订单号")
+    buyer: Mapped[str | None] = mapped_column(String(128), index=True, comment="买家 eBay 用户名（小写）")
+    country: Mapped[str | None] = mapped_column(String(8), comment="收货国家代码")
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, index=True, comment="下单时间（UTC）")
+    ebay_updated_at: Mapped[datetime | None] = mapped_column(DateTime, comment="eBay 上的最后修改时间（UTC）")
+    total: Mapped[float | None] = mapped_column(Float, comment="订单总额")
+    currency: Mapped[str | None] = mapped_column(String(8), comment="币种")
+    status: Mapped[str | None] = mapped_column(String(32), comment="发货状态：NOT_STARTED / IN_PROGRESS / FULFILLED")
+    payment_status: Mapped[str | None] = mapped_column(String(32), comment="付款状态")
+    refunded: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否有退款")
+    cancelled: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否已取消")
+    item_id: Mapped[str | None] = mapped_column(String(32), comment="第一件商品的商品号")
+    item_title: Mapped[str | None] = mapped_column(String(300), comment="第一件商品标题")
+    items: Mapped[int | None] = mapped_column(Integer, comment="商品件数")
+    skus: Mapped[str | None] = mapped_column(String(500), comment="订单里各商品的 SKU（eBay 上的自定义标签，逗号分隔），工作台按 SKU 筛选用")
+    item_ids: Mapped[str | None] = mapped_column(String(300), comment="订单里各商品的商品号（逗号分隔）")
+    synced_at: Mapped[datetime | None] = mapped_column(DateTime, comment="最近一次拉取时间（UTC）")
+
+
+class EbayOrderLine(Base):
+    __tablename__ = "ebay_order_lines"
+    __table_args__ = (UniqueConstraint("store_id", "order_id", "line_item_id"),
+                      {"comment": "订单里的每件商品（随订单同步每小时更新）：售后管理列表的 SKU、数量、单价从这里读，不再实时查 eBay"})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    store_id: Mapped[str] = mapped_column(String(64), index=True, comment="店铺 ID")
+    order_id: Mapped[str] = mapped_column(String(64), index=True, comment="eBay 订单号（新格式，退货 / 退款 / 取消单用它）")
+    legacy_order_id: Mapped[str | None] = mapped_column(String(64), comment="旧格式订单号")
+    line_item_id: Mapped[str] = mapped_column(String(64), comment="订单行号（= Trading 的交易号 TransactionID）")
+    line_key: Mapped[str | None] = mapped_column(String(100), index=True,
+                                                 comment="商品号-交易号：咨询、纠纷、评价里的订单号就是这个格式")
+    item_id: Mapped[str | None] = mapped_column(String(32), index=True, comment="商品号")
+    buyer: Mapped[str | None] = mapped_column(String(128), index=True, comment="买家 eBay 用户名（小写）")
+    sku: Mapped[str | None] = mapped_column(String(100), comment="SKU（eBay 上的自定义标签）")
+    title: Mapped[str | None] = mapped_column(String(300), comment="商品标题")
+    quantity: Mapped[int | None] = mapped_column(Integer, comment="数量")
+    price_value: Mapped[str | None] = mapped_column(String(32), comment="这一行的金额（lineItemCost）")
+    price_currency: Mapped[str | None] = mapped_column(String(8), comment="币种")
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, comment="下单时间（UTC）")
+
+
+class EbayListingInfo(Base):
+    __tablename__ = "ebay_listing_info"
+    __table_args__ = (UniqueConstraint("store_id", "item_id"),
+                      {"comment": "售后管理用的刊登信息（主图、标题、SKU）：售后同步时补拉新出现的商品，过期的重新拉"})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    store_id: Mapped[str] = mapped_column(String(64), index=True, comment="店铺 ID")
+    item_id: Mapped[str] = mapped_column(String(32), comment="商品号")
+    title: Mapped[str | None] = mapped_column(String(300), comment="标题")
+    sku: Mapped[str | None] = mapped_column(String(100), comment="SKU（多属性刊登为空）")
+    picture_url: Mapped[str | None] = mapped_column(String(1000), comment="主图地址")
+    found: Mapped[bool | None] = mapped_column(Boolean, comment="eBay 上查到了（False = 刊登不存在或不是本店的）")
+    error: Mapped[str | None] = mapped_column(String(300), comment="最近一次拉取失败的原因")
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime, index=True, comment="最近一次拉取时间（UTC）")
+
+
+class BestOffer(Base):
+    __tablename__ = "best_offers"
+    __table_args__ = (UniqueConstraint("store_id", "best_offer_id"),
+                      {"comment": "Best offer：买家在刊登上出的报价（GetBestOffers 拉取）与卖家回应（接受 / 还价 / 拒绝）；不存买家邮箱地址"})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    store_id: Mapped[str] = mapped_column(String(64), index=True, comment="店铺 ID")
+    best_offer_id: Mapped[str] = mapped_column(String(64), comment="eBay 报价号")
+    item_id: Mapped[str | None] = mapped_column(String(32), index=True, comment="商品号")
+    title: Mapped[str | None] = mapped_column(String(300), comment="商品标题")
+    picture_url: Mapped[str | None] = mapped_column(String(500), comment="商品主图")
+    bin_price: Mapped[float | None] = mapped_column(Float, comment="一口价")
+    currency: Mapped[str | None] = mapped_column(String(8), comment="币种")
+    price: Mapped[float | None] = mapped_column(Float, comment="买家报价（单价）")
+    quantity: Mapped[int | None] = mapped_column(Integer, comment="数量")
+    buyer: Mapped[str | None] = mapped_column(String(128), index=True, comment="买家 eBay 用户名（小写）")
+    buyer_feedback: Mapped[int | None] = mapped_column(Integer, comment="买家信用分")
+    status: Mapped[str | None] = mapped_column(String(16), index=True, comment="Pending / Active 待处理；Accepted / Declined / Countered / Expired / Gone")
+    offer_type: Mapped[str | None] = mapped_column(String(32), comment="BuyerBestOffer 买家报价 / BuyerCounterOffer 买家还价 / SellerCounterOffer 我方还价")
+    buyer_message: Mapped[str | None] = mapped_column(Text, comment="买家留言")
+    seller_message: Mapped[str | None] = mapped_column(Text, comment="卖家留言")
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, index=True, comment="报价过期时间（UTC）")
+    item_end_at: Mapped[datetime | None] = mapped_column(DateTime, comment="刊登结束时间（UTC）")
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="第一次拉到（UTC）")
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, comment="最近一次拉到（UTC）")
+    responded_action: Mapped[str | None] = mapped_column(String(16), comment="本系统里的回应：Accept / Counter / Decline")
+    responded_by: Mapped[str | None] = mapped_column(String(64), comment="回应人")
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime, comment="回应时间（UTC）")
+    counter_price: Mapped[float | None] = mapped_column(Float, comment="我方还价")
+    response_message: Mapped[str | None] = mapped_column(String(300), comment="回应时给买家的留言")
+    response_error: Mapped[str | None] = mapped_column(String(500), comment="回应失败原因")
+
+
+class OrderNote(Base):
+    __tablename__ = "order_notes"
+    __table_args__ = {"comment": "客服内部备注：记在订单上（或只记在买家上），会话右侧“相关信息”里所有同事可见，不发给买家"}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    store_id: Mapped[str] = mapped_column(String(64), index=True, comment="店铺 ID")
+    order_id: Mapped[str | None] = mapped_column(String(64), index=True, comment="订单号；空 = 记在买家上")
+    buyer: Mapped[str] = mapped_column(String(128), index=True, comment="买家 eBay 用户名（小写）")
+    text: Mapped[str] = mapped_column(Text, comment="备注内容")
+    created_by: Mapped[str | None] = mapped_column(String(64), comment="写备注的人")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="时间（UTC）")
+
+
+class BuyerBlacklist(Base):
+    __tablename__ = "buyer_blacklist"
+    __table_args__ = {"comment": "系统内黑名单：这些买家来信 AI 不起草回复、直接交人工，界面标红（eBay 屏蔽名单需在各店铺后台手动加）"}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    buyer: Mapped[str] = mapped_column(String(128), index=True, comment="买家 eBay 用户名（小写）")
+    store_id: Mapped[str | None] = mapped_column(String(64), index=True, comment="只对这个店铺生效；空 = 全部店铺")
+    reason: Mapped[str | None] = mapped_column(String(500), comment="原因")
+    created_by: Mapped[str | None] = mapped_column(String(64), comment="加入的人")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="加入时间（UTC）")
+
+
+class EbayCase(Base):
+    __tablename__ = "ebay_cases"
+    __table_args__ = (UniqueConstraint("store_id", "kind", "external_id"),
+                      {"comment": "售后管理：从 eBay 拉来的咨询（未收到货）、纠纷、退货、付款纠纷、评价、取消交易、退款单（只读，定时更新）"})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    store_id: Mapped[str] = mapped_column(String(64), index=True, comment="店铺 ID")
+    kind: Mapped[str] = mapped_column(String(16), index=True, comment="类型：INQUIRY 咨询 / CASE 纠纷 / RETURN 退货 / PAYMENT_DISPUTE 付款纠纷 / "
+                                                                    "FEEDBACK 评价 / CANCEL 取消交易 / REFUND 退款单")
+    external_id: Mapped[str] = mapped_column(String(64), comment="eBay 上的编号（退货号、纠纷号、评价 ID、交易 ID 等）")
+    order_id: Mapped[str | None] = mapped_column(String(64), index=True, comment="订单号（咨询、纠纷为 商品号-交易号）")
+    item_id: Mapped[str | None] = mapped_column(String(32), comment="商品号")
+    buyer: Mapped[str | None] = mapped_column(String(128), index=True, comment="买家 eBay 用户名")
+    status: Mapped[str | None] = mapped_column(String(64), comment="eBay 上的状态（原样）")
+    is_open: Mapped[bool] = mapped_column(Boolean, default=False, index=True, comment="是否还需要处理（未关闭；评价为差评/中评且没回复）")
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime, comment="开始时间（UTC）")
+    due_at: Mapped[datetime | None] = mapped_column(DateTime, index=True, comment="卖家最晚处理时间（UTC，eBay 的 respond by）")
+    amount: Mapped[float | None] = mapped_column(Float, comment="金额（退款、索赔、取消退款等）")
+    currency: Mapped[str | None] = mapped_column(String(8), comment="币种")
+    reason: Mapped[str | None] = mapped_column(String(128), comment="原因")
+    title: Mapped[str | None] = mapped_column(String(300), comment="商品标题")
+    comment: Mapped[str | None] = mapped_column(Text, comment="买家留言或评价内容")
+    rating: Mapped[str | None] = mapped_column(String(16), comment="评价类型：Positive / Neutral / Negative")
+    detail: Mapped[dict | None] = mapped_column(JSON, comment="其他信息（退货类型、eBay 处理链接等）")
+    ebay_updated_at: Mapped[datetime | None] = mapped_column(DateTime, comment="eBay 上的最后更新时间（UTC）")
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="第一次拉到的时间（UTC）")
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, comment="最近一次拉到的时间（UTC）")
+    status_changed_at: Mapped[datetime | None] = mapped_column(DateTime, comment="状态最近变化时间（UTC）")
+    seen_by: Mapped[str | None] = mapped_column(String(64), comment="看过的客服（空 = 新的或状态有变化）")
+    seen_at: Mapped[datetime | None] = mapped_column(DateTime, comment="标记已看时间（UTC）")
+    # ---- 本系统里的处理记录（只在本系统，不写回 eBay；拉取更新时不覆盖） ----
+    work_state: Mapped[str | None] = mapped_column(
+        String(16), comment="本系统处理状态：PROCESSING 处理中 / DONE 已处理 / HOLD 暂不处理；空 = 按 eBay 是否关闭（开着=待处理）")
+    hold_reason: Mapped[str | None] = mapped_column(String(64), comment="暂不处理原因（退货等）")
+    starred: Mapped[bool | None] = mapped_column(Boolean, comment="星标（同事共用）")
+    tag_ids: Mapped[list | None] = mapped_column(JSON, comment="打上的标签（ebay_case_tags.id 列表）")
+    note: Mapped[str | None] = mapped_column(Text, comment="内部备注（同事共用）")
+    note_by: Mapped[str | None] = mapped_column(String(64), comment="最后写备注的人")
+    note_at: Mapped[datetime | None] = mapped_column(DateTime, comment="备注更新时间（UTC）")
+    operator: Mapped[str | None] = mapped_column(String(64), comment="操作员（认领的客服）")
+    operator_at: Mapped[datetime | None] = mapped_column(DateTime, comment="认领时间（UTC）")
+    worked_by: Mapped[str | None] = mapped_column(String(64), comment="最后改处理状态的人")
+    worked_at: Mapped[datetime | None] = mapped_column(DateTime, comment="最后改处理状态的时间（UTC）")
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime, comment="在本系统删除（隐藏）的时间；eBay 上不受影响，再拉取也不会恢复")
+    hidden_by: Mapped[str | None] = mapped_column(String(64), comment="删除（隐藏）的人")
+
+
+class EbayCaseTag(Base):
+    __tablename__ = "ebay_case_tags"
+    __table_args__ = {"comment": "售后管理的快捷标签（按类型分：咨询、纠纷、退货、付款纠纷、评价各自一套）"}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    kind: Mapped[str] = mapped_column(String(16), index=True, comment="适用的类型：INQUIRY / CASE / RETURN / PAYMENT_DISPUTE / FEEDBACK …")
+    name: Mapped[str] = mapped_column(String(32), comment="标签名，如 不退回、已询问VIN")
+    color: Mapped[str] = mapped_column(String(16), default="primary", comment="颜色：primary / success / warning / danger / info")
+    sort: Mapped[int] = mapped_column(Integer, default=0, comment="排序")
+    created_by: Mapped[str | None] = mapped_column(String(64), comment="创建人")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="创建时间（UTC）")
+
+
+class MessageTemplate(Base):
+    __tablename__ = "message_templates"
+    __table_args__ = {"comment": "消息模板：客服回复买家、回复评价用的常用话术，可带 {{buyer}} 等占位符和图片附件"}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    scope: Mapped[str] = mapped_column(String(16), index=True,
+                                       comment="类型：SYSTEM 系统预定义（管理员维护）/ COMPANY 企业模板（全员可见）/ PERSONAL 个人模板（只有创建人可见）")
+    usage: Mapped[str] = mapped_column(String(16), default="MESSAGE", comment="用途：MESSAGE 消息 / FEEDBACK 评价")
+    title: Mapped[str] = mapped_column(String(200), comment="标题")
+    content: Mapped[str] = mapped_column(Text, comment="内容（最多 1800 字），可含 {{buyer}}、{{orderNumber}} 等占位符")
+    tags: Mapped[list | None] = mapped_column(JSON, comment="标签（字符串列表）")
+    attachments: Mapped[list | None] = mapped_column(JSON, comment="图片附件 [{file, name}]，文件存在 data/media/templates")
+    starred: Mapped[bool | None] = mapped_column(Boolean, comment="星标（同事共用）")
+    owner_id: Mapped[int | None] = mapped_column(Integer, index=True, comment="创建人账号 ID（个人模板按它判断可见）")
+    created_by: Mapped[str | None] = mapped_column(String(64), comment="创建人显示名（系统预定义为“系统”）")
+    updated_by: Mapped[str | None] = mapped_column(String(64), comment="最后修改人")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="创建时间（UTC）")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, comment="最后修改时间（UTC）")
+
+
+class OfferRecord(Base):
+    __tablename__ = "offer_records"
+    __table_args__ = {"comment": "议价：给“感兴趣的买家”（关注 / 加购了商品的买家）发的折扣报价记录（Negotiation API，一次一个商品）"}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    store_id: Mapped[str] = mapped_column(String(64), index=True, comment="店铺 ID")
+    marketplace_id: Mapped[str] = mapped_column(String(32), comment="站点，如 EBAY_DE（必须和刊登站点一致）")
+    listing_id: Mapped[str] = mapped_column(String(32), index=True, comment="刊登号")
+    discount_percentage: Mapped[str | None] = mapped_column(String(8), comment="折扣百分比（和 price 二选一）")
+    price_value: Mapped[str | None] = mapped_column(String(32), comment="报价金额（和折扣二选一）")
+    price_currency: Mapped[str | None] = mapped_column(String(8), comment="报价币种")
+    quantity: Mapped[int] = mapped_column(Integer, default=1, comment="数量")
+    duration_days: Mapped[int] = mapped_column(Integer, default=2, comment="报价有效天数")
+    allow_counter: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否允许买家还价")
+    message: Mapped[str | None] = mapped_column(Text, comment="给买家的留言")
+    status: Mapped[str] = mapped_column(String(16), index=True, comment="SENT 已发出 / FAILED 没发出")
+    offers_count: Mapped[int | None] = mapped_column(Integer, comment="eBay 返回的报价条数（发给了几位买家）")
+    response: Mapped[dict | None] = mapped_column(JSON, comment="eBay 返回内容（报价 ID、状态、买家掩码名等）")
+    error: Mapped[str | None] = mapped_column(Text, comment="失败原因")
+    sent_by: Mapped[str] = mapped_column(String(64), comment="操作人")
+    sent_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True, comment="发送时间（UTC）")
+
+
+class OutboundMessage(Base):
+    __tablename__ = "outbound_messages"
+    __table_args__ = {"comment": "待发消息（发件箱）：所有发给买家的消息先进这里，延迟 SEND_DELAY_SECONDS（默认 5 分钟）后由 Worker 发出，发出前可撤回"}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    store_id: Mapped[str] = mapped_column(String(64), index=True, comment="所属店铺 ID")
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), index=True, comment="所属会话 ID")
+    body: Mapped[str] = mapped_column(Text, comment="发给买家的正文")
+    zh_translation: Mapped[str | None] = mapped_column(Text, comment="正文的中文对照（只给审核员看）")
+    source: Mapped[str] = mapped_column(String(32), comment="来源：manual 人工 / auto AI 自动回复 / ack 已收到回执 / ticket 查件结果 / "
+                                                            "logistics_notice 查件提交提醒 / ship_notice 发货通知 / invoice_notice 发票提醒")
+    actor: Mapped[str] = mapped_column(String(64), comment="提交人（客服名或系统）")
+    job_id: Mapped[int | None] = mapped_column(Integer, index=True, comment="关联的回复任务（有的话）")
+    state: Mapped[str] = mapped_column(String(16), default="PENDING", index=True,
+                                       comment="PENDING 等待发送（可撤回）/ SENDING 发送中 / SENT 已发出 / RECALLED 已撤回 / "
+                                               "FAILED 明确没发出 / UNCERTAIN 结果不确定（不自动重发，需核对）")
+    send_after: Mapped[datetime] = mapped_column(DateTime, index=True, comment="最早发送时间（UTC）：之前都可以撤回")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="提交时间（UTC）")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, comment="最后更新时间（UTC）")
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, comment="实际发出时间（UTC）")
+    channel: Mapped[str | None] = mapped_column(String(16), comment="发送渠道：ebay 真实发到 eBay / mock 只记在本地")
+    platform_message_id: Mapped[str | None] = mapped_column(String(128), comment="eBay 返回的消息 ID（模拟发送为 SIM-OUT- 开头）")
+    message_id: Mapped[int | None] = mapped_column(Integer, comment="发出后写进会话的消息 ID（messages.id）")
+    error: Mapped[str | None] = mapped_column(Text, comment="发送失败或不确定的原因")
+    recalled_by: Mapped[str | None] = mapped_column(String(64), comment="撤回人")
+    recalled_at: Mapped[datetime | None] = mapped_column(DateTime, comment="撤回时间（UTC）")
+    meta: Mapped[dict | None] = mapped_column(JSON, comment="来源相关信息（查件单 ID、发货通知 ID、附件等），发出或撤回时回写来源状态用")
+
+
 class SendIntent(Base):
     __tablename__ = "send_intents"
     __table_args__ = {"comment": "发送意图：每个回复任务唯一的外发请求，人工与自动发送共用；记录平台回执"}
@@ -495,6 +753,10 @@ class KnowledgeChunk(Base):
         String(16), comment="状态：PUBLISHED 已发布（只有它会给 AI 用）/ DRAFT 未启用 / "
                             "RETIRED 已发布但被新版本替换下线 / WITHDRAWN 未启用且被替换下线；回滚时 RETIRED→PUBLISHED、WITHDRAWN→DRAFT")
     sku: Mapped[list | None] = mapped_column(JSON, comment="条款涉及的 SKU 列表")
+    scenes: Mapped[list | None] = mapped_column(
+        JSON, comment="适用场景（仅内部条款用）：会话属于这些场景时在会话页“内部参考”里显示，如 质量问题、退货退款；常驻 = 每个会话都显示")
+    doc_refs: Mapped[list | None] = mapped_column(
+        JSON, comment="引用的参考文档编号列表（kb_documents.doc_no，如 DOC-0001）；知识库页、会话页“内部参考”里可点开，AI 不读")
     source: Mapped[str | None] = mapped_column(String(64), comment="资料来源部门或渠道")
     content_hash: Mapped[str] = mapped_column(String(64), comment="正文 SHA-256，导入时据此判断是否变化")
     import_id: Mapped[int | None] = mapped_column(Integer, index=True,
@@ -502,6 +764,51 @@ class KnowledgeChunk(Base):
     search_text: Mapped[str | None] = mapped_column(
         Text, comment="全文检索用的分词结果（jieba 中文分词 + 英德文小写词，空格分隔），对它建 PostgreSQL 全文索引")
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, comment="最后更新时间（UTC）")
+
+
+class KbDocument(Base):
+    __tablename__ = "kb_documents"
+    __table_args__ = {"comment": "参考文档库：第三方文件和内部资料（报表、手册、供应商资料、物流手册），知识条款按编号引用；"
+                                 "只给人看，AI 不读、不发给买家"}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    doc_no: Mapped[str] = mapped_column(String(16), unique=True, comment="引用编号，如 DOC-0001；自动递增，删除后不复用")
+    title: Mapped[str] = mapped_column(String(200), comment="标题")
+    description: Mapped[str | None] = mapped_column(Text, comment="说明：这份文档是什么、什么时候用")
+    category: Mapped[str] = mapped_column(String(32), default="其他", comment="分类：报表 / 手册 / 供应商资料 / 物流 / 其他")
+    store_ids: Mapped[list | None] = mapped_column(JSON, comment="适用店铺 ID 列表；空表示全部店铺。非管理员只能看到自己负责店铺的文档")
+    sensitive: Mapped[bool] = mapped_column(Boolean, default=False,
+                                            comment="敏感（如含买家个人信息）：只有管理员能下载，其他人只能看到标题")
+    status: Mapped[str] = mapped_column(String(16), default="ACTIVE",
+                                        comment="状态：ACTIVE 使用中 / ARCHIVED 已归档（列表默认不显示，已有引用仍可打开）")
+    version: Mapped[int] = mapped_column(Integer, default=1, comment="当前版本号，替换时加 1")
+    file_name: Mapped[str] = mapped_column(String(255), comment="当前版本的原始文件名")
+    content_type: Mapped[str | None] = mapped_column(String(128), comment="当前版本的文件类型（MIME）")
+    size: Mapped[int] = mapped_column(Integer, default=0, comment="当前版本的文件大小（字节）")
+    sha256: Mapped[str] = mapped_column(String(64), comment="当前版本文件的 SHA-256")
+    stored_path: Mapped[str] = mapped_column(String(500), comment="当前版本文件的存放路径（相对项目目录）")
+    scan_status: Mapped[str | None] = mapped_column(String(16), comment="病毒扫描结果：CLEAN / SKIPPED 未扫描 / ERROR")
+    uploaded_by: Mapped[str] = mapped_column(String(64), comment="上传人（第一次上传）")
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="第一次上传时间（UTC）")
+    updated_by: Mapped[str | None] = mapped_column(String(64), comment="最后修改人（替换版本、改信息、归档）")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, comment="最后更新时间（UTC）")
+
+
+class KbDocumentVersion(Base):
+    __tablename__ = "kb_document_versions"
+    __table_args__ = (UniqueConstraint("doc_id", "version"),
+                      {"comment": "参考文档的历史版本：替换新版本时把旧版本记在这里，旧文件保留不删，可下载"})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    doc_id: Mapped[int] = mapped_column(ForeignKey("kb_documents.id", ondelete="CASCADE"), index=True, comment="所属文档 ID")
+    version: Mapped[int] = mapped_column(Integer, comment="版本号")
+    file_name: Mapped[str] = mapped_column(String(255), comment="这个版本的原始文件名")
+    content_type: Mapped[str | None] = mapped_column(String(128), comment="这个版本的文件类型（MIME）")
+    size: Mapped[int] = mapped_column(Integer, default=0, comment="这个版本的文件大小（字节）")
+    sha256: Mapped[str] = mapped_column(String(64), comment="这个版本文件的 SHA-256")
+    stored_path: Mapped[str] = mapped_column(String(500), comment="这个版本文件的存放路径（相对项目目录）")
+    uploaded_by: Mapped[str] = mapped_column(String(64), comment="这个版本的上传人")
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="这个版本的上传时间（UTC）")
 
 
 class EmbeddingProfile(Base):
@@ -861,6 +1168,19 @@ class AftersalesMail(Base):
     processed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True, comment="处理时间（UTC）")
 
 
+class MailboxCursor(Base):
+    __tablename__ = "mailbox_cursors"
+    __table_args__ = {"comment": "售后邮箱收信进度：收件箱里看过的最大 UID。只看新来的邮件；和售后无关的邮件不记录、不移动、不改已读状态"}
+
+    folder: Mapped[str] = mapped_column(String(100), primary_key=True, comment="IMAP 文件夹名（如 INBOX）")
+    uidvalidity: Mapped[str | None] = mapped_column(String(32), comment="文件夹的 UIDVALIDITY；变了说明 UID 重排，要按日期重新开始")
+    last_uid: Mapped[int] = mapped_column(Integer, default=0, comment="已经看过的最大 UID（处理或判定无关都算）")
+    skipped: Mapped[int] = mapped_column(Integer, default=0, comment="累计判定为和售后无关、没碰的邮件数")
+    retry_uid: Mapped[int | None] = mapped_column(Integer, comment="处理出错、正在重试的邮件 UID")
+    retries: Mapped[int] = mapped_column(Integer, default=0, comment="这封已经失败的次数；到 3 次跳过它（留在收件箱人工看），不挡后面的邮件")
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, comment="最后更新时间（UTC）")
+
+
 class AftersalesFile(Base):
     __tablename__ = "aftersales_files"
     __table_args__ = {"comment": "售后邮件附件：邮件直接带的附件或 WeTransfer 链接里的文件，按店铺存放在 AFTERSALES_FILES_DIR；"
@@ -1025,3 +1345,79 @@ class ShipNotice(Base):
     sent_by: Mapped[str | None] = mapped_column(String(64), comment="发送（审核通过）的人")
     sent_at: Mapped[datetime | None] = mapped_column(DateTime, comment="发送时间（UTC）")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="生成时间（UTC）")
+
+
+class AftersalesCase(Base):
+    __tablename__ = "aftersales_cases"
+    __table_args__ = {"comment": "飞书售后群工单：需技术/售后判断的问题整理后发到飞书售后群，群里回复后 AI 起草买家回复（人工审核后才发）"}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    conversation_id: Mapped[int] = mapped_column(Integer, index=True, comment="买家会话")
+    store_id: Mapped[str] = mapped_column(String(64), index=True, comment="店铺（卡片里不显示）")
+    order_id: Mapped[str | None] = mapped_column(String(64), index=True, comment="订单号；没有订单 = 售前")
+    buyer_key: Mapped[str | None] = mapped_column(String(128), comment="买家 eBay 账号")
+    marketplace_id: Mapped[str | None] = mapped_column(String(32), comment="站点")
+    case_type: Mapped[str] = mapped_column(String(8), comment="售后 / 售前（有订单 = 售后）")
+    category: Mapped[str] = mapped_column(String(32), comment="问题类别：质量问题 / 破损错发缺件 / 安装技术问题 / 适配核对")
+    sku: Mapped[str | None] = mapped_column(String(100), comment="原 SKU（去掉平台别名前缀后缀）")
+    problem_zh: Mapped[str] = mapped_column(Text, comment="问题（中文）")
+    fault_info: Mapped[str | None] = mapped_column(Text, comment="故障码 / VIN")
+    original_text: Mapped[str] = mapped_column(Text, comment="买家原文")
+    attachment_ids: Mapped[list | None] = mapped_column(JSON, comment="随工单发到群里的买家图片（message_attachments.id）")
+    file_ids: Mapped[list | None] = mapped_column(
+        JSON, comment="已发到工单话题里的售后附件（aftersales_files.id）：买家通过售后邮箱、上传页发来的视频和图片")
+    missing: Mapped[list | None] = mapped_column(JSON, comment="还缺的资料（发群前建议先向买家要），如 照片、故障码、VIN")
+    status: Mapped[str] = mapped_column(String(16), default="DRAFT", index=True,
+                                        comment="DRAFT 待发送 / SENT 已发待回复 / REPLIED 群已回复待审核 / ANSWERED 已回复买家 / CLOSED 已完结")
+    origin: Mapped[str | None] = mapped_column(String(16), comment="AI 按划分规则建议 / MANUAL 客服手动")
+    chat_id: Mapped[str | None] = mapped_column(String(64), comment="飞书群")
+    message_id: Mapped[str | None] = mapped_column(String(64), index=True, comment="工单卡片的飞书消息 ID")
+    thread_id: Mapped[str | None] = mapped_column(String(64), comment="卡片话题 ID")
+    replies: Mapped[list | None] = mapped_column(JSON, comment="群里的回复 [{message_id, sender, text, file_ids, at, via: thread|mention}]")
+    last_buyer_seq: Mapped[int | None] = mapped_column(Integer, comment="已同步到话题的买家消息序号（之后的买家追问追加到话题）")
+    draft_reply: Mapped[str | None] = mapped_column(Text, comment="AI 按群里回复起草的买家回复（买家语言，人工审核后才发）")
+    draft_reply_zh: Mapped[str | None] = mapped_column(Text, comment="起草回复的中文对照")
+    drafted_at: Mapped[datetime | None] = mapped_column(DateTime, comment="起草时间（UTC）")
+    sent_by: Mapped[str | None] = mapped_column(String(64), comment="发到群里的人")
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, comment="发到群里的时间（UTC）")
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime, comment="已回复买家的时间（UTC）")
+    closed_by: Mapped[str | None] = mapped_column(String(64), comment="完结人")
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime, comment="完结时间（UTC）")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="生成时间（UTC）")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, comment="更新时间（UTC）")
+
+
+class ParcelFollowup(Base):
+    __tablename__ = "parcel_followups"
+    __table_args__ = {"comment": "异常包裹跟进表：断更、无轨迹、妥投未收到、退回、损坏、发错等包裹的处理记录（重发、退款、索赔…），"
+                                 "替代原 Excel《异常包裹跟进表》。每人只看自己记的，管理员看全部；可关联到买家会话"}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    owner_id: Mapped[int] = mapped_column(Integer, index=True, comment="负责人（记录的人）账号 ID：普通账号只能看、改自己的")
+    owner_name: Mapped[str] = mapped_column(String(64), comment="负责人显示名")
+    occurred_on: Mapped[str | None] = mapped_column(String(10), index=True, comment="日期（YYYY-MM-DD，发现异常 / 登记的日期）")
+    store_id: Mapped[str | None] = mapped_column(String(64), index=True, comment="店铺 ID（账号）")
+    conversation_id: Mapped[int | None] = mapped_column(Integer, index=True, comment="关联的买家会话（点了直接打开）")
+    buyer_key: Mapped[str | None] = mapped_column(String(128), index=True, comment="买家 eBay 用户名")
+    order_id: Mapped[str | None] = mapped_column(String(64), index=True, comment="eBay 订单号")
+    sku: Mapped[str | None] = mapped_column(String(200), comment="SKU（多个用 + 连）")
+    reason: Mapped[str] = mapped_column(String(32), index=True, comment="原因类型：断更 / 无轨迹 / 妥投未收到 / 物流异常退回 / 到货损坏 / 谷仓发错 / 供应商发错 / 产品问题 / 地址问题 / 其他")
+    reason_note: Mapped[str | None] = mapped_column(String(300), comment="原因说明（如“4.30断更”“6.22妥投未收到 INR”）")
+    carrier: Mapped[str | None] = mapped_column(String(64), comment="物流商（DHL、Royal Mail、EVRI…）")
+    tracking_no: Mapped[str | None] = mapped_column(String(64), index=True, comment="原包裹跟踪号")
+    action: Mapped[str | None] = mapped_column(String(32), comment="处理方式：重发 / 退款 / 部分退款 / 补偿 / 索赔 / 等待查件 / 等待买家 / 其他")
+    result: Mapped[str | None] = mapped_column(String(500), comment="处理结果（如 已送达、已退款、未收到货纠纷、无库存不能重发）")
+    reship_tracking_no: Mapped[str | None] = mapped_column(String(64), index=True, comment="重发包裹的跟踪号")
+    amount: Mapped[float | None] = mapped_column(Float, comment="金额（退款 / 补偿 / 运费等）")
+    currency: Mapped[str | None] = mapped_column(String(8), comment="币种")
+    ticket_no: Mapped[str | None] = mapped_column(String(200), comment="谷仓查件单号（多个用逗号）")
+    next_follow_on: Mapped[str | None] = mapped_column(String(10), index=True, comment="下次跟进日期（YYYY-MM-DD）")
+    status: Mapped[str] = mapped_column(String(8), default="OPEN", index=True, comment="跟进状态：OPEN 跟进中 / DONE 已完结")
+    note: Mapped[str | None] = mapped_column(Text, comment="备注")
+    origin: Mapped[str | None] = mapped_column(String(8), index=True, comment="来源：AUTO 系统自动建 / 空 = 人工建")
+    next_step: Mapped[str | None] = mapped_column(String(300), comment="下一步（系统按进度写：等查件结果、需决定补发或退款、可以完结…）")
+    can_close: Mapped[bool | None] = mapped_column(Boolean, comment="系统判断可以完结（已退款、纠纷已关闭等），等人确认")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="创建时间（UTC）")
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, comment="最后修改时间（UTC）")
+    updated_by: Mapped[str | None] = mapped_column(String(64), comment="最后修改的人")
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime, comment="完结时间（UTC）")

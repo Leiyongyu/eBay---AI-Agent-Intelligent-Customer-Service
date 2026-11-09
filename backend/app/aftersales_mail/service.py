@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,7 @@ from ..models import (
     Conversation,
     ConversationEvent,
     InvoiceRequest,
+    MailboxCursor,
     Store,
 )
 from . import storage, wetransfer
@@ -136,7 +138,71 @@ def locate(db: Session, mail: ParsedMail) -> Located:
                         .order_by(InvoiceRequest.updated_at.desc()).limit(1))
         if req:
             return Located(req.order_id, req.store_id, None, req.conversation_id, "invoice_email")
+    by_name = locate_buyer_name(db, f"{mail.subject}\n{(mail.text or '')[:3000]}")
+    if by_name:
+        return by_name
     return Located(mail.order_ids[0] if mail.order_ids else None)
+
+
+_NAME_TOKEN = re.compile(r"(?<![\w@.])[A-Za-z0-9][A-Za-z0-9._\-*]{2,62}[A-Za-z0-9*](?![\w@])")
+
+
+def locate_buyer_name(db: Session, text: str) -> Located | None:
+    """邮件主题 / 正文里写了买家的 eBay 用户名（WeTransfer 通知邮件里买家填的标题、留言）：对到这个买家最近的会话。
+    同一个用户名在多个店铺都有会话时拿不准，交人工认领。"""
+    tokens = {t.lower() for t in _NAME_TOKEN.findall(text or "") if not t.isdigit()}
+    if not tokens:
+        return None
+    rows = db.execute(select(Conversation.id, Conversation.store_id, Conversation.buyer_key)
+                      .where(func.lower(Conversation.buyer_key).in_(tokens), Conversation.conversation_type != "FROM_EBAY")
+                      .order_by(Conversation.last_message_at.desc().nulls_last())).all()
+    if not rows or len({(r.store_id, r.buyer_key.lower()) for r in rows}) != 1:
+        return None
+    conv_id, store_id, buyer = rows[0]
+    from ..models import AftersalesCase
+
+    order_id = db.scalar(select(AftersalesCase.order_id).where(AftersalesCase.conversation_id == conv_id,
+                                                               AftersalesCase.order_id.is_not(None))
+                         .order_by(AftersalesCase.id.desc()).limit(1))
+    return Located(order_id, store_id, buyer, conv_id, "ebay_name")
+
+
+# ------------------------------------------------------------------ 是不是售后邮件
+# 这些发件方的邮件和买家售后无关：谷仓的查件进度通知（查件结果走谷仓接口）
+IGNORE_SENDER_DOMAINS = ("goodcang.com", "goodcang.net")
+VIDEO_EXTS = {".mp4", ".m4v", ".mov", ".webm", ".avi", ".mkv", ".3gp", ".wmv", ".mpg", ".mpeg"}
+
+
+def _domain(addr: str | None) -> str:
+    return (addr or "").rsplit("@", 1)[-1].lower() if addr and "@" in addr else ""
+
+
+def _under(domain: str, roots) -> bool:
+    return any(domain == r or domain.endswith("." + r) for r in roots)
+
+
+def relevance(db: Session, pm: ParsedMail) -> str | None:
+    """这封邮件和买家售后有没有关系；有关返回依据，无关返回 None（不记录、不移动，留在收件箱给同事自己看）。
+    售后邮箱可能就是同事的工作邮箱，系统告警、内部往来、谷仓通知、广告都不收。有关的：
+    写了 eBay 订单号；带 WeTransfer 下载链接；带视频附件；发件人是买家在发票申请里留的邮箱；
+    主题 / 正文写了某个买家的 eBay 用户名（只对得上一个会话时）。本公司邮箱发的只认订单号、WeTransfer、视频（同事转发）。"""
+    sender_domain = _domain(pm.sender)
+    if _under(sender_domain, IGNORE_SENDER_DOMAINS):
+        return None
+    if pm.order_ids:
+        return "order_id"
+    if pm.wetransfer_links:
+        return "wetransfer"
+    if any(storage.ext_of(a.filename, a.content_type) in VIDEO_EXTS for a in pm.attachments):
+        return "video"
+    own = _domain(get_settings().aftersales_mail_user)
+    if own and _under(sender_domain, (own,)):
+        return None
+    if pm.sender and db.scalar(select(InvoiceRequest.id).where(func.lower(InvoiceRequest.email) == pm.sender.lower()).limit(1)):
+        return "invoice_email"
+    if locate_buyer_name(db, pm.subject + "\n" + (pm.text or "")[:3000]):
+        return "ebay_name"
+    return None
 
 
 # ------------------------------------------------------------------ 处理一封邮件
@@ -145,10 +211,12 @@ def _folder(db: Session, store_id: str | None) -> str:
     return storage.store_dir(store_id, acct)
 
 
-def process(db: Session, uid: str, raw: bytes, http: httpx.Client | None = None) -> AftersalesMail:
-    """处理一封邮件（幂等：同一 Message-ID 只处理一次）。调用方提交后再把邮件移到“已处理”。"""
+def process(db: Session, uid: str, raw: bytes, http: httpx.Client | None = None,
+            pm: ParsedMail | None = None) -> AftersalesMail:
+    """处理一封邮件（幂等：同一 Message-ID 只处理一次）。调用方提交后再把邮件移到“已处理”。
+    只该处理和售后有关的邮件（先用 relevance 判断）。"""
     s = get_settings()
-    pm = parse(raw)
+    pm = pm or parse(raw)
     message_id = (pm.message_id or f"uid:{s.aftersales_mail_folder}:{uid}")[:300]
     existing = db.scalar(select(AftersalesMail).where(AftersalesMail.message_id == message_id))
     if existing is not None:
@@ -292,8 +360,9 @@ def cleanup(db: Session, now: datetime | None = None, mailbox=None) -> dict:
         n_mails += 1
     purged_mails, mail_error = 0, None
     if mailbox is not None:
-        try:
-            purged_mails = mailbox.purge_done(cutoff.date())
+        try:  # 只删本系统处理过的邮件：别人自己放进“已处理”的、以前误移进去的无关邮件都不碰
+            ours = set(db.scalars(select(AftersalesMail.message_id).where(~AftersalesMail.message_id.startswith("uid:"))))
+            purged_mails = mailbox.purge_done(cutoff.date(), ours)
         except Exception as e:  # noqa: BLE001 — 邮箱清理失败不影响文件清理
             mail_error = str(e)[:300]
     from ..upload_page.service import cleanup as upload_cleanup
@@ -308,31 +377,64 @@ def cleanup(db: Session, now: datetime | None = None, mailbox=None) -> dict:
 
 
 # ------------------------------------------------------------------ 后台任务
+FIRST_RUN_DAYS = 3  # 第一次收信（或 UIDVALIDITY 变了）往回看几天
+
+
 def run_once() -> dict:
-    """收一轮邮件。每封单独提交，提交后才移到“已处理”；处理出错的留在收件箱，下轮再试。"""
+    """收一轮新邮件（UID 大于上次看到的）。和售后无关的不记录、不移动、不改已读，只把进度往后推；
+    有关的处理后单独提交，再移到“已处理”。处理出错的留在收件箱，进度停在它前面，下轮再试。"""
     from .mailbox import ImapMailbox, MailboxError
 
     s = get_settings()
     if s.aftersales_mail_not_ready_reasons():
         return {"skipped": s.aftersales_mail_not_ready_reasons()}
-    done = failed = 0
+    folder = s.aftersales_mail_folder
+    done = failed = skipped = 0
     try:
         with ImapMailbox() as box:
-            for uid, raw in box.fetch_all():
+            with session_scope() as db:
+                cur = db.get(MailboxCursor, folder)
+                after, validity = (cur.last_uid, cur.uidvalidity) if cur else (None, None)
+                retry_uid, retries = (cur.retry_uid, cur.retries or 0) if cur else (None, 0)
+            since = (datetime.now(timezone.utc) - timedelta(days=FIRST_RUN_DAYS)).date()
+            old_validity = validity
+            validity, mails = box.fetch_new(after, validity, since)
+            last = (after or 0) if after is not None and validity == old_validity else 0
+            for uid, raw in mails:
                 try:
                     with session_scope() as db:
-                        process(db, uid, raw)
-                    box.move_done(uid)
-                    done += 1
+                        pm = parse(raw)
+                        ours = relevance(db, pm) is not None
+                        if ours:
+                            process(db, uid, raw, pm=pm)
+                    if ours:  # 提交后才移走
+                        box.move_done(uid)
+                        done += 1
+                    else:
+                        skipped += 1
                 except MailboxError:
                     raise
                 except Exception:  # noqa: BLE001
-                    log.exception("处理售后邮件失败（uid=%s），留在收件箱下轮再试", uid)
                     failed += 1
+                    retries = retries + 1 if retry_uid == int(uid) else 1
+                    retry_uid = int(uid)
+                    if retries < 3:
+                        log.exception("处理售后邮件失败（uid=%s，第 %s 次），留在收件箱下轮再试", uid, retries)
+                        break  # 进度停在这封前面，下轮从它重试
+                    log.exception("售后邮件 uid=%s 连续 %s 次处理失败，跳过（留在收件箱人工看）", uid, retries)
+                last = max(last, int(uid))
+                if retry_uid == int(uid) and retries >= 3:
+                    retry_uid, retries = None, 0
+            with session_scope() as db:
+                cur = db.get(MailboxCursor, folder) or MailboxCursor(folder=folder, last_uid=0, skipped=0, retries=0)
+                db.add(cur)
+                cur.uidvalidity, cur.last_uid = validity, last
+                cur.retry_uid, cur.retries = (retry_uid, retries) if failed and retry_uid else (None, 0)
+                cur.skipped, cur.updated_at = (cur.skipped or 0) + skipped, utcnow()
     except MailboxError as e:
         log.warning("售后邮箱：%s", e)
-        return {"error": str(e), "processed": done, "failed": failed}
-    return {"processed": done, "failed": failed}
+        return {"error": str(e), "processed": done, "failed": failed, "skipped": skipped}
+    return {"processed": done, "failed": failed, "skipped": skipped}
 
 
 class AftersalesMailWorker:

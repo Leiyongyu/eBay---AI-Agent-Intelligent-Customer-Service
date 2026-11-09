@@ -38,8 +38,12 @@ FIELDS: list[tuple[str, str, str, str, bool, str | None]] = [
     ("售后邮箱", "aftersales_imap_port", "IMAP 端口", "SSL 一般为 993", False, None),
     ("售后邮箱", "aftersales_mail_user", "售后邮箱地址", "", False, None),
     ("售后邮箱", "aftersales_mail_password", "售后邮箱密码", "客户端专用密码", False, None),
+    ("售后邮箱", "aftersales_public_address", "对买家说的售后邮箱", "买家发视频、在 WeTransfer 里填的收件邮箱；空 = 用售后邮箱地址。"
+     "填别的地址时，这个地址的邮件要能进系统读的售后邮箱（同一个或设了自动转发）", False, None),
     ("售后邮箱", "aftersales_mail_share_with_buyers", "AI 可告诉买家售后邮箱", "买家要发视频、大文件时 AI 可以提供这个邮箱", False, None),
     ("售后邮箱", "aftersales_retention_days", "附件保留天数", "", False, None),
+    ("AI 自动回复", "llm_translate_model", "翻译模型", "买家来信译中文、草稿回译用的模型（同一个秘钥）；留空 = 用回复模型", False, None),
+    ("AI 自动回复", "llm_translate_thinking", "翻译开思考模式", "一般不用；开了每句都多出思考 token", False, None),
     ("AI 自动回复", "auto_send_enabled", "自动回复总开关", "关掉后所有店铺都只生成草稿、不自动发", False, None),
     ("AI 自动回复", "auto_send_max_risk", "自动发送最高风险", "L0 或 L1；L2、L3 永远转人工", False, None),
     ("AI 自动回复", "auto_send_exclude_intents", "仍要人工的意图", "英文逗号分隔，如 fitment,price_offer", False, None),
@@ -51,8 +55,23 @@ FIELDS: list[tuple[str, str, str, str, bool, str | None]] = [
     ("物流查件", "logistics_ticket_notify_emails", "查件通知邮箱", "谷仓必填，英文逗号分隔，最多 10 个", False, None),
     ("eBay 消息", "ebay_sync_enabled", "定时拉取 eBay 消息", "", False,
      "打开后真实买家来信会被自动处理、自动回复，物流问题还会自动向谷仓建查件单"),
-    ("eBay 消息", "ebay_push_enabled", "实时推送", "", True,
+    ("eBay 消息", "ebay_push_enabled", "实时推送", "", False,
      "打开后真实买家来信会被自动处理、自动回复，物流问题还会自动向谷仓建查件单"),
+    ("eBay 消息", "ebay_live_stores", "对接 eBay 的店铺", "店铺名或 ID，英文逗号分隔：只拉取这些店铺、只有这些店铺真实发到 eBay；留空 = 拉取全部、都不真实发送", False,
+     "列进来的店铺，回复会真实发给 eBay 买家"),
+    ("议价", "offer_live_stores", "可发报价的店铺", "店铺名或 ID，英文逗号分隔：这些店铺可以在「议价」页真实给感兴趣的买家发折扣报价；"
+     "“对接 eBay 的店铺”本来就能发。只开议价，不会因此真实收发消息", False,
+     "列进来的店铺，报价会真实发给 eBay 买家，发出后不能撤回"),
+    ("数据同步", "ebay_sync_stores", "消息拉取范围", "* = 全部店铺；留空 = 只拉“对接 eBay 的店铺”；也可写店铺名逗号分隔。只影响拉取，真实发送仍只限对接店铺", False, None),
+    ("数据同步", "ebay_sync_interval_seconds", "消息定时拉取间隔（秒）", "最少 60；有实时推送时这是兜底", False, None),
+    ("数据同步", "ebay_sync_lookback_days", "消息首次拉取天数", "新对接或清空游标的店铺，第一次往回拉多少天", False, None),
+    ("数据同步", "ebay_cases_sync_minutes", "售后与订单拉取间隔（分钟）", "咨询、纠纷、退货、付款纠纷、评价、取消、退款单和客户订单；0 = 暂停", False, None),
+    ("数据同步", "best_offer_sync_minutes", "Best offer 拉取间隔（分钟）", "买家报价 48 小时过期；0 = 暂停", False, None),
+    ("数据同步", "orders_sync_days", "订单首次拉取天数", "客户列表用的订单，第一次往回拉多少天", False, None),
+    ("数据同步", "ship_notice_enabled", "发货通知汇总", "汇总已发货订单，生成待审核的发货通知", False, None),
+    ("数据同步", "ship_notice_interval_minutes", "发货通知汇总间隔（分钟）", "", False, None),
+    ("数据同步", "ship_notice_live_only", "发货通知只给对接店铺", "只给“对接 eBay 的店铺”生成；其余店铺发不出去", False, None),
+    ("eBay 消息", "send_delay_seconds", "发送延迟（秒）", "发给买家的消息等这么久才发出，期间可以撤回；默认 300（5 分钟）", False, None),
 ]
 KEYS = {f[1] for f in FIELDS}
 
