@@ -611,11 +611,16 @@ _NR_PACKAGE = re.compile(
     r"(colis|paquet) (n['’]est )?pas l[àa]", re.I)
 _NR_NOTHING = re.compile(
     r"nichts (bekommen|erhalten|angekommen)|nie angekommen|nothing (arrived|came|was delivered)|"
-    r"rien re[çc]u|non [èe] arrivato niente|no me ha llegado nada", re.I)
+    r"rien re[çc]u|non [èe] arrivato niente|no (he )?recibido nada|no me ha llegado", re.I)
+# 德语宾语在动词前：“die Rechnung nicht bekommen”看前面的名词，只往前找
+_NR_BROAD_DE = re.compile(r"nicht (angekommen|erhalten|bekommen|zugestellt|gefunden|auffindbar)", re.I)
+# 德语代词紧跟“nicht bekommen”（中间可以有 noch、leider 等）：“ich habe es nicht bekommen”；“das Geld nicht bekommen”里的 das 是冠词，不算
+_NR_DE_PRONOUN = re.compile(
+    r"\b(es|ihn|sie|das|nichts)\s+((leider|noch|bisher|immer|jetzt|bis heute)\s+){0,3}nicht (bekommen|erhalten|angekommen)\b", re.I)
 _NR_BROAD = re.compile(
     r"not (yet )?(been )?(received|arrived|delivered)|never (arrived|received|came|got)|haven['’]?t (yet )?(got|received)|"
-    r"didn['’]?t (get|receive|arrive)|nicht (angekommen|erhalten|bekommen|zugestellt|gefunden|auffindbar)|"
-    r"pas (re[çc]u|arriv)|non (ho )?ricevut|no (he )?recibido|no ha llegado", re.I)
+    r"(hasn['’]?t|has not|haven['’]?t|have not) (yet )?(arrived|come|been delivered)|"
+    r"didn['’]?t (get|receive|arrive)|pas (re[çc]u|arriv)|non (ho )?ricevut|no (he )?recibido|no ha llegado", re.I)
 _NR_PARCEL = re.compile(
     r"\b(paket|päckchen|sendung|lieferung|bestellung|ware|artikel|teil|teile|package|parcel|order|item|items|it|shipment|"
     r"delivery|goods|colis|paquet|commande|pacco|ordine|paquete|pedido)\b", re.I)
@@ -625,26 +630,28 @@ _NR_OTHER = re.compile(
     r"facture|remboursement|fattura|rimborso|factura|reembolso", re.I)
 # 只用于“要不要先查包裹”（多查一次没坏处），宽松；判“妥投未收到”用 buyer_says_not_received
 OLD_MESSAGE_AGE = timedelta(hours=24)  # 与同步里店铺 AI 开关的时效一致
-_NOT_RECEIVED = re.compile("|".join(r.pattern for r in (_NR_PACKAGE, _NR_NOTHING, _NR_BROAD)), re.I)
+_NOT_RECEIVED = re.compile("|".join(r.pattern for r in (_NR_PACKAGE, _NR_NOTHING, _NR_BROAD_DE, _NR_BROAD)), re.I)
+
+
+def _nearest(rx: re.Pattern, t: str, m: re.Match, before_only: bool) -> int | None:
+    """rx 在 m 前后 60 字内离 m 最近的距离（字符数）；before_only 只看前面。"""
+    lo, hi = max(0, m.start() - 60), (m.start() if before_only else min(len(t), m.end() + 60))
+    ds = [min(abs(x.end() + lo - m.start()), abs(x.start() + lo - m.end())) for x in rx.finditer(t[lo:hi])]
+    return min(ds) if ds else None
 
 
 def buyer_says_not_received(text: str | None) -> bool:
     """买家说的是“包裹没收到 / 找不到”（不是发票、回复、退款、说明书没收到）。"""
     t = text or ""
-    if _NR_PACKAGE.search(t):
+    if _NR_PACKAGE.search(t) or _NR_DE_PRONOUN.search(t):
         return True
     if _NR_NOTHING.search(t) and (not _NR_OTHER.search(t) or _NR_PARCEL.search(t)):
         return True
-    for m in _NR_BROAD.finditer(t):
-        lo, hi = max(0, m.start() - 60), min(len(t), m.end() + 60)
-
-        def nearest(rx: re.Pattern) -> int | None:
-            ds = [min(abs(x.end() + lo - m.start()), abs(x.start() + lo - m.end())) for x in rx.finditer(t[lo:hi])]
-            return min(ds) if ds else None
-
-        parcel, other = nearest(_NR_PARCEL), nearest(_NR_OTHER)
-        if parcel is not None and (other is None or parcel <= other):
-            return True
+    for rx, before_only in ((_NR_BROAD_DE, True), (_NR_BROAD, False)):
+        for m in rx.finditer(t):
+            parcel, other = _nearest(_NR_PARCEL, t, m, before_only), _nearest(_NR_OTHER, t, m, before_only)
+            if parcel is not None and (other is None or parcel <= other):
+                return True
     return False
 
 

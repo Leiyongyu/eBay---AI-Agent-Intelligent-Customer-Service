@@ -854,12 +854,20 @@ def test_not_received_colloquial_phrases():
                  "Das Paket ist nicht da, der Briefkasten ist leer.", "I can't find my parcel anywhere.",
                  "It says delivered but I never received it.", "I haven't received my order.", "Je n'ai rien reçu.",
                  "Paket nicht bekommen und auch keine Rechnung", "I don't have the package, nobody has it.",
-                 "I don’t have my parcel.", "Non è arrivato niente.", "No me ha llegado nada."):
+                 "I don’t have my parcel.", "Non è arrivato niente.", "No me ha llegado nada.",
+                 # 复测第二轮：德语代词、西语 nada、hasn't arrived
+                 "Laut DHL zugestellt, aber ich habe es nicht bekommen.", "Ich habe es leider noch nicht bekommen.",
+                 "No he recibido nada.", "Where is my parcel? It hasn't arrived yet.", "Mein Paket ist nicht angekommen."):
         assert _tracking_problems(state, text) == ["TRACKING_DELIVERED_NOT_RECEIVED"], text
     for text in ("Ich habe die Rechnung nicht bekommen.", "Ich habe noch keine Antwort bekommen.",
                  "Ich habe die Einbauanleitung nicht gefunden.", "I haven't received the invoice yet.", "I didn't get a reply.",
                  "Wo ist mein Paket? Wann kommt es?", "Ich bin morgen nicht da, bitte beim Nachbarn abgeben.",
-                 "Thanks, I have the package now.", "Ich habe das Paket bekommen, danke."):
+                 "Thanks, I have the package now.", "Ich habe das Paket bekommen, danke.",
+                 # 复测第二轮的边界句：德语宾语在动词前，只看前面；“das Geld”里的 das 是冠词
+                 "aber noch keine Rechnung bekommen", "The parcel arrived, but I haven't received the invoice",
+                 "Ich habe das Geld nicht bekommen", "Ich habe die Sendungsnummer nicht bekommen",
+                 "Ich habe die Rechnung noch nicht bekommen, das Paket aber schon.",
+                 "Der Artikel ist da, aber es fehlt die Anleitung."):
         assert _tracking_problems(state, text) == [], text
 
 
