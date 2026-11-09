@@ -13,7 +13,7 @@ import json
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
@@ -117,6 +117,7 @@ def load_snapshot(state: AgentState, deps: AgentDeps):
         "source_message_ids": [m.ebay_message_id for m in buyer_msgs],
         "source_db_ids": [m.id for m in buyer_msgs],
         "buyer_texts": [m.body for m in buyer_msgs],
+        "latest_buyer_at": max((m.sent_at.isoformat() for m in buyer_msgs if m.sent_at), default=None),
         "snapshot_at": utcnow().isoformat(timespec="seconds") + "Z",
     }
     return {"snapshot": snapshot, "problems": [], "observations": [], "attachments": [], "repairs": 0, "usage": {},
@@ -623,6 +624,7 @@ _NR_OTHER = re.compile(
     r"invoice|receipt|manual|instructions|reply|answer|refund|tracking ?number|message|e-?mail|"
     r"facture|remboursement|fattura|rimborso|factura|reembolso", re.I)
 # 只用于“要不要先查包裹”（多查一次没坏处），宽松；判“妥投未收到”用 buyer_says_not_received
+OLD_MESSAGE_AGE = timedelta(hours=24)  # 与同步里店铺 AI 开关的时效一致
 _NOT_RECEIVED = re.compile("|".join(r.pattern for r in (_NR_PACKAGE, _NR_NOTHING, _NR_BROAD)), re.I)
 
 
@@ -789,6 +791,10 @@ def validate_output(state: AgentState, deps: AgentDeps):
                                  parsed["action"], parsed["intent"])
         compliance = ComplianceChecker().check(parsed["reply_text"], allowed_tokens=tokens).to_dict()
 
+    # 超过 24 小时的旧来信（补拉到的、首次同步补建的任务）：只起草，必须人工审核，不自动发
+    latest = snap.get("latest_buyer_at")
+    if latest and datetime.fromisoformat(latest) < utcnow() - OLD_MESSAGE_AGE:
+        problems.append("OLD_MESSAGE")
     suppress = False  # 规则：会话最后一句永远是我们发的——不再因为“同事在跟进”压掉草稿，只标出来请跟进的同事核对后再发
     if parsed and parsed["action"] == "handoff" and _human_following(deps):
         problems.append("HUMAN_FOLLOWING")

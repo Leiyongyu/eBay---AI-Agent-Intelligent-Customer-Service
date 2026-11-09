@@ -153,7 +153,10 @@ def test_sync_creates_jobs_only_for_recent_messages_of_enabled_store(ebay_env, m
     assert make_sync(FakeEbay()).run()["ok"]
     with session_scope() as db:
         jobs = db.scalars(select(ReplyJob)).all()
-        assert len(jobs) == 1  # 只有 24 小时内的 M9；前天的旧买家消息不自动处理
+        # 24 小时内的 M9 照常建任务；前天的旧买家消息不按来信自动建，但会话最后一句是买家的（C2、C4）
+        # 按“最后一句永远是我们的”补建一个任务进未处理（这类旧来信只起草、不自动发，见 OLD_MESSAGE）；C1 最后是我们回的：不建
+        assert sorted(j.anchor_source_message_id for j in jobs) == ["M3", "M5", "M9"]
+        assert len({j.conversation_id for j in jobs}) == 3
 
 
 def test_gate_general_mode_l1_any_evidence_with_exclusions():
@@ -187,3 +190,22 @@ def test_streak_limit_counts_consecutive_auto_replies(client, monkeypatch):
             _append_message(db, conv, f"SIM-{i}", role, "OUT" if role == "SELLER" else "IN", "x", None)
         db.flush()
         assert service.auto_reply_streak(db, conv.id) == 2  # 末尾两条店铺回复是自动的，第一条是人工
+
+
+def test_old_message_never_auto_sent(auto_env):
+    """超过 24 小时的旧来信（补拉到的、首次同步补建任务的）：同样的草稿只起草、进待审核，不自动发（OLD_MESSAGE）。"""
+    from app.db import session_scope, utcnow
+    from app.models import Message
+    from app.worker import worker
+
+    client = auto_env
+    client.post("/internal/stores/STORE_A/auto-reply", json={"enabled": True})
+    use_fake_llm(kb_draft())
+    sent = send_buyer(client, "Where is my order?", buyer="buyer_old_1")
+    with session_scope() as db:
+        for m in db.query(Message).filter(Message.conversation_id == sent["conversation_id"]):
+            m.sent_at = utcnow() - timedelta(days=2)
+    worker.run_once()
+    d = detail(client, sent["conversation_id"])
+    assert d["job"]["state"] == "REVIEW_REQUIRED" and "OLD_MESSAGE" in d["job"]["decision_reasons"]
+    assert d["messages"][-1]["role"] == "BUYER"

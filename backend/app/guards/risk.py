@@ -52,6 +52,7 @@ REASON_LABELS = {
     "RISK_NOT_L0": "风险等级超过自动发送上限（AUTO_SEND_MAX_RISK）",
     "INTENT_NOT_WHITELISTED": "意图不在自动发送白名单",
     "AUTO_SEND_DISABLED": "自动发送未开启（P2 全部人工审核）",
+    "OLD_MESSAGE": "买家来信已超过 24 小时（补拉到的旧消息）：只起草，人工审核后再发",
     "STORE_AUTO_SEND_OFF": "店铺未开启自动发送",
     "NO_KB_EVIDENCE": "回复没有可靠依据（没引用知识库、商品信息或查询结果）",
     "AUTO_REPLY_STREAK": "AI 已连续自动回复多次（达到 AUTO_REPLY_MAX_STREAK），这次交人工",
