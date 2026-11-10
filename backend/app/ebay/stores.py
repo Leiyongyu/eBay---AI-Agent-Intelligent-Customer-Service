@@ -45,7 +45,7 @@ def ebay_store_targets(keys: set[str] | None = None) -> list[EbayStoreTarget]:
                                            marketplace_id=store.default_marketplace_id, source="env"))
     # 只拉这些店铺：EBAY_SYNC_STORES（* = 全部店铺）；没填时用 EBAY_LIVE_STORES（对接 eBay 真实收发的店铺）。按店铺 ID、eBay 账号或店铺名匹配。
     # 拉取范围和真实发送范围分开：拉进来的其他店铺发送只记在本地，不发到 eBay（发送只看 EBAY_LIVE_STORES）
-    if keys is None and (s.ebay_sync_stores or "").strip() == "*":
+    if (keys is None and (s.ebay_sync_stores or "").strip() == "*") or keys == {"*"}:
         return targets
     wanted = keys if keys is not None else {x.strip().lower() for x in (s.ebay_sync_stores or "").split(",") if x.strip()} or s.ebay_live_store_keys
     if wanted:

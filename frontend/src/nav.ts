@@ -7,7 +7,7 @@ import { reactive } from 'vue'
  */
 export type ViewKey =
   | 'workbench' | 'knowledge' | 'aftersales' | 'tickets' | 'shipnotices' | 'cases' | 'invoices' | 'ebaycases' | 'customers' | 'sync'
-  | 'followups'
+  | 'followups' | 'reasons'
   | 'performance' | 'launch' | 'templates' | 'offers' | 'bestoffers'
   | 'usage' | 'status' | 'accounts' | 'settings' | 'todo'
 
@@ -94,6 +94,7 @@ export const NAV: NavGroup[] = [
           { id: 'cases', label: '售后工单', view: 'cases' },
           { id: 'tickets', label: '查件单', view: 'tickets' },
           { id: 'followups', label: '异常包裹跟进', view: 'followups' },
+          { id: 'aftersales-reasons', label: '售后原因', view: 'reasons' },
           { id: 'shipnotices', label: '发货通知', view: 'shipnotices' },
           { id: 'invoices', label: '发票', view: 'invoices' },
           { id: 'aftersales', label: '售后附件', view: 'aftersales', feature: 'aftersales_files' },

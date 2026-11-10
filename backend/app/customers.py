@@ -157,15 +157,15 @@ def blacklist_entry(db: Session, store_id: str | None, buyer: str | None) -> Buy
 
 
 def blacklist_map(db: Session, pairs: set[tuple[str, str]]) -> dict[tuple[str, str], BuyerBlacklist]:
-    """批量查（店铺, 买家小写）→ 黑名单记录（店铺专属的优先，其次全部店铺）。"""
+    """批量查（店铺, 买家小写）→ 黑名单记录：“全部店铺”的优先，其次这个店铺的（与工作台、详情页、blacklist_entry 一致）。"""
     buyers = {b for _, b in pairs if b}
     if not buyers:
         return {}
     rows = db.scalars(select(BuyerBlacklist).where(BuyerBlacklist.buyer.in_(buyers))).all()
     out = {}
     for sid, b in pairs:
-        hit = next((r for r in rows if r.buyer == b and r.store_id == sid), None) or \
-            next((r for r in rows if r.buyer == b and r.store_id is None), None)
+        hit = next((r for r in rows if r.buyer == b and r.store_id is None), None) or \
+            next((r for r in rows if r.buyer == b and r.store_id == sid), None)
         if hit:
             out[(sid, b)] = hit
     return out

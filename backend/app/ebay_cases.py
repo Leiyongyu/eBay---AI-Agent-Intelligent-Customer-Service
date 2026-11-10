@@ -271,6 +271,12 @@ def sync_all() -> dict:
                         from_cases(db, store_id)
                 except Exception as e:  # noqa: BLE001
                     errors["FOLLOWUPS"] = str(e)[:300]
+        try:  # 订单维度的售后原因分类（规则，不调模型）：这个店铺的订单和售后单更新后重算，人工标记不动
+            from .aftersales_reasons import refresh_store
+
+            stats["reasons_updated"] = stats.get("reasons_updated", 0) + refresh_store(store_id).get("updated", 0)
+        except Exception as e:  # noqa: BLE001
+            errors["REASONS"] = str(e)[:300]
         try:  # 售后列表的商品图、标题：补拉新出现的商品（存库，打开页面时不再实时查）
             r = refresh_listings(store_id)
             stats["listings_fetched"] += r["fetched"]

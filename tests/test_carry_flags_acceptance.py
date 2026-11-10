@@ -138,8 +138,6 @@ INR_CARD = {"issues": [{"id": "sys:case:INQUIRY:5300000001", "source": "system",
                         "order_id": "110000000003-2345678901001", "flags": ["LOGISTICS", "NOT_RECEIVED"]}]}
 
 
-@pytest.mark.xfail(strict=True, reason="问题 E2b（中）：ebay_cases 里的咨询 / 纠纷订单号是旧格式“商品号-交易号”（正式库 220/220），"
-                                       "本轮订单是新格式，订单永远对不上，同步进库的 INR 咨询短追问时接不上没收到")
 def test_inr_case_legacy_order_id_still_carried():
     from app import conversation_state as cs
 
@@ -147,7 +145,6 @@ def test_inr_case_legacy_order_id_still_carried():
     assert "NOT_RECEIVED" in got
 
 
-@pytest.mark.xfail(strict=True, reason="问题 E2c（低）：订单号前后有空格 / 大小写不同就对不上")
 def test_order_id_whitespace_or_case():
     from app import conversation_state as cs
 
@@ -205,8 +202,6 @@ def test_is_follow_up_sentences(text, want):
     assert cs.is_follow_up(text) is want
 
 
-@pytest.mark.xfail(strict=True, reason="问题 E3b（低）：德语缩写 z.B. / ca. / bzw. 后面跟空格会被当成句末，长句子被切出一段 ≤100 字、"
-                                       "含“noch nicht”的短句，算成追问")
 @pytest.mark.parametrize("text", [
     "Ich habe zu meinem neuen Golf 7 Variant aus der Werkstatt mehrere Fragen, z.B. ob ich das Thermostat noch nicht einbauen soll.",
     "Für meinen Golf 7 Variant Baujahr 2015 habe ich in der Garage ca. drei Teile liegen, die ich noch nicht eingebaut habe, passen die?",
@@ -217,3 +212,27 @@ def test_is_follow_up_german_abbreviations(text):
 
     assert len(text) > 100
     assert cs.is_follow_up(text) is False
+
+
+# ---------------------------------------------------------------- 第六轮（2026-11-10）：E3b 修复后的反例
+@pytest.mark.parametrize("text", [
+    "Ich habe zu meinem neuen Golf 7 Variant aus der Werkstatt mehrere Fragen, z. B. ob ich das Thermostat noch nicht einbauen soll.",
+    "Für meinen Golf 7 Variant aus der Werkstatt habe ich mehrere Teile, d. h. die Sensoren, die ich noch nicht eingebaut habe, passen?",
+], ids=["z_B_spaced", "d_h_spaced"])
+def test_is_follow_up_spaced_abbreviations(text):
+    from app import conversation_state as cs
+
+    assert len(text) > 100 and cs.is_follow_up(text) is False
+
+
+def test_unconvertible_legacy_order_treated_as_no_order():
+    """换算不了的旧格式订单号按“没写订单”处理：任何本轮订单都接（正式库 14 张换算不了，全是已结单、对接店铺 0 张，不进状态卡）。"""
+    from app import conversation_state as cs
+
+    card = {"issues": [{"id": "sys:case:INQUIRY:1", "source": "system", "intent": "delivery_delay",
+                        "order_id": "110000000003-2345678901001", "flags": ["LOGISTICS", "NOT_RECEIVED"]}]}
+    assert "NOT_RECEIVED" in cs.carried_flags(card, None, "Any news?", ["delivery_delay"], orders=["26-10002-US"])
+    card["issues"][0]["order_key"] = "26-99999-US"  # 换算成功、是另一单：不接
+    assert cs.carried_flags(card, None, "Any news?", ["delivery_delay"], orders=["26-10002-US"]) == set()
+    card["issues"][0]["order_key"] = "26-10002-US"
+    assert "NOT_RECEIVED" in cs.carried_flags(card, None, "Any news?", ["delivery_delay"], orders=[" 26-10002-us "])

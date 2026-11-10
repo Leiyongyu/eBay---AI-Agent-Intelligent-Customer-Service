@@ -2,11 +2,14 @@
 // 回复页右侧：相关信息（订单、包裹、商品、收件信息）/ 客户资料（累计订单与退款）/ 历史记录（同一买家的其他会话）
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { api, get } from '../api'
+import { ApiError, api, get } from '../api'
 import { errorText } from '../format'
 import type { ConvContext, ConversationItem, CustomerOrder, CustomerPanelData, ListingCard, MessageTag } from '../types'
 import OrderExtras from './OrderExtras.vue'
 import ParcelFollowupDialog from './ParcelFollowupDialog.vue'
+import AftersalesReasonEditor from './AftersalesReasonEditor.vue'
+import { REASON_LABEL, STATUS_LABEL, UC_LABEL, aiExplain, finalLabel } from '../aftersalesReason'
+import type { AftersalesReasonCode, AftersalesReasonList, AftersalesReasonRow } from '../types'
 import type { FollowupDraft } from '../parcelFollowup'
 import { dotStyle, tagStyle } from '../tagColor'
 
@@ -39,6 +42,60 @@ async function openFollowup() {
     const p = await get<FollowupDraft & { existing?: number }>(`/internal/parcel-followups/prefill?conversation_id=${props.conv.id}`)
     delete p.existing
     pfDraft.value = p
+  } catch (e) {
+    ElMessage.error(errorText(e))
+  }
+}
+
+// ---- 售后原因（订单维度的最终分类）：显示这单当前的分类（AI / 人工），可以改；会话对应多张订单时先选订单 ----
+const arRows = ref<AftersalesReasonRow[]>([])
+const arOpen = ref(false)
+const arOrder = ref('')
+const arSaving = ref(false)
+async function loadReasons() {
+  const id = props.conv?.id
+  if (!id) return
+  const r = await get<AftersalesReasonList>(`/internal/aftersales-reasons?conversation_id=${id}&page_size=50`).catch(() => null)
+  if (props.conv?.id === id) arRows.value = r?.items || []
+}
+watch(() => props.conv?.id, loadReasons, { immediate: true })
+// 这单（侧栏当前显示的订单）对应的分类；没有就取会话的第一张
+const arCurrent = computed(() => arRows.value.find((r) => r.order_id === order.value?.order_id) || arRows.value[0] || null)
+const arExtraOrders = ref<string[]>([]) // 后端 422 时给出的候选订单
+const arOrders = computed(() => [...new Set([...arRows.value.map((r) => r.order_id), ...(props.data?.orders || []).map((o) => o.order_id),
+  ...arExtraOrders.value])])
+const arPicked = computed(() => arRows.value.find((r) => r.order_id === arOrder.value) || null)
+function openReason() {
+  arOrder.value = arCurrent.value?.order_id || order.value?.order_id || arOrders.value[0] || ''
+  arOpen.value = true
+}
+async function saveReason(body: { reason: AftersalesReasonCode; note: string } | { text: string }) {
+  if (!props.conv || !arOrder.value) return
+  const text = 'text' in body ? body.text : `${REASON_LABEL[body.reason]}${body.note ? ` ${body.note}` : ''}`
+  arSaving.value = true
+  try {
+    await api('PUT', `/internal/conversations/${props.conv.id}/aftersales-reason`, { order_id: arOrder.value, text })
+    ElMessage.success('已保存售后原因')
+    arOpen.value = false
+    await loadReasons()
+  } catch (e) {
+    // 会话对应多张或对不上订单：后端给出候选订单，加进选项让客服选
+    const orders = e instanceof ApiError && Array.isArray((e.detail as { orders?: unknown })?.orders)
+      ? ((e.detail as { orders: string[] }).orders) : []
+    if (orders.length) {
+      arExtraOrders.value = orders
+      if (!orders.includes(arOrder.value)) arOrder.value = orders[0]
+    }
+    ElMessage.error(errorText(e))
+  } finally {
+    arSaving.value = false
+  }
+}
+async function clearReason() {
+  if (!arPicked.value) return
+  try {
+    await api('DELETE', `/internal/aftersales-reasons/${arPicked.value.id}/manual`)
+    await loadReasons()
   } catch (e) {
     ElMessage.error(errorText(e))
   }
@@ -287,11 +344,41 @@ const initial = (s: string) => (s || '?').slice(0, 1).toUpperCase()
             </svg>
             异常跟进<span v-if="pfCount" class="pf-cnt">{{ pfCount }}</span>
           </button>
+          <button class="tool" :title="arCurrent ? `售后原因：${finalLabel(arCurrent)}（${STATUS_LABEL[arCurrent.status] || ''}），点击修改` : '给这单标售后原因'"
+                  @click="openReason">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+              <path d="M4 5h16M4 12h10M4 19h7" stroke-linecap="round" /><circle cx="18" cy="17" r="3" />
+            </svg>
+            售后原因
+            <span v-if="arCurrent?.final_reason" class="ar-tag" :class="arCurrent.status.toLowerCase()">{{ finalLabel(arCurrent) }}</span>
+          </button>
           <span class="marks">
             <el-tag v-for="m in conv?.marks || []" :key="m.tag_id" size="small" :style="tagStyle(m.color, true)" closable
                     @close="toggleMark(m.tag_id)">{{ m.tag }}</el-tag>
           </span>
         </div>
+
+        <el-dialog v-model="arOpen" title="售后原因" width="min(440px, calc(100vw - 24px))" append-to-body>
+          <div v-if="arOrders.length > 1" class="ar-orders">
+            <span class="muted">这个会话有 {{ arOrders.length }} 张订单，先选订单：</span>
+            <el-radio-group v-model="arOrder" size="small">
+              <el-radio-button v-for="o in arOrders" :key="o" :value="o">{{ o }}</el-radio-button>
+            </el-radio-group>
+          </div>
+          <div v-else-if="arOrder" class="muted ar-orders">订单 {{ arOrder }}</div>
+          <div v-else class="muted ar-orders">这个会话还没有对上订单，暂时不能标售后原因</div>
+          <div v-if="arPicked" class="ar-now">
+            <div>最终分类：<b>{{ finalLabel(arPicked) }}</b>
+              <span class="muted">（{{ STATUS_LABEL[arPicked.status] || arPicked.status }}）</span></div>
+            <div v-if="arPicked.ai_reason" class="muted">AI：{{ REASON_LABEL[arPicked.ai_reason] }}——{{
+              [...aiExplain(arPicked).notes, ...aiExplain(arPicked).basis].join('；') || '没有依据说明' }}</div>
+            <div v-else-if="arPicked.ai_note" class="muted">AI 没分类<template v-if="arPicked.unclassified_kind">（{{ UC_LABEL[arPicked.unclassified_kind] }}）</template>：{{ arPicked.ai_note }}</div>
+            <div v-if="arPicked.manual_reason" class="muted">人工：{{ REASON_LABEL[arPicked.manual_reason] }} {{ arPicked.manual_note || '' }}
+              · {{ arPicked.manual_by }}<el-button link size="small" type="danger" @click="clearReason">撤销人工</el-button></div>
+          </div>
+          <AftersalesReasonEditor v-if="arOrder" :key="arOrder" :reason="arPicked?.manual_reason" :note="arPicked?.manual_note"
+                                  :saving="arSaving" @save="saveReason" @cancel="arOpen = false" />
+        </el-dialog>
 
         <div v-if="ex?.blacklist" class="black">黑名单买家：{{ ex.blacklist.reason || '未填原因' }}（{{ ex.blacklist.created_by }} 加入）· AI 不起草回复</div>
         <div v-if="exError" class="err">补充信息加载失败：{{ exError }}
@@ -656,8 +743,9 @@ const initial = (s: string) => (s || '?').slice(0, 1).toUpperCase()
 }
 .owner-row {
   display: flex;
+  flex-wrap: wrap; /* 侧栏窄时按钮换行，不再一个字一行 */
   align-items: center;
-  gap: 10px;
+  gap: 6px 10px;
   padding: 10px 0;
   border-bottom: 1px solid var(--line-soft);
   font-size: 13px;
@@ -951,6 +1039,7 @@ table.kv {
   display: inline-flex;
   align-items: center;
   gap: 3px;
+  white-space: nowrap;
   border: 0;
   background: none;
   padding: 0 2px;
@@ -973,6 +1062,36 @@ table.kv {
   border-radius: 50%;
   margin-right: 6px;
   background: #8a94a6;
+}
+.ar-tag {
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 16px;
+  background: var(--sunken);
+  color: var(--text-2);
+}
+.ar-tag.manual {
+  background: var(--ok-text);
+  color: #fff;
+}
+.ar-tag.ai {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.ar-orders {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.ar-now {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 10px;
+  font-size: 13px;
 }
 .tick {
   margin-left: 8px;

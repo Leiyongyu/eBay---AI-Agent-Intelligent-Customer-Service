@@ -47,7 +47,45 @@ CASE_INTENTS = {"return_refund": {LOGISTICS, NOT_RECEIVED}, "refund_status": {LO
 # 短追问：按句子判断，一句不超过 FOLLOW_UP_SENTENCE 字的追问就算（长消息里“有进展吗 + 问适配”也能认出来）
 FOLLOW_UP_SENTENCE = 100
 # 断句：英文标点后面要跟空白才算句末（“1.6 TDI”“Nr. 5”不会被切开），中文句号问号叹号、换行直接断
-_SPLIT = re.compile(r"(?<=[.!?])\s+|[\n。！？]+")
+# 常见缩写（德英法意西）：句号后面跟空格也不算句末，免得把长句子切出一段带“noch nicht”的短句
+ABBREVIATIONS = {
+    "z.b", "ca", "bzw", "usw", "evtl", "inkl", "exkl", "nr", "ggf", "d.h", "u.a", "z.t", "o.ä", "u.u", "vgl", "bsp", "max", "min",
+    "str", "tel", "zzgl", "mwst", "gem", "e.g", "i.e", "etc", "approx", "no", "vs", "mr", "mrs", "ms", "dr", "st", "incl", "excl",
+    "env", "p.ex", "cf", "réf", "ref", "n°", "ecc", "p.es", "pag", "sig", "aprox", "p.ej", "núm", "num", "sr", "sra", "ud", "uds",
+}
+_SENT_END = re.compile(r"[.!?]\s+")
+LEGACY_ORDER = re.compile(r"^\d{9,}-\d{6,}$")  # 旧格式订单号：商品号-交易号
+
+
+def _spaced_abbreviation(part: str, start: int, m) -> bool:
+    """带空格的缩写（z. B. / d. h. / u. a.）：前一个点（“z.”后面跟“B.”）和后一个点（“z. B.”的“B.”）都不断。"""
+    before = part[start:m.start()]
+    one = re.search(r"(?:^|[\s(（\[])(\w)$", before)
+    nxt = re.match(r"(\w)\.", part[m.end():])
+    if one and nxt and f"{one.group(1)}.{nxt.group(1)}".lower() in ABBREVIATIONS:
+        return True
+    two = re.search(r"(?:^|[\s(（\[])(\w)\.\s+(\w)$", before)
+    return bool(two and f"{two.group(1)}.{two.group(2)}".lower() in ABBREVIATIONS)
+
+
+def _sentences(text: str) -> list[str]:
+    """断句：中文句号问号叹号、换行直接断；英文标点后要有空白才断，句号前是常见缩写（z.B. / z. B. / ca. / bzw. / e.g.）、
+    或像“1.6 TDI”这样夹在数字中间的不断。"""
+    out = []
+    for part in re.split(r"[\n。！？]+", text or ""):
+        start = 0
+        for m in _SENT_END.finditer(part):
+            if part[m.start()] == ".":
+                word = re.search(r"([^\s(（\[]+)$", part[start:m.start()])
+                token = (word.group(1) if word else "").lower().rstrip(".")
+                if token in ABBREVIATIONS or token[-1:].isdigit() and part[m.end():m.end() + 1].isdigit():
+                    continue
+                if _spaced_abbreviation(part, start, m):
+                    continue
+            out.append(part[start:m.start() + 1])
+            start = m.end()
+        out.append(part[start:])
+    return [s for s in out if s.strip()]
 MAX_TOKENS = 400
 MAX_ISSUES, MAX_RESOLVED, MAX_PROMISES, MAX_SKUS = 6, 4, 4, 5
 SUMMARY_CHARS = 40
@@ -137,7 +175,44 @@ def system_issues(db: Session, conv: Conversation, observations: list[dict] | No
                     "since": _day(c.sent_at or c.created_at),
                     "status": "群里已回复，待回复买家" if c.status == "REPLIED" else "已发售后群，等技术回复", "refs": [],
                     "flags": []})
+    _attach_order_keys(db, conv.store_id, out)
     return out
+
+
+def norm_order(order_id: str | None) -> str | None:
+    """订单号比对前统一：去掉首尾空格、转大写。"""
+    v = (order_id or "").strip().upper()
+    return v or None
+
+
+def is_legacy_order(order_id: str | None) -> bool:
+    """旧格式“商品号-交易号”（eBay 咨询 / 纠纷里的订单号），和新格式订单号（如 12-34567-89012）不能直接比。"""
+    return bool(order_id and LEGACY_ORDER.match(order_id.strip()))
+
+
+def _attach_order_keys(db: Session, store_id: str, issues: list[dict]) -> None:
+    """系统问题的订单号换算成新格式（order_key）：旧格式“商品号-交易号”按订单商品明细（ebay_order_lines 的
+    line_key / legacy_order_id）找到新格式订单号；找不到就不写 order_key（比对时当作没写订单）。"""
+    from .models import EbayOrderLine
+
+    legacy = {i["order_id"].strip() for i in issues if is_legacy_order(i.get("order_id"))}
+    found: dict[str, str] = {}
+    if legacy:
+        for key, old, oid in db.execute(select(EbayOrderLine.line_key, EbayOrderLine.legacy_order_id, EbayOrderLine.order_id)
+                                        .where(EbayOrderLine.store_id == store_id,
+                                               (EbayOrderLine.line_key.in_(legacy)) | (EbayOrderLine.legacy_order_id.in_(legacy)))):
+            for k in (key, old):
+                if k in legacy:
+                    found[k] = oid
+    for i in issues:
+        oid = (i.get("order_id") or "").strip()
+        if not oid:
+            continue
+        if is_legacy_order(oid):
+            if oid in found:
+                i["order_key"] = norm_order(found[oid])
+        else:
+            i["order_key"] = norm_order(oid)
 
 
 def system_facts(db: Session, conv: Conversation, issues: list[dict]) -> dict:
@@ -316,7 +391,7 @@ def open_flags(card: dict | None) -> set[str]:
 def is_follow_up(text: str | None) -> bool:
     """来信里有一句短的追问、催问（“有进展吗”“any news”“immer noch nicht”）。按句子看：长消息里追问一句、
     再问别的也算；追问词埋在长句子里（如“我还没决定要不要……”）不算。"""
-    for s in _SPLIT.split(text or ""):
+    for s in _sentences(text or ""):
         s = s.strip()
         if s and len(s) <= FOLLOW_UP_SENTENCE and FOLLOW_UP.search(s):
             return True
@@ -326,9 +401,14 @@ def is_follow_up(text: str | None) -> bool:
 def _order_ok(issue_: dict, orders: list[str] | None) -> bool:
     """问题的订单和本轮订单对得上：本轮订单唯一时只接同订单或没写订单的问题；不明确时只接没写订单的；
     orders 为 None（调用方不看订单）不过滤。"""
-    if orders is None or not issue_.get("order_id"):
+    if orders is None:
         return True
-    return len(orders) == 1 and issue_["order_id"] == orders[0]
+    # 两边换成同一种订单号再比（首尾空格、大小写不同也算同一单）；旧格式“商品号-交易号”换算不了的当作没写订单
+    key = issue_.get("order_key") or (None if is_legacy_order(issue_.get("order_id")) else norm_order(issue_.get("order_id")))
+    if not key:
+        return True
+    wanted = {norm_order(o) for o in orders if norm_order(o)}
+    return len(wanted) == 1 and key in wanted
 
 
 def carried_flags(card: dict | None, inherits: str | None, buyer_text: str, intents: list[str] | None = None,

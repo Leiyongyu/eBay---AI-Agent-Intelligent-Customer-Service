@@ -18,7 +18,7 @@ eBay 接口（2026-11-10 查官方文档）：
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
 
@@ -30,6 +30,9 @@ from .models import EbayCase
 log = logging.getLogger(__name__)
 
 ORIGIN = "BASELINE_BACKFILL"
+ORIGIN_90D = "CASE_BACKFILL_90D"  # 2026-11-10 售后原因分类用：全部店铺最近 90 天
+BACKFILL_ORIGINS = (ORIGIN, ORIGIN_90D)  # 补拉来的单（异常包裹跟进跳过、基线升级率当作已补拉）
+DISPUTE_WINDOW = timedelta(days=89)  # 付款纠纷一次最多查 90 天：按 89 天一段分开查
 SEEN_BY = "基线补拉"
 DEFAULT_START = datetime(2026, 9, 10)
 DEFAULT_END = datetime(2026, 11, 5)  # 不含
@@ -119,24 +122,33 @@ class CaseBackfill:
         tokens = self.dispute_tokens(store_id)
         base = get_settings().ebay_api_base.replace("://api.", "://apiz.")
         rows: dict[str, dict] = {}
-        for page in range(MAX_PAGES):
-            api.calls += 1
-            r = api.http.get(f"{base}/sell/fulfillment/v1/payment_dispute_summary",
-                             params={"open_date_from": _ts(start), "open_date_to": _ts(end), "limit": PAGE,
-                                     "offset": page * PAGE},
-                             headers={"Authorization": f"Bearer {tokens.access_token()}", "Accept": "application/json",
-                                      **({"X-EBAY-C-MARKETPLACE-ID": mk} if mk else {})})
-            if r.status_code == 204:
-                break
-            if r.status_code != 200:
-                raise SourceNotAvailable(f"eBay 接口 payment_dispute_summary 返回 HTTP {r.status_code}")
-            items = r.json().get("paymentDisputeSummaries") or []
-            for x in items:
-                if _id_of("PAYMENT_DISPUTE", x):
-                    rows[_id_of("PAYMENT_DISPUTE", x)] = x
-            if len(items) < PAGE:
-                break
+        lo = start
+        while lo < end:
+            hi = min(end, lo + DISPUTE_WINDOW)
+            for page in range(MAX_PAGES):
+                api.calls += 1
+                r = api.http.get(f"{base}/sell/fulfillment/v1/payment_dispute_summary",
+                                 params={"open_date_from": _ts(lo), "open_date_to": _ts(hi), "limit": PAGE,
+                                         "offset": page * PAGE},
+                                 headers={"Authorization": f"Bearer {tokens.access_token()}", "Accept": "application/json",
+                                          **({"X-EBAY-C-MARKETPLACE-ID": mk} if mk else {})})
+                if r.status_code == 204:
+                    break
+                if r.status_code != 200:
+                    raise SourceNotAvailable(f"eBay 接口 payment_dispute_summary 返回 HTTP {r.status_code}")
+                items = r.json().get("paymentDisputeSummaries") or []
+                for x in items:
+                    if _id_of("PAYMENT_DISPUTE", x):
+                        rows[_id_of("PAYMENT_DISPUTE", x)] = x
+                if len(items) < PAGE:
+                    break
+            lo = hi
         return list(rows.values())
+
+    def case_type(self, api, case_id: str, mk: str | None) -> str | None:
+        """纠纷详情（GET casemanagement/{caseId}）里的 caseType：ITEM_NOT_RECEIVED 未收到货 / RETURN 退货升级。"""
+        d = api.get(f"/post-order/v2/casemanagement/{case_id}", None, auth="IAF", marketplace=mk) or {}
+        return d.get("caseType")
 
     def fetch(self, store_id: str, mk: str | None, start: datetime, end: datetime) -> tuple[dict, dict, int]:
         """一个店铺 4 类售后在时间段内新开的单。返回 ({类型: [解析后的记录]}, {类型: 信息 / 错误}, 接口调用数)。"""
@@ -161,7 +173,9 @@ class CaseBackfill:
 
     # ------------------------------------------------------------ 入口
     def run(self, store_keys: set[str] | None = None, start: datetime = DEFAULT_START, end: datetime = DEFAULT_END,
-            apply: bool = False) -> dict:
+            apply: bool = False, origin: str = ORIGIN, case_details: bool = False) -> dict:
+        """store_keys={"*"} = 全部有秘钥的店铺。case_details：时间段内还不知道类型的纠纷逐张查详情补 caseType
+        （写进 reason；新拉到的和库里已有的都补，别的字段不动；试运行只统计要查几张，不调用）。"""
         from .ebay.stores import ebay_store_targets
 
         keys = store_keys or get_settings().ebay_live_store_keys
@@ -170,8 +184,8 @@ class CaseBackfill:
         targets = ebay_store_targets(keys)
         if not targets:
             return {"ok": False, "error": f"找不到可对接的店铺：{'、'.join(sorted(keys))}"}
-        report: dict = {"ok": True, "apply": apply, "period_start": _ts(start), "period_end": _ts(end),
-                        "stores": {}, "api_calls": 0}
+        report: dict = {"ok": True, "apply": apply, "period_start": _ts(start), "period_end": _ts(end), "origin": origin,
+                        "stores": {}, "api_calls": 0, "case_detail_calls": 0, "case_details_needed": 0}
         for t in targets:
             st: dict = {"name": t.name, "before": counts(t.store_id, start, end)}
             data, info, calls = self.fetch(t.store_id, t.marketplace_id, start, end)
@@ -184,6 +198,10 @@ class CaseBackfill:
                         EbayCase.store_id == t.store_id, EbayCase.kind == kind)))
                     new_rows = [r for r in rows if r.get("external_id") and r["external_id"] != "None"
                                 and r["external_id"] not in have]
+                    if kind == "CASE" and case_details and new_rows:  # 新拉到的纠纷先查类型
+                        report["case_details_needed"] += len(new_rows)
+                        if apply:
+                            self._case_types(t, new_rows, st, report)
                     kinds[kind] = {"found": len(rows), "already": len(rows) - len(new_rows), "new": len(new_rows),
                                    "new_open": sum(bool(r.get("is_open")) for r in new_rows)}
                     if apply and new_rows:
@@ -194,7 +212,19 @@ class CaseBackfill:
                                 EbayCase.external_id.in_([r["external_id"] for r in new_rows]))):
                             c.seen_at, c.seen_by = now, SEEN_BY
                             c.status_changed_at = c.opened_at or now
-                            c.detail = {**(c.detail or {}), "origin": ORIGIN}
+                            c.detail = {**(c.detail or {}), "origin": origin}
+                if case_details:  # 库里已有、还不知道类型的纠纷：只补 reason
+                    old = list(db.scalars(select(EbayCase).where(
+                        EbayCase.store_id == t.store_id, EbayCase.kind == "CASE", EbayCase.reason.is_(None),
+                        EbayCase.opened_at >= start, EbayCase.opened_at < end)))  # 刚插入的新单已带类型，不会重复查
+                    report["case_details_needed"] += len(old)
+                    st["old_cases_without_type"] = len(old)
+                    if apply and old:
+                        rows_old = [{"external_id": c.external_id} for c in old]
+                        self._case_types(t, rows_old, st, report)
+                        got = {r["external_id"]: r.get("reason") for r in rows_old}
+                        for c in old:
+                            c.reason = got.get(c.external_id) or c.reason
                 if not apply:
                     db.rollback()
             st["kinds"] = kinds
@@ -202,7 +232,21 @@ class CaseBackfill:
                 report["ok"] = False
             st["after"] = counts(t.store_id, start, end) if apply else None
             report["stores"][t.store_id] = st
+        report["api_calls"] += report["case_detail_calls"]
+        report["estimated_apply_calls"] = report["api_calls"] - report["case_detail_calls"] + report["case_details_needed"]
         return report
+
+    def _case_types(self, t, rows: list[dict], st: dict, report: dict) -> None:
+        api = self.api_factory(t.store_id)
+        types = st.setdefault("case_types", {})
+        for r in rows:
+            try:
+                r["reason"] = self.case_type(api, r["external_id"], t.marketplace_id) or r.get("reason")
+            except Exception as e:  # noqa: BLE001  某张查不到不影响其他
+                st.setdefault("case_type_errors", []).append(str(e)[:120])
+            types[r.get("reason") or "?"] = types.get(r.get("reason") or "?", 0) + 1
+        report["case_detail_calls"] += api.calls
+        st["api_calls"] = st.get("api_calls", 0) + api.calls
 
 
 def counts(store_id: str, start: datetime, end: datetime) -> dict:

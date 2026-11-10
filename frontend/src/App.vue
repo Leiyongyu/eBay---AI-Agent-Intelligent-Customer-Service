@@ -21,6 +21,7 @@ import BestOfferView from './views/BestOfferView.vue'
 import AftersalesFilesView from './views/AftersalesFilesView.vue'
 import LogisticsTicketsView from './views/LogisticsTicketsView.vue'
 import ParcelFollowupsView from './views/ParcelFollowupsView.vue'
+import AftersalesReasonsView from './views/AftersalesReasonsView.vue'
 import ShipNoticesView from './views/ShipNoticesView.vue'
 import AftersalesCasesView from './views/AftersalesCasesView.vue'
 import PlaceholderView from './views/PlaceholderView.vue'
@@ -31,7 +32,7 @@ import OffersView from './views/OffersView.vue'
 import LoginView from './views/LoginView.vue'
 
 const VIEW_KEYS: ViewKey[] = ['workbench', 'knowledge', 'aftersales', 'tickets', 'shipnotices', 'cases', 'invoices', 'ebaycases', 'customers', 'sync',
-  'usage', 'status', 'accounts', 'settings', 'todo', 'performance', 'launch', 'templates', 'offers', 'bestoffers', 'followups']
+  'usage', 'status', 'accounts', 'settings', 'todo', 'performance', 'launch', 'templates', 'offers', 'bestoffers', 'followups', 'reasons']
 const ADMIN_VIEWS: ViewKey[] = ['usage', 'status', 'accounts', 'settings', 'sync']
 const BOXES: BoxKey[] = ['pending', 'resolved', 'handoff', 'failed', 'unassigned', 'mine', 'auto', 'all', 'system',
   'system_unread', 'system_read']
@@ -326,13 +327,21 @@ async function afterLogin() {
 }
 watch(() => [session.user?.id, session.user?.must_change_password], afterLogin)
 
+// 切回这个浏览器标签页时马上查一次（不用等下一个 15 秒）
+function onVisible() {
+  if (document.hidden || !session.user || session.user.must_change_password) return
+  refreshStatus()
+  refreshCounts(false)
+}
 onMounted(async () => {
   window.addEventListener('hashchange', onHash)
+  document.addEventListener('visibilitychange', onVisible)
   await loadMe()
   afterLogin()
 })
 onUnmounted(() => {
   window.removeEventListener('hashchange', onHash)
+  document.removeEventListener('visibilitychange', onVisible)
   clearInterval(timer)
 })
 </script>
@@ -503,6 +512,7 @@ onUnmounted(() => {
             <ShipNoticesView v-else-if="t.view === 'shipnotices'" @open="(id: number) => go('workbench', { box: 'all', conv: id })" />
             <LogisticsTicketsView v-else-if="t.view === 'tickets'" @open="(id: number) => go('workbench', { box: 'all', conv: id })" />
             <ParcelFollowupsView v-else-if="t.view === 'followups'" @open="(id: number) => go('workbench', { box: 'all', conv: id })" />
+            <AftersalesReasonsView v-else-if="t.view === 'reasons'" @open="(id: number) => go('workbench', { box: 'all', conv: id })" />
             <InvoicesView v-else-if="t.view === 'invoices'" @open="(id: number) => go('workbench', { box: 'all', conv: id })" />
             <AftersalesFilesView v-else-if="t.view === 'aftersales'" @open="(id: number) => go('workbench', { box: 'all', conv: id })" />
             <PerformanceView v-else-if="t.view === 'performance'" />

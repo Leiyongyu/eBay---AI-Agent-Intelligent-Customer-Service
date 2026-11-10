@@ -4,8 +4,10 @@
 - 来信轮次：买家一条或连续多条消息算一轮，从第一条算起，到店铺下一条正式回复（“已收到”回执不算）；
 - 首次响应：轮次开始 → 回复，按到达时段（北京时间工作时段 / 夜间 / 周末）分别给中位数和 P90；
 - 买家追问：回复后 FOLLOW_UP_HOURS 小时内买家在同一会话又开始新一轮，且这一轮不只是致谢 / 结束语；
-  店铺这次回复是在请买家补资料（VIN / 车架号、照片 / 视频、订单号、车型年款、发票邮箱等，is_info_request）时，
-  买家下一轮补发过来不算追问（2026-11-10 定）；“接受报价”“换了新问题”目前分不出来，仍算追问；
+  店铺这次回复是在请买家补资料（VIN / 车架号、照片 / 视频、订单号、车型年款、发票邮箱等，is_info_request：
+  同一句里既有请求又有资料词，排除“您提供的 / 已发给您 / 请查收 / 告诉您（Ihnen … mitteilen；uns … mitteilen 仍是请求）”这类说法）时，买家下一轮补发过来不算追问；
+  但买家下一轮里一点资料都没有（没有 VIN、邮箱、年款 / 号码、资料词、图片说明，也不是“提供不了”，supplies_info）时仍算追问
+  （如“按你们的描述应该适配”“What are you selling?”）；“接受报价”“换了新问题”目前分不出来，仍算追问（2026-11-10 定）；
 - 沟通后升级：回复后 ESCALATION_DAYS 天内，同店铺同买家新开 eBay 咨询 / 纠纷 / 退货（只算商品或发货问题的原因）/ 付款纠纷；
   一张售后只算一轮：归到它开启前最近的那一轮店铺回复（且在那轮回复后 7 天内），不重复算进更早的轮次（2026-11-10 定）；
 - 北极星“按时且有效”：按时（首次响应 ≤ RESPONSE_SLA_HOURS）且没被追问、没升级 ÷ 需回复的来信轮次；
@@ -36,7 +38,7 @@ WORK_START, WORK_END = 9, 18  # 9:00–18:00
 RESPONSE_SLA_HOURS = 24  # 响应时效（eBay 要求 24 小时内回复）
 FOLLOW_UP_HOURS = 48
 ESCALATION_DAYS = 7
-RULES_VERSION = "2026-11-10b"  # 口径改了就改这里：基线快照在原始消息还完整时按新口径重算
+RULES_VERSION = "2026-11-10d"  # 口径改了就改这里：基线快照在原始消息还完整时按新口径重算
 SYSTEM_TYPE = "FROM_EBAY"
 BANDS = {"work": "工作时段（周一至周五 9:00–18:00）", "night": "夜间（工作日非工作时段）", "weekend": "周末"}
 WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
@@ -49,9 +51,11 @@ DISPUTE_REASONS = {"ITEM_NOT_RECEIVED", "SIGNIFICANTLY_NOT_AS_DESCRIBED", "CREDI
 
 # 只是致谢 / 结束语（多语言）：没有否定词、没有问号、很短，并且命中致谢说法
 _THANKS = re.compile(
-    r"\b(thanks?|thank you|thx|ty|cheers|great|perfect|awesome|got it|received|all good|ok(ay)?|"
-    r"danke|vielen dank|dankesch[öo]n|alles klar|super|prima|perfekt|erhalten|bekommen|"
-    r"merci|parfait|re[çc]u|grazie|perfetto|ricevuto|gracias|perfecto|recibido|vale)\b|谢谢|多谢|收到了|好的|已收到", re.I)
+    r"\b(thanks?|thank you|thank u|thanks a lot|many thanks|thx|ty|cheers|great|perfect|awesome|got it|received|all good|ok(ay)?|"
+    r"danke|dank|besten dank|vielen dank|herzlichen dank|vielen herzlichen dank|tausend dank|danke sehr|dankesch[öo]n|"
+    r"alles klar|super|prima|perfekt|erhalten|bekommen|"
+    r"merci|merci beaucoup|parfait|re[çc]u|grazie|grazie mille|perfetto|ricevuto|gracias|muchas gracias|perfecto|recibido|vale)\b"
+    r"|谢谢|多谢|收到了|好的|已收到", re.I)
 # 投诉 / 诉求：带了 received / ok / gracias 也不是致谢（“I received the wrong part”“Ok, I want a refund”）
 _COMPLAINT = re.compile(
     r"\b(refund\w*|money back|wrong|broken|damaged|defect\w*|faulty|not working|doesn'?t (fit|work)|does not (fit|work)|"
@@ -86,16 +90,52 @@ _INFO = re.compile(
     r"part number|teilenummer|oe-?nummer|oe number|r[ée]f[ée]rence)\b|车架号|照片|视频|订单号|邮箱|年款|车型", re.I)
 _ASK = re.compile(
     r"\?|？|\b(please|kindly|could you|can you|would you|send|provide|share|let us know|"
-    r"bitte|senden|schicken|zusenden|mitteilen|teilen sie|k[öo]nnten sie|k[öo]nnen sie|"
+    r"bitte|senden|schicken|zusenden|teilen sie|k[öo]nnten sie|k[öo]nnen sie|"
     r"merci de|pourriez|pouvez|envoy\w*|"
     r"per favore|potrebbe|pu[oò]|invia\w*|"
     r"por favor|podr[ií]a|puede|env[ií]\w*)\b|请|麻烦|发一下|提供", re.I)
 
 
+# 不是在向买家要资料：引用买家已经给的、我们已经发了、请买家查收、告诉买家
+_NOT_ASK = re.compile(
+    r"\b(you (have )?provided|you sent|you gave|according to (the|your)|based on (the|your)|we (have )?sent|has been sent|"
+    r"i (have )?sent|already sent|please (check|find)|attached|"
+    r"von ihnen (angegeben|genannt|gesendet|geschickt|mitgeteilt)\w*|ihre[nm]? angegeben\w*|aufgrund der|anhand der|"
+    r"(haben|habe) (ihnen|wir) .{0,30}(gesendet|geschickt)|bereits (gesendet|geschickt)|im anhang|anbei|"
+    r"ihnen .{0,40}mitteilen|"
+    r"que vous (avez|nous avez) (fourni|envoy)\w*|selon (le|la|votre)|ci-joint|"
+    r"che (ci )?ha (fornito|inviato)|in allegato|"
+    r"que (nos )?(proporcion|envi)\w*|seg[uú]n (el|la|su)|adjunto)\b"
+    r"|您提供的|根据您|已发|已经发|请查收|查收|告诉您|附件", re.I)
+_SENT_SPLIT = re.compile(r"(?<=[.!?。！？])\s+|[\n;；]")
+
+
 def is_info_request(text: str | None) -> bool:
-    """店铺这次回复是在请买家补资料（VIN、照片、订单号、车型年款、邮箱等）：买家下一轮发来不算追问。"""
+    """店铺这次回复是在请买家补资料（VIN、照片、订单号、车型年款、邮箱等）：同一句里既有请求又有资料词，
+    且这句不是“您提供的 / 已发给您 / 请查收 / 告诉您”这类说法。买家下一轮补发过来不算追问。"""
+    for sentence in _SENT_SPLIT.split(text or ""):
+        t = " ".join(sentence.split())
+        if t and _INFO.search(t) and _ASK.search(t) and not _NOT_ASK.search(t):
+            return True
+    return False
+
+
+# 买家这一轮是在补资料（或说明提供不了）：VIN、邮箱、年款 / 较长号码、资料词、图片说明；没有文字（只发了图片）也算
+_VIN = re.compile(r"\b[A-HJ-NPR-Z0-9]{17}\b", re.I)
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
+_NUMBER = re.compile(r"\b(19|20)\d{2}\b|\d{5,}")
+_CANT = re.compile(r"\b(can'?t|cannot|unable|no longer|don'?t have|kann (ich )?nicht|nicht mehr|weggeworfen|habe keine?|"
+                   r"ne peux pas|non posso|non ho|no puedo|ya no|no tengo)\b|没法|没办法|扔了|拍不了|没有了|不能", re.I)
+_MEDIA_HINT = re.compile(r"\b(attached|see (the )?(photo|picture|image)s?|anbei|im anhang|siehe (foto|bild)|ci-joint|in allegato|adjunto)\b"
+                         r"|附件|见图|图片", re.I)
+
+
+def supplies_info(text: str | None) -> bool:
     t = " ".join((text or "").split())
-    return bool(t and _INFO.search(t) and _ASK.search(t))
+    if not t:
+        return True  # 只发了图片 / 附件
+    return bool(_VIN.search(t) or _EMAIL.search(t) or _NUMBER.search(t) or _INFO.search(t) or _CANT.search(t)
+                or _MEDIA_HINT.search(t))
 
 
 def band(at: datetime) -> str:
@@ -134,6 +174,8 @@ class Round:
     next_start: datetime | None = None  # 同一会话下一轮开始的时间
     next_thanks_only: bool = False
     info_request: bool = False  # 这轮的店铺回复是在请买家补资料
+    buyer_text: str = ""  # 这一轮买家说的话（下一轮判断是不是在补资料用）
+    next_supplies_info: bool = True  # 下一轮买家是不是在补资料
 
 
 def build_rounds(convs: list[Conv]) -> list[Round]:
@@ -148,6 +190,7 @@ def build_rounds(convs: list[Conv]) -> list[Round]:
                 if cur is None:
                     cur, thanks = Round(c.key, c.store_id, c.buyer, m.at, None, False), []
                 thanks.append(is_thanks_only(m.text, m.intent))
+                cur.buyer_text = f"{cur.buyer_text}\n{m.text or ''}".strip()
             elif m.role == "SELLER" and not m.ack and cur is not None:
                 cur.reply_at, cur.thanks_only = m.at, all(thanks)
                 cur.info_request = is_info_request(m.text)
@@ -158,6 +201,7 @@ def build_rounds(convs: list[Conv]) -> list[Round]:
             rounds.append(cur)
         for a, b in zip(rounds, rounds[1:]):
             a.next_start, a.next_thanks_only = b.start, b.thanks_only
+            a.next_supplies_info = supplies_info(b.buyer_text)
         out.extend(rounds)
     return out
 
@@ -227,9 +271,10 @@ def compute(rounds: list[Round], cases: dict[tuple[str, str], list[datetime]], n
         # 追问
         followed = escalated = None
         if r.reply_at is not None:
-            if r.next_start is not None and r.next_start <= r.reply_at + fu and not r.next_thanks_only                     and not r.info_request:
+            excused = r.info_request and r.next_supplies_info  # 我们请买家补资料、买家确实在补：不算追问
+            if r.next_start is not None and r.next_start <= r.reply_at + fu and not r.next_thanks_only and not excused:
                 followed = True
-            elif r.info_request and r.next_start is not None and r.next_start <= r.reply_at + fu:
+            elif excused and r.next_start is not None and r.next_start <= r.reply_at + fu:
                 followed = False  # 我们请买家补资料，买家补发过来：不算追问
             elif r.reply_at + fu <= now:
                 followed = False
@@ -405,7 +450,7 @@ def case_coverage(db: Session, stores: list[str] | None, lo: datetime, hi: datet
     for store, at, detail in db.execute(q):
         c = out.setdefault(store, {"earliest": at, "backfilled": False, "in_window": 0})
         c["earliest"] = min(c["earliest"], at)
-        c["backfilled"] = c["backfilled"] or (detail or {}).get("origin") == BACKFILL_ORIGIN
+        c["backfilled"] = c["backfilled"] or (detail or {}).get("origin") in (BACKFILL_ORIGIN, "CASE_BACKFILL_90D")
         c["in_window"] += lo <= at < end
     return out
 

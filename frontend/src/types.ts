@@ -781,3 +781,78 @@ export interface CustomerPanelData {
   history: CustomerHistoryItem[]
   errors: { store_id: string; store_name: string; error: string }[]
 }
+
+/** 售后原因最终分类（订单维度，接口 /internal/aftersales-reasons） */
+export type AftersalesReasonCode = 'PRODUCT' | 'FITMENT' | 'WAREHOUSE' | 'LISTING' | 'CUSTOMER' | 'LOGISTICS'
+export type AftersalesReasonStatus = 'UNCLASSIFIED' | 'AI' | 'MANUAL'
+export interface AftersalesEvent {
+  kind: string // RETURN / INQUIRY / CASE / PAYMENT_DISPUTE / CANCEL / REFUND；本系统信号 PARCEL / TICKET / FEISHU
+  id?: string | null
+  reason?: string | null
+  status?: string | null
+  at?: string | null
+  kind_label?: string | null
+  reason_label?: string | null
+}
+export interface AftersalesReasonRow {
+  id: number
+  store_id: string
+  store_name: string
+  order_id: string
+  conversation_id: number | null
+  conversation_ids: number[]
+  buyer_key: string | null
+  marketplace_id: string | null
+  skus: string[] | string | null // 后端存成“A+B”字符串，也可能返回列表
+  item_ids?: string | null
+  order_created_at: string | null
+  order_total: number | null
+  currency: string | null
+  refunded: boolean
+  refund_amount: number | null
+  refund_currency: string | null
+  refund_at?: string | null
+  events: AftersalesEvent[]
+  ai_reason: AftersalesReasonCode | null
+  ai_reason_label?: string | null
+  ai_note: string | null // 未分类时写没分类的原因；用“；”分两段（原因；会话情况）
+  ai_basis: string[] | string | null // 如 ["RETURN:DOES_NOT_FIT", "INTENT:fitment", "PARCEL:断更"]
+  ai_at?: string | null
+  manual_reason: AftersalesReasonCode | null
+  manual_reason_label?: string | null
+  manual_note: string | null
+  manual_by: string | null
+  manual_at: string | null
+  final_reason: AftersalesReasonCode | null
+  reason_label?: string | null // 最终原因中文（未分类时为“未分类”）
+  final_reason_label?: string | null // 旧约定，后端实际用 reason_label
+  status: AftersalesReasonStatus
+  status_label?: string | null
+  unclassified_kind?: UnclassifiedKind | null // 未分类再分；已分类为 null
+  // 上线前补拉的历史会话：和工作台会话不是同一套 ID，不能在工作台打开，只能拿 ebay_conversation_id 去 eBay 后台核对
+  baseline_conversations?: { id: number; ebay_conversation_id: string | null; first_message_at: string | null; last_message_at: string | null }[]
+  created_at?: string | null
+  updated_at: string | null
+}
+export type UnclassifiedKind = 'missing_return_data' | 'direct_refund' | 'other'
+export interface UnclassifiedKindStat { label: string; orders: number; refunded: number }
+export interface AftersalesReasonList {
+  items: AftersalesReasonRow[]
+  counts: Partial<Record<'all' | AftersalesReasonStatus, number>>
+  total?: number
+}
+export interface RefundAmount { currency: string; amount: number }
+/** 和后端 aftersales_reasons.stats() 的返回一致 */
+export interface AftersalesReasonStats {
+  period?: { from: string; to: string }
+  overall: { orders: number; refunded: number; refund_rate: number | null; refund_amount: RefundAmount[]; aftersales_orders: number }
+  by_reason: { reason: AftersalesReasonCode | null; label: string; aftersales_orders: number; refunded: number; share: number | null;
+    refund_rate: number | null; refund_amount: RefundAmount[] }[]
+  by_sku: { sku: string; orders: number; refunded: number; refund_rate: number | null; main_reason: AftersalesReasonCode | null;
+    main_reason_label: string | null; small_sample: boolean }[]
+  sku_count?: number
+  min_orders?: number
+  by_store: { store_id: string; store_name: string; orders: number; refunded: number; refund_rate: number | null; refund_amount: RefundAmount[] }[]
+  // 按没分类的原因拆开（后端 UNCLASSIFIED_KINDS）：缺退货数据 / 直接退款 / 其他
+  unclassified: { orders: number; refunded: number } & Partial<Record<UnclassifiedKind, UnclassifiedKindStat>>
+}

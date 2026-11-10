@@ -1504,3 +1504,45 @@ class BaselineSnapshot(Base):
     observing: Mapped[int] = mapped_column(Integer, default=0, comment="计算时还在观察中的轮次数（追问 / 升级窗口没走完）；大于 0 且原始消息完整时会重算")
     metrics: Mapped[dict] = mapped_column(JSON, comment="各项指标值（轮次、分时段首次响应、按时、追问、升级、北极星、夜间积压、消息量），不含正文")
     computed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="计算时间（UTC）")
+
+
+# ---------------------------------------------------------------- 订单售后原因最终分类
+class OrderAftersalesReason(Base):
+    __tablename__ = "order_aftersales_reasons"
+    __table_args__ = (UniqueConstraint("store_id", "order_id"),
+                      {"comment": "订单维度的售后原因最终分类：一张有售后信号（退款、退货、咨询、纠纷、付款纠纷、取消、转售后、飞书工单、"
+                                  "异常包裹、查件单）的订单一行；AI 按规则自动分类，人工可改（人工优先），用于按原因、SKU 统计退款率"})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    store_id: Mapped[str] = mapped_column(String(64), index=True, comment="店铺 ID")
+    order_id: Mapped[str] = mapped_column(String(64), comment="eBay 订单号（新格式，与 ebay_orders.order_id 一致）")
+    conversation_id: Mapped[int | None] = mapped_column(Integer, index=True, comment="主要关联的买家会话（对话 ID，点了直接打开）")
+    conversation_ids: Mapped[list | None] = mapped_column(JSON, comment="同一订单关联的全部买家会话 ID")
+    baseline_conversation_ids: Mapped[list | None] = mapped_column(
+        JSON, comment="上线前补拉的历史会话（baseline_conversations.id，和工作台会话不是同一套 ID）：按订单号或买家 + 刊登对上唯一订单的")
+    buyer_key: Mapped[str | None] = mapped_column(String(128), index=True, comment="买家 eBay 用户名（小写）")
+    marketplace_id: Mapped[str | None] = mapped_column(String(32), comment="站点（会话的站点，没有时用店铺默认站点）")
+    skus: Mapped[str | None] = mapped_column(String(500), comment="订单商品 SKU（多个用 + 连接）")
+    item_ids: Mapped[str | None] = mapped_column(String(300), comment="订单商品的刊登号（逗号分隔）")
+    order_created_at: Mapped[datetime | None] = mapped_column(DateTime, index=True, comment="下单时间（UTC）")
+    order_total: Mapped[float | None] = mapped_column(Float, comment="订单总额")
+    currency: Mapped[str | None] = mapped_column(String(8), comment="订单币种")
+    refunded: Mapped[bool] = mapped_column(Boolean, default=False, index=True, comment="是否有退款（订单标记退款或有 eBay 退款单）")
+    refund_amount: Mapped[float | None] = mapped_column(Float, comment="退款金额合计（eBay 退款单金额的绝对值之和）")
+    refund_currency: Mapped[str | None] = mapped_column(String(8), comment="退款币种")
+    refund_at: Mapped[datetime | None] = mapped_column(DateTime, comment="最近一次退款时间（UTC）")
+    events: Mapped[list | None] = mapped_column(JSON, comment="这张订单的售后事件：[{kind 类型, id 编号, reason 原因, status 状态, at 时间}]，"
+                                                           "含退货 / 咨询 / 纠纷 / 付款纠纷 / 取消 / 退款单")
+    ai_reason: Mapped[str | None] = mapped_column(String(16), comment="AI（规则）判断的原因代码：PRODUCT / FITMENT / WAREHOUSE / LISTING / CUSTOMER / LOGISTICS；空 = 判不出来")
+    ai_note: Mapped[str | None] = mapped_column(String(300), comment="AI 说明：判断理由或缺什么信息")
+    ai_basis: Mapped[list | None] = mapped_column(JSON, comment="AI 判断依据（按优先级），如 RETURN:DOES_NOT_FIT、INTENT:quality_issue、FEISHU:质量问题、PARCEL:断更")
+    ai_at: Mapped[datetime | None] = mapped_column(DateTime, comment="AI 最近一次分类时间（UTC）")
+    manual_reason: Mapped[str | None] = mapped_column(String(16), index=True, comment="人工标记的原因代码（AI 永不覆盖）")
+    manual_note: Mapped[str | None] = mapped_column(String(500), comment="人工备注（“产品问题 XXXXX”里空格后面的部分）")
+    manual_by: Mapped[str | None] = mapped_column(String(64), comment="人工标记人")
+    manual_at: Mapped[datetime | None] = mapped_column(DateTime, comment="人工标记时间（UTC）")
+    final_reason: Mapped[str | None] = mapped_column(String(16), index=True, comment="最终原因：人工优先，其次 AI，都没有为空")
+    status: Mapped[str] = mapped_column(String(16), default="UNCLASSIFIED", index=True,
+                                        comment="UNCLASSIFIED 未分类（AI 和人工都没标）/ AI 规则自动分类 / MANUAL 人工标记")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="建立时间（UTC）")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="最后更新时间（UTC）")

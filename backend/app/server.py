@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import APP_NAME, APP_VERSION
-from .api import accounts, best_offers, aftersales_cases, aftersales_files, customers, ebay, ebay_cases, internal_refs, kb_docs, order_extras, parcel_followups, upload_public, invoices, knowledge_admin, maintenance, message_templates, offers, performance, public_media, settings_admin, ship_notices, sync_admin, system, usage, webhooks, workbench
+from .api import accounts, aftersales_reasons, best_offers, aftersales_cases, aftersales_files, customers, ebay, ebay_cases, internal_refs, kb_docs, order_extras, parcel_followups, upload_public, invoices, knowledge_admin, maintenance, message_templates, offers, performance, public_media, settings_admin, ship_notices, sync_admin, system, usage, webhooks, workbench
 from .auth import auth_middleware, require_admin
 from .config import PROJECT_ROOT, get_settings
 from .aftersales_mail.service import worker as aftersales_mail_worker
@@ -116,6 +116,8 @@ def create_app() -> FastAPI:
     app.include_router(best_offers.router)  # Best offer：买家报价与回应（按店铺范围；回应只限对接店铺）
     app.include_router(customers.router)  # 客户管理：客户列表、黑名单（按店铺范围）
     app.include_router(ebay_cases.router)  # 售后管理（咨询、纠纷、退货等，只读，按店铺范围）
+    app.include_router(aftersales_reasons.router)  # 订单售后原因分类：按负责店铺；重建只有管理员
+    app.include_router(aftersales_reasons.conv_router)  # 会话侧栏标记售后原因
     app.include_router(parcel_followups.router)  # 异常包裹跟进表（每人只看自己的，管理员看全部）
     app.include_router(invoices.router)  # 会话里的发票：按店铺范围；留底 PDF 只有管理员能看
     app.include_router(aftersales_files.router)  # 售后附件：管理员或账号打开“可看售后附件”，按店铺范围

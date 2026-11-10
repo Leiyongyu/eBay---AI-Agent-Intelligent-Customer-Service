@@ -5,6 +5,7 @@ from datetime import datetime
 
 import httpx
 import pytest
+from sqlalchemy import select
 
 from app import config
 
@@ -164,3 +165,65 @@ def test_parcel_followups_skip_backfilled(cb):
         # 同样的单如果是同步拉到的（没有补拉来源）就会登记
         ec.save(db, "REAL_US", "RETURN", [ec.parse_return({**RETURNS[5], "returnId": "R99", "orderId": "01-99"})])
         assert from_cases(db, "REAL_US", now=now)["created_or_updated"] == 1
+
+
+class FakeWithCases(FakeEbay):
+    """纠纷搜索有两张：C1 新的、C2 库里已有但不知道类型；详情接口给 caseType。付款纠纷按时间段返回。"""
+
+    def __init__(self):
+        super().__init__("page_from_1")
+        self.windows = []
+
+    def __call__(self, request):
+        path = request.url.path
+        if path.endswith("/casemanagement/search"):
+            self.requests.append(request)
+            return httpx.Response(200, json={"members": [
+                {"caseId": "C1", "itemId": 110, "transactionId": 5, "buyer": "bc", "caseStatusEnum": "CLOSED",
+                 "creationDate": {"value": "2026-10-01T00:00:00.000Z"}},
+                {"caseId": "C2", "itemId": 110, "transactionId": 6, "buyer": "bd", "caseStatusEnum": "CLOSED",
+                 "creationDate": {"value": "2026-10-02T00:00:00.000Z"}}]})
+        if "/casemanagement/" in path:
+            self.requests.append(request)
+            cid = path.rsplit("/", 1)[1]
+            return httpx.Response(200, json={"caseId": cid, "caseType": {"C1": "ITEM_NOT_RECEIVED", "C2": "RETURN"}[cid]})
+        if path.endswith("/payment_dispute_summary"):
+            self.requests.append(request)
+            q = dict(request.url.params)
+            self.windows.append((q["open_date_from"], q["open_date_to"]))
+            return httpx.Response(200, json={"paymentDisputeSummaries": []})
+        return super().__call__(request)
+
+
+def test_case_details_and_dispute_windows(cb):
+    from app import ebay_cases as ec
+    from app.case_backfill import ORIGIN_90D
+    from app.db import session_scope
+    from app.models import EbayCase
+
+    with session_scope() as db:  # 同步早就拉到的 C2，不知道类型
+        ec.save(db, "REAL_US", "CASE", [ec.parse_case({"caseId": "C2", "itemId": 110, "transactionId": 6, "buyer": "bd",
+                                                        "caseStatusEnum": "CLOSED",
+                                                        "creationDate": {"value": "2026-10-02T00:00:00.000Z"}})])
+    start, end = datetime(2026, 8, 12), datetime(2026, 11, 10)  # 90 天：付款纠纷分两段查
+    dry = make(FakeWithCases()).run(store_keys={"*"}, start=start, end=end, case_details=True, origin=ORIGIN_90D)
+    st = dry["stores"]["REAL_US"]
+    assert dry["case_details_needed"] == 2 and dry["case_detail_calls"] == 0 and st["kinds"]["CASE"]["new"] == 1
+    assert dry["estimated_apply_calls"] == dry["api_calls"] + 2
+    fake = FakeWithCases()
+    r = make(fake).run(store_keys={"*"}, start=start, end=end, apply=True, case_details=True, origin=ORIGIN_90D)
+    assert r["case_detail_calls"] == 2 and len(fake.windows) == 2
+    assert fake.windows[0][0] == "2026-08-12T00:00:00.000Z" and fake.windows[1][1] == "2026-11-10T00:00:00.000Z"
+    with session_scope() as db:
+        rows = {c.external_id: c for c in db.scalars(select(EbayCase).where(EbayCase.kind == "CASE"))}
+        assert rows["C1"].reason == "ITEM_NOT_RECEIVED" and rows["C1"].detail["origin"] == ORIGIN_90D
+        assert rows["C2"].reason == "RETURN" and not (rows["C2"].detail or {}).get("origin")  # 已有的只补类型
+
+
+def test_case_type_classification():
+    from app.aftersales_reasons import _empty_sig, classify
+
+    assert classify({**_empty_sig(), "case": True, "case_types": ["ITEM_NOT_RECEIVED"]})[0] == "LOGISTICS"
+    code, note, _ = classify({**_empty_sig(), "case": True, "case_types": ["RETURN"], "refunded": True})
+    assert code is None and "退货升级" in note
+    assert classify({**_empty_sig(), "case": True, "case_types": ["RETURN"], "returns": ["DOES_NOT_FIT"]})[0] == "FITMENT"

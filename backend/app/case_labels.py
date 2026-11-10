@@ -44,7 +44,7 @@ REASON: dict[str, str] = {
     "ARRIVED_DAMAGED": "到货损坏", "ARRIVED_LATE": "到货太晚", "DEFECTIVE_ITEM": "商品有缺陷", "DOES_NOT_FIT": "不适配",
     "FOUND_BETTER_PRICE": "找到更便宜的", "MISSING_PARTS": "缺少配件", "NOT_AS_DESCRIBED": "与描述不符",
     "NO_LONGER_NEED_ITEM": "不需要了", "NO_REASON": "未说明原因", "ORDERED_ACCIDENTALLY": "误下单",
-    "ORDERED_DIFFERENT_ITEM": "想买的是别的商品", "ORDERED_WRONG_ITEM": "买错了", "WRONG_SIZE": "尺寸不对",
+    "ORDERED_DIFFERENT_ITEM": "收到的不是所订商品", "ORDERED_WRONG_ITEM": "买错了", "WRONG_SIZE": "尺寸不对",
     "WITHDRAW_FROM_PURCHASE_CONTRACT": "撤销购买（欧盟无理由退货）", "WRONG_ITEM": "发错货", "WRONG_COLOR": "颜色不对",
     "FAKE_OR_COUNTERFEIT": "假冒商品", "EXPIRED_ITEM": "商品过期", "DIFFERENT_FROM_LISTING": "与刊登不符",
     "BUYER_CANCEL_ORDER": "买家取消订单", "BUYER_NO_SHOW": "买家未取货", "BUYER_REFUSED_TO_PICKUP": "买家拒绝取货",

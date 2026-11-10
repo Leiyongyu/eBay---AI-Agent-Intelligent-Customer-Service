@@ -254,3 +254,31 @@ def test_follow_up_sentences_orders_and_case_intents():
     # 退货退款意图：接未收到货咨询（售后单），不接查件单上的“没收到”
     assert cs.carried_flags(card, None, "I opened a case. Any news?", ["return_refund"], ["02-2"]) == {"LOGISTICS", "NOT_RECEIVED"}
     assert cs.carried_flags(card, None, "Any news on my refund?", ["refund_status"], ["01-1"]) == set()
+
+
+def test_legacy_case_order_mapped_through_order_lines(client):
+    """E2b：ebay_cases 里咨询 / 纠纷的订单号是旧格式“商品号-交易号”，按订单商品明细换算成新格式再比；
+    换算不了的当作没写订单。E3b：德语缩写不算句末。"""
+    from app import conversation_state as cs
+    from app.db import session_scope, utcnow
+    from app.ingestion.service import get_or_create_conversation
+    from app.models import EbayCase, EbayOrderLine
+
+    with session_scope() as db:
+        conv = get_or_create_conversation(db, "STORE_A", "LEG-1", "buyer_leg", "110000000001", "EBAY_US", "listing")
+        db.add(EbayOrderLine(store_id="STORE_A", order_id="26-55555-US", line_item_id="2345678901001",
+                             line_key="110000000003-2345678901001", item_id="110000000003", buyer="buyer_leg"))
+        for ext, order in (("C1", "110000000003-2345678901001"), ("C2", "119999999999-9999999999999")):
+            db.add(EbayCase(store_id="STORE_A", kind="INQUIRY", external_id=ext, buyer="buyer_leg", order_id=order,
+                            is_open=True, opened_at=utcnow()))
+        db.flush()
+        issues = {i["id"]: i for i in cs.system_issues(db, conv)}
+    assert issues["sys:case:INQUIRY:C1"]["order_key"] == "26-55555-US"  # 换算到新格式
+    assert "order_key" not in issues["sys:case:INQUIRY:C2"]  # 换算不了：当作没写订单
+    card = {"issues": list(issues.values())}
+    assert "NOT_RECEIVED" in cs.carried_flags(card, None, "Any news?", ["delivery_delay"], ["26-55555-us "])
+    only_c1 = {"issues": [issues["sys:case:INQUIRY:C1"]]}
+    assert cs.carried_flags(only_c1, None, "Any news?", ["delivery_delay"], ["26-66666-US"]) == set()  # 另一单
+    assert not cs.is_follow_up("Ich habe z.B. drei Teile, die ich noch nicht eingebaut habe und die ich gern zusammen mit dem "
+                               "neuen Thermostat in meinen Golf 7 Variant Baujahr 2015 einbauen würde.")
+    assert cs.is_follow_up("Danke für die Info. Gibt es schon Neuigkeiten? Ich warte ca. zwei Wochen.")

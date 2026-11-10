@@ -256,3 +256,23 @@ def test_permissions_baseline_and_escalation_cases(client):
         d = r.json()
         assert not d["baseline"]["available"] or d["baseline"]["data"]["rounds"] == 0
         assert d["quality"]["rounds"] == 0
+
+
+# ---------------------------------------------------------------- 第六轮（2026-11-10）：K4 修复后的反例
+@pytest.mark.parametrize("text", [
+    "Hallo, sehr geehrter Kunde, Könnten Sie uns bitte die Fahrgestellnummer des Fahrzeugs mitteilen, damit wir die Passgenauigkeit prüfen können?",
+    "Hallo, lieber Kunde Könnten Sie uns bitte die VIN-Nummer des Autos mitteilen, damit wir die Passgenauigkeit bestätigen können.",
+], ids=["fahrgestellnummer", "vin_nummer"])
+def test_info_request_mitteilen_is_ask(text):
+    from app.round_metrics import is_info_request
+
+    assert is_info_request(text)
+
+
+def test_info_request_not_ask_still_excluded():
+    from app.round_metrics import is_info_request
+
+    for t in ("Die Rechnung wurde von meiner E-Mail-Adresse an Ihre E-Mail-Adresse gesendet. Bitte prüfen Sie, ob sie passt.",
+              "aufgrund der von Ihnen angegebenen Fahrgestellnummer (VIN) muss ich Ihnen leider mitteilen, dass es nicht passt.",
+              "Based on the VIN you provided, the part does not fit, would you like a refund?"):
+        assert not is_info_request(t), t
