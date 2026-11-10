@@ -240,6 +240,8 @@ def from_cases(db: Session, store_id: str, now: datetime | None = None) -> dict:
                                               EbayCase.kind.in_((*DISPUTE_KINDS, "RETURN", "REFUND")),
                                               (EbayCase.opened_at >= recent) | (EbayCase.status_changed_at >= recent))).all()
     for c in cases:
+        if (c.detail or {}).get("origin") == "BASELINE_BACKFILL":
+            continue  # 上线前基线补拉的旧单（case_backfill.py）：只用于统计，不登记、不更新跟进
         line = _line(db, store_id, c.order_id)
         order_id = line.order_id if line else (c.order_id if c.kind in ("RETURN", "REFUND") else None)
         if not order_id:

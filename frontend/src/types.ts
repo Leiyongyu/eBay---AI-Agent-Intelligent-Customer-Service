@@ -199,6 +199,9 @@ export interface Draft {
   knowledge_versions: string[]
   token_usage: Record<string, number> | null
   created_at: string
+  intent_confidence?: 'high' | 'medium' | 'low' | null // 意图把握度
+  intent_basis?: string[] // 判断意图依据的消息（eBay 消息 ID）
+  inherits_issue?: string | null // 沿用的状态卡未解决问题 ID
 }
 
 export interface ToolCallInfo {
@@ -247,7 +250,29 @@ export interface RunInfo {
 }
 
 /** 某任务某一代次的生成依据（GET /internal/jobs/{id}/trace，会话详情里是当前代次） */
+/** 会话状态卡（conversations.state_card） */
+export interface StateIssue {
+  id: string
+  source: 'system' | 'model'
+  intent: string
+  summary_zh: string
+  order_id: string | null
+  since: string | null
+  status: string | null
+  refs: string[]
+  flags: string[]
+}
+export interface StateCard {
+  topic: string
+  issues: StateIssue[]
+  resolved: { summary_zh: string; intent: string | null; at: string }[]
+  facts: { order_ids?: string[]; vin?: string; vehicle?: string; skus?: string[]; media?: string }
+  promises: string[]
+}
+
 export interface DraftTrace {
+  state_card?: StateCard | null
+  state_updated_at?: string | null
   sources: string[]
   tool_calls: ToolCallInfo[]
   steps: AgentStepInfo[]

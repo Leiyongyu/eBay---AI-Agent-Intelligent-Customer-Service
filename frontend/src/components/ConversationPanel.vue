@@ -21,6 +21,16 @@ const props = defineProps<{ convId: number; layout?: 'page'; hideTrans?: boolean
 const isPage = computed(() => props.layout === 'page')
 const emit = defineEmits<{ changed: []; deleted: []; context: [ctx: ConvContext] }>()
 
+// 生成依据里点“依据消息”：滚到那条消息并闪一下
+const jumped = ref('')
+function jumpTo(ebayId: string) {
+  const el = document.querySelector(`[data-msg="${CSS.escape(ebayId)}"]`)
+  if (!el) return
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  jumped.value = ebayId
+  setTimeout(() => { if (jumped.value === ebayId) jumped.value = '' }, 1600)
+}
+
 const d = ref<ConversationDetail | null>(null)
 const listing = ref<ListingCard | null>(null) // 商品卡片：打开会话后单独加载，不拖慢聊天记录
 
@@ -666,7 +676,7 @@ onUnmounted(() => {
             <InvoiceTimelineCard v-if="it.kind === 'invoice'" :item="it" />
             <TicketTimelineCard v-else :item="it" :conv-id="convId" @changed="load" />
           </template>
-          <div class="msg-row" :class="m.role.toLowerCase()">
+          <div class="msg-row" :class="[m.role.toLowerCase(), { jumped: jumped === m.ebay_message_id }]" :data-msg="m.ebay_message_id">
             <div class="bubble" :class="{ task: traceSourceSet.has(m.ebay_message_id), sim: m.simulated }">
               <div class="msg-head">
                 <span class="who">{{ ROLE_LABELS[m.role] || m.role }}</span>
@@ -748,7 +758,7 @@ onUnmounted(() => {
           <OutboxCard v-for="o in d.outbox || []" :key="`ob${o.id}`" :item="o" @recalled="onRecalled" />
 
           <div v-for="e in d.events" :key="e.id" class="event">
-            <span>{{ fmtTime(e.occurred_at) }} · {{ e.event_type }} · {{ e.source }}<template v-if="e.case_id"> · {{ e.case_id }}</template></span>
+            <span>{{ fmtTime(e.occurred_at) }} · {{ e.event_type }} · {{ e.source }}<template v-if="e.case_id"> · {{ e.case_id }}</template><template v-if="e.detail"> · {{ e.detail }}</template></span>
           </div>
 
           <!-- 本次 AI 草稿的生成过程 -->
@@ -761,7 +771,7 @@ onUnmounted(() => {
                 <el-button link size="small">{{ traceOpen ? '收起' : '展开' }}</el-button>
               </div>
               <div v-if="job?.state === 'RETRYABLE_ERROR'" class="warn">生成失败，等待自动重试（也可以点“重新生成”）：{{ job?.last_error }}</div>
-              <DraftTrace v-if="traceOpen" :trace="d" :messages="d.messages" :live="aiBusy" :reasons="job?.decision_reasons || []" />
+              <DraftTrace v-if="traceOpen" :trace="d" :messages="d.messages" :live="aiBusy" :reasons="job?.decision_reasons || []" @jump="jumpTo" />
             </div>
           </div>
         </div>
@@ -901,7 +911,7 @@ onUnmounted(() => {
             <div class="trans-body">{{ drawerTrace.agent_draft.text }}</div>
           </div>
         </div>
-        <DraftTrace :trace="drawerTrace" :messages="d.messages" :reasons="drawerTrace.agent_draft?.review_reasons || []" />
+        <DraftTrace :trace="drawerTrace" :messages="d.messages" :reasons="drawerTrace.agent_draft?.review_reasons || []" @jump="jumpTo" />
       </template>
       <div v-else v-loading="true" style="height: 200px" />
     </el-drawer>
@@ -1137,6 +1147,9 @@ onUnmounted(() => {
   justify-content: center;
 }
 /* 买家：白底细边，贴左；店铺：浅青底，贴右。靠近发言方的角收小，读起来像对话而不是卡片 */
+.msg-row.jumped .bubble {
+  box-shadow: 0 0 0 2px var(--accent);
+}
 .bubble {
   max-width: min(78%, 760px);
   border-radius: 10px 10px 10px 3px;

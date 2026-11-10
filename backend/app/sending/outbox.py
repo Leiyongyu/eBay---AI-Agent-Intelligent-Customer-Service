@@ -115,6 +115,33 @@ def deliver(db: Session, ob: OutboundMessage) -> None:
     _audit(db, ob, "OUTBOUND_SENT")
 
 
+def confirm_from_sync(db: Session, ob: OutboundMessage, msg, actor: str = "ebay_sync") -> None:
+    """发送时结果不确定（UNCERTAIN，没记下 eBay 消息 ID），eBay 同步拉回了正文一致的店铺消息：其实发出去了。
+    补成 SENT、记下 eBay 消息 ID 和会话里那条消息（同步已经写进会话，不再写第二条、不重发）；任务、发送意图、来源状态一并补成已发出。"""
+    intent = db.scalar(select(SendIntent).where(SendIntent.job_id == ob.job_id)) if ob.job_id else None
+    before = ob.state
+    ob.state, ob.sent_at = "SENT", ob.sent_at or msg.sent_at or utcnow()
+    ob.platform_message_id, ob.message_id, ob.error = msg.ebay_message_id, msg.id, None
+    if ob.zh_translation and not msg.zh_translation:
+        msg.zh_translation = ob.zh_translation
+    if ob.source == "ack":
+        msg.auto_kind = "ACK"
+    _attempt(db, intent, "SENT", "confirmed_by_sync")
+    if intent is not None and intent.state in ("SEND_UNCERTAIN", "QUEUED", "SENDING"):
+        intent.state, intent.platform_message_id, intent.sent_at = "SENT", msg.ebay_message_id, ob.sent_at
+        intent.last_error = None
+    job = db.get(ReplyJob, ob.job_id) if ob.job_id else None
+    if job is not None and job.state in (JobState.SEND_UNCERTAIN, JobState.SENDING):
+        job.state = JobState.SENT
+        job.lock_version += 1
+    _on_sent(db, ob, msg)
+    db.add(AuditEvent(actor=actor[:64], action="OUTBOUND_CONFIRMED_BY_SYNC", store_id=ob.store_id,
+                      conversation_id=ob.conversation_id,
+                      detail={"outbound_id": ob.id, "from_state": before, "source": ob.source, "job_id": ob.job_id,
+                              "platform_message_id": msg.ebay_message_id,
+                              "reason": "发送时结果不确定，eBay 同步拉回了正文一致的消息，确认已发出"}))
+
+
 def dispatch_due(limit: int = 20) -> int:
     """Worker 调用：发出到期的待发消息。返回发出（或处理）的条数。"""
     now = utcnow()

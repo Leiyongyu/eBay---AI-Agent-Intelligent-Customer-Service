@@ -18,10 +18,12 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text as sql_text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -182,6 +184,11 @@ class Conversation(Base):
         String(16), index=True, comment="会话情况阶段（AI 每次起草时更新）：presale 售前 / shipping 物流 / aftersales 售后 / invoice 发票 / other 其他")
     situation_label: Mapped[str | None] = mapped_column(String(64), comment="会话情况一句话概括（AI 起草时给出，中文）")
     situation_at: Mapped[datetime | None] = mapped_column(DateTime, comment="会话情况标签更新时间（UTC）")
+    state_card: Mapped[dict | None] = mapped_column(
+        JSON, comment="会话状态卡（起草时放进提示词）：topic 当前主题、issues 未解决问题（source=system 由程序按查件单、纠纷、"
+                      "发票、异常包裹等写，模型不能改；source=model 由模型在起草时顺带更新）、resolved 已解决问题、"
+                      "facts 关键事实（订单号、VIN、车型、SKU、已收到的图片视频）、promises 我们答应过买家的事")
+    state_updated_at: Mapped[datetime | None] = mapped_column(DateTime, comment="会话状态卡最近更新时间（UTC）")
     row_version: Mapped[int] = mapped_column(Integer, default=1,
                                              comment="会话版本号：新消息、系统事件时 +1；批准发送时用于检测过期")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="创建时间（UTC）")
@@ -386,6 +393,11 @@ class Draft(Base):
     model_config_version: Mapped[str | None] = mapped_column(String(64), comment="模型配置版本（不含密钥）")
     knowledge_versions: Mapped[list | None] = mapped_column(JSON, comment="本次注入的知识条款 ID@版本 列表")
     token_usage: Mapped[dict | None] = mapped_column(JSON, comment="模型 token 用量（输入/输出/合计）")
+    intent_confidence: Mapped[str | None] = mapped_column(
+        String(8), comment="模型对意图的把握度：high 明确 / medium 结合上下文判断 / low 看不出指哪件事（转 clarify 并加审核原因 INTENT_UNCERTAIN）")
+    intent_basis: Mapped[list | None] = mapped_column(JSON, comment="模型判断意图依据的消息 ID 列表（eBay 消息 ID，已过滤掉本次上下文里没有的）")
+    inherits_issue: Mapped[str | None] = mapped_column(
+        String(80), comment="本次沿用的会话状态卡里的未解决问题 ID（如 sys:ticket:CJ123、m:delivery_delay:12-34567-89012）；空 = 新话题")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="创建时间（UTC）")
 
 
@@ -733,7 +745,11 @@ class KnowledgeChunk(Base):
     """公司知识条款。首期把 knowledge_documents/knowledge_chunks 合成一张表，按条款存储。"""
 
     __tablename__ = "knowledge_chunks"
-    __table_args__ = {"comment": "公司知识条款：政策/FAQ/SOP/话术，按条款存储，带适用范围、可见级别、版本和生效期"}
+    __table_args__ = (
+        # 起草取知识只查当前有效版本（PUBLISHED）：部分索引，已有的库由 vector_index.ensure_published_index 启动时补建
+        Index("ix_knowledge_chunks_published", "store_id", "marketplace_id", "audience",
+              postgresql_where=sql_text("review_state = 'PUBLISHED'"), sqlite_where=sql_text("review_state = 'PUBLISHED'")),
+        {"comment": "公司知识条款：政策/FAQ/SOP/话术，按条款存储，带适用范围、可见级别、版本和生效期"})
 
     chunk_id: Mapped[str] = mapped_column(String(64), primary_key=True, comment="条款片段 ID（主键）")
     clause_id: Mapped[str] = mapped_column(String(64), comment="条款编号，如 SHP-US-001")
@@ -1421,3 +1437,70 @@ class ParcelFollowup(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime, comment="最后修改时间（UTC）")
     updated_by: Mapped[str | None] = mapped_column(String(64), comment="最后修改的人")
     closed_at: Mapped[datetime | None] = mapped_column(DateTime, comment="完结时间（UTC）")
+
+
+# ---------------------------------------------------------------- 上线前业务基线（第 2.1 节）
+class BaselineBatch(Base):
+    __tablename__ = "baseline_batches"
+    __table_args__ = {"comment": "上线前业务基线补拉批次：每次从 eBay 只读补拉历史消息记一行，带进度和统计；断点续拉按批次接着拉"}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键（批次号）")
+    stores: Mapped[list] = mapped_column(JSON, comment="本批次补拉的店铺 ID 列表")
+    period_start: Mapped[datetime] = mapped_column(DateTime, comment="基线时间段起点（UTC，含）")
+    period_end: Mapped[datetime] = mapped_column(DateTime, comment="基线时间段终点（UTC，不含；如 2026-11-05 00:00 表示到 11-04 当天结束）")
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="开始时间（UTC；续拉时为最近一次开始时间）")
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, comment="完成时间（UTC）；没拉完为空")
+    status: Mapped[str] = mapped_column(String(16), default="RUNNING", index=True,
+                                        comment="状态：RUNNING 进行中（或中断待续拉）/ DONE 完成 / PARTIAL 完成但有店铺出错 / FAILED 失败")
+    stats: Mapped[dict | None] = mapped_column(JSON, comment="统计：会话数、消息数（买家 / 店铺）、接口调用数、错误、eBay 实际能取到的最早时间、各店铺进度")
+
+
+class BaselineConversation(Base):
+    __tablename__ = "baseline_conversations"
+    __table_args__ = (UniqueConstraint("store_id", "ebay_conversation_id"),
+                      {"comment": "上线前基线会话：从 eBay 补拉的纯人工时期买家会话，只用于统计（上线效果页的基线对比），不进工作台和客户资料；随 BASELINE_RETENTION_DAYS 清理"})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    store_id: Mapped[str] = mapped_column(String(64), index=True, comment="店铺 ID")
+    ebay_conversation_id: Mapped[str] = mapped_column(String(128), comment="eBay 会话 ID（同店铺唯一）")
+    buyer_key: Mapped[str | None] = mapped_column(String(128), index=True, comment="买家 eBay 用户名（小写）")
+    item_id: Mapped[str | None] = mapped_column(String(64), comment="关联的刊登号（会话关联刊登时）")
+    conversation_type: Mapped[str] = mapped_column(String(16), default="FROM_MEMBERS", comment="会话类型：只存 FROM_MEMBERS 买家会话")
+    first_message_at: Mapped[datetime | None] = mapped_column(DateTime, index=True, comment="基线时间段内第一条消息的时间（UTC）")
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime, comment="基线时间段内最后一条消息的时间（UTC）")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="最近一次从 eBay 拉取的时间（UTC）")
+    batch_id: Mapped[int | None] = mapped_column(Integer, index=True, comment="最近一次写入它的补拉批次（baseline_batches.id）")
+
+
+class BaselineMessage(Base):
+    __tablename__ = "baseline_messages"
+    __table_args__ = (UniqueConstraint("store_id", "ebay_message_id"),
+                      {"comment": "上线前基线消息：基线会话里时间段内的每条消息（买家 / 店铺同事在 eBay 后台的人工回复），只用于统计；正文是买家个人数据，只给管理员看，随 BASELINE_RETENTION_DAYS 清理"})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    store_id: Mapped[str] = mapped_column(String(64), index=True, comment="店铺 ID")
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("baseline_conversations.id"), index=True,
+                                                 comment="所属基线会话（baseline_conversations.id）")
+    ebay_message_id: Mapped[str] = mapped_column(String(128), comment="eBay 消息 ID（同店铺唯一，重复拉取不重复写）")
+    sender_role: Mapped[str] = mapped_column(String(8), comment="发送方：BUYER 买家 / SELLER 店铺（店铺自己的 eBay 账号）")
+    sent_at: Mapped[datetime] = mapped_column(DateTime, index=True, comment="在 eBay 的发送时间（UTC）")
+    body: Mapped[str | None] = mapped_column(Text, comment="正文纯文本（HTML 已转文字）：用于判断致谢、以后抽样标注意图")
+    batch_id: Mapped[int | None] = mapped_column(Integer, index=True, comment="写入它的补拉批次（baseline_batches.id）")
+
+
+class BaselineSnapshot(Base):
+    __tablename__ = "baseline_metric_snapshots"
+    __table_args__ = (UniqueConstraint("batch_key", "store_id"),
+                      {"comment": "上线前基线统计快照（上线效果页的基线对比优先读它）：按补拉批次 + 店铺存算好的各项指标值，"
+                                  "不存买家正文；基线原始消息按 BASELINE_RETENTION_DAYS 清理后仍能对比"})
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
+    batch_key: Mapped[str] = mapped_column(String(64), comment="参与统计的完成批次号（baseline_batches.id，多个用逗号，如 1,2）")
+    store_id: Mapped[str] = mapped_column(String(64), comment="店铺 ID；* = 全部店铺合计")
+    period_start: Mapped[datetime] = mapped_column(DateTime, comment="基线时间段起点（UTC，含）")
+    period_end: Mapped[datetime] = mapped_column(DateTime, comment="基线时间段终点（UTC，不含）")
+    rules_version: Mapped[str] = mapped_column(String(32), comment="计算口径版本（round_metrics.RULES_VERSION）；口径改了且原始消息还完整时重算")
+    message_count: Mapped[int] = mapped_column(Integer, comment="计算时用到的基线消息条数；原始消息被清理后条数对不上，就不再重算")
+    observing: Mapped[int] = mapped_column(Integer, default=0, comment="计算时还在观察中的轮次数（追问 / 升级窗口没走完）；大于 0 且原始消息完整时会重算")
+    metrics: Mapped[dict] = mapped_column(JSON, comment="各项指标值（轮次、分时段首次响应、按时、追问、升级、北极星、夜间积压、消息量），不含正文")
+    computed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="计算时间（UTC）")

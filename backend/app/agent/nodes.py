@@ -57,6 +57,7 @@ from ..tools.registry import MODEL_TOOL_DESCRIPTIONS, model_tool_specs
 from ..logistics import followup as logistics_followup
 from ..logistics.track17 import RISKY_STATUS as TRACK_RISKY_STATUS
 from .. import auto_tags
+from .. import conversation_state
 from .. import usage as usage_log
 from .schemas import ReplyDraftOutput
 from .state import AgentDeps, AgentState
@@ -131,8 +132,11 @@ def load_memory(state: AgentState, deps: AgentDeps):
     problems = list(state["problems"])
     if memory["missing_required"]:
         problems.append("CONTEXT_OVER_BUDGET")
-    return {"memory": memory, "problems": problems,
-            "_detail": {k: memory[k] for k in ("total_messages", "truncated", "tokens")}}
+    # 会话状态卡：存着的模型部分 + 现在库里的系统事实（查件单、纠纷、发票、异常包裹……）；预取售后状态后再补一次
+    card = conversation_state.current(deps.db, deps.db.get(Conversation, deps.run.conversation_id))
+    return {"memory": memory, "problems": problems, "state_card": card,
+            "_detail": {**{k: memory[k] for k in ("total_messages", "truncated", "tokens")},
+                        "state_issues": [i["id"] for i in card["issues"]]}}
 
 
 # ---------------------------------------------------------------- 附件（第 20 章）
@@ -243,13 +247,16 @@ def prefetch(state: AgentState, deps: AgentDeps):
             problems.append("TOOL_ERROR")
         return r
 
+    # 状态卡里还有没解决的物流问题（之前说过没收到、在跟的查件单 / 未收到货咨询……）：这次只问“有进展吗”也照样查包裹
+    logistics_open = bool(conversation_state.open_flags(state.get("state_card")) & {
+        conversation_state.LOGISTICS, conversation_state.NOT_RECEIVED, conversation_state.RESHIP, conversation_state.EMPTY_PARCEL})
     try:
         order_hint = _ORDER_IN_TEXT.search(text)
         orders = call("get_authorized_order_context", {"order_ref": order_hint.group(0)} if order_hint else {})
         if orders.status == "FOUND":
             call("get_case_status", {"order_id": orders.data["order_id"]})
             # 买家问物流：程序固定先查包裹（轨迹、断更天数、查件单），不依赖模型想不想查；转人工判断也靠这一步
-            if _SHIPPING_HINT.search(text) or _NOT_RECEIVED.search(text) or _RESHIP.search(text):
+            if _SHIPPING_HINT.search(text) or _NOT_RECEIVED.search(text) or _RESHIP.search(text) or logistics_open:
                 call("get_package_status", {"order_id": orders.data["order_id"]})
         elif orders.status == "AMBIGUOUS":
             # 多订单时不猜是哪一单，但每单都要看有没有未结 case，用于风险升级
@@ -258,7 +265,8 @@ def prefetch(state: AgentState, deps: AgentDeps):
     except ToolBudgetExceeded:
         problems.append("TOOL_BUDGET_EXCEEDED")
 
-    return {"observations": observations, "problems": problems,
+    card = conversation_state.current(deps.db, deps.db.get(Conversation, deps.run.conversation_id), observations)
+    return {"observations": observations, "problems": problems, "state_card": card,
             "_detail": {"calls": [(o["tool_name"], o["status"]) for o in observations]}}
 
 
@@ -359,6 +367,8 @@ def build_messages(state: AgentState, deps: AgentDeps) -> list[BaseMessage]:
         load_prompt("reply").replace("{reply_language}",
                                      reply_language_hint((state["snapshot"]["buyer_texts"] or [""])[-1]))
         .replace("{intent_catalog}", intent_catalog_text()),
+        # 会话状态卡单独一段，放在聊天记录之前：模型据此判断买家说的是哪件事
+        "<conversation_state>\n" + conversation_state.render(state.get("state_card") or {}) + "\n</conversation_state>",
     ])
 
     history: list[BaseMessage] = []
@@ -724,14 +734,16 @@ def _ship_late(state: AgentState) -> bool:
     return True
 
 
-def _tracking_problems(state: AgentState, buyer_text: str) -> list[str]:
+def _tracking_problems(state: AgentState, buyer_text: str, carried: set[str] | frozenset = frozenset()) -> list[str]:
     """物流需要人工的情况（规则见 logistics/assess.py）：查不到、异常、断更、超时需判断补发、已签收但买家说没收到；
-    买家自己提出补发、重发、换货也交人工。"""
+    买家自己提出补发、重发、换货也交人工。carried：从会话状态卡接上的未解决问题标记——买家上一轮说过没收到 /
+    要补发 / 空包裹，这一轮只问“有进展吗”，也照样按那件事判断。"""
     out = []
-    if _RESHIP.search(buyer_text or ""):
+    if _RESHIP.search(buyer_text or "") or conversation_state.RESHIP in carried:
         out.append("RESHIP_REQUESTED")
-    if _EMPTY_PARCEL.search(buyer_text or ""):
+    if _EMPTY_PARCEL.search(buyer_text or "") or conversation_state.EMPTY_PARCEL in carried:
         out.append("EMPTY_PARCEL")
+    not_received = buyer_says_not_received(buyer_text) or conversation_state.NOT_RECEIVED in carried
     if _ship_late(state):
         out.append("SHIP_LATE")
     for o in state["observations"]:
@@ -745,7 +757,7 @@ def _tracking_problems(state: AgentState, buyer_text: str) -> list[str]:
             elif t.get("status") in TRACK_RISKY_STATUS:
                 out.append("TRACKING_EXCEPTION")
             delivered = t.get("status") == "Delivered" or a.get("stage") == "DELIVERED"  # 含谷仓回传妥投
-            if delivered and buyer_says_not_received(buyer_text):
+            if delivered and not_received:
                 out.append("TRACKING_DELIVERED_NOT_RECEIVED")
     return list(dict.fromkeys(out))
 
@@ -767,11 +779,25 @@ def validate_output(state: AgentState, deps: AgentDeps):
     other_cited: set[str] = set()
     if parsed and language_mismatch((snap["buyer_texts"] or [""])[-1], parsed["reply_text"]):
         problems.append("LANGUAGE_MISMATCH")
+    # 意图把握度和依据：依据只留本次上下文里有的消息 ID，沿用的问题必须在状态卡里；把握度低交人工核对
+    card = state.get("state_card") or {}
+    buyer_text = "\n".join(snap["buyer_texts"])
+    if parsed:
+        known = {m["id"] for m in state["memory"]["messages"]}
+        parsed = {**parsed, "intent_basis": [x for x in parsed.get("intent_basis") or [] if x in known],
+                  "inherits_issue": parsed.get("inherits_issue") if conversation_state.issue(card, parsed.get("inherits_issue")) else None}
+        if parsed.get("intent_confidence") == "low":
+            problems.append("INTENT_UNCERTAIN")
+    carried = conversation_state.carried_flags(card, parsed.get("inherits_issue") if parsed else None, buyer_text,
+                                               parsed.get("intents") if parsed else None, _order_candidates(state))
+    rule_flags = {f for f, hit in ((conversation_state.NOT_RECEIVED, buyer_says_not_received(buyer_text)),
+                                   (conversation_state.RESHIP, bool(_RESHIP.search(buyer_text))),
+                                   (conversation_state.EMPTY_PARCEL, bool(_EMPTY_PARCEL.search(buyer_text)))) if hit}
     # 发票：买家要增值税发票的转人工；普通发票买家给了邮箱时，开了自动发送就自动开票发出（提示词里已告诉模型），否则交人工
     fresh_texts, other_texts = _invoice_texts(state, deps)  # 已经开票发出过的来信不再触发开票
     invoice_email = detect_invoice_email(fresh_texts, other_texts, parsed["intents"] if parsed else [])
     inv_mode = _invoice_mode(state, deps, parsed["intents"] if parsed else [])
-    if not invoice_email and inv_mode == "AUTO_SEND" and parsed and _asks_invoice_again(state, deps, parsed["intents"]):
+    if not invoice_email and inv_mode == "AUTO_SEND" and parsed and _asks_invoice_again(state, deps, parsed["intents"], carried):
         invoice_email = _remembered_invoice_email(state)  # 买家再要一次发票、这次没写邮箱：发到他之前给过的邮箱
     # 订单唯一才会真的自动开票发出；多笔订单或查不到订单时回复是请买家给订单号（提示词里已说明），不算失败
     invoice_orders = len(_order_candidates(state))
@@ -786,7 +812,7 @@ def validate_output(state: AgentState, deps: AgentDeps):
             problems.append("INVOICE_NEEDS_ORDER")
     elif invoice_email:
         problems.append("INVOICE_EMAIL_RECEIVED")
-    problems += _tracking_problems(state, "\n".join(snap["buyer_texts"]))
+    problems += _tracking_problems(state, buyer_text, carried)
     if parsed:
         allowed, corpus, tokens = _evidence(state, deps)
         kb_cited = {e for c in parsed["claims"] for e in c["evidence_ids"] if e.startswith("kb:") and e in allowed}
@@ -848,9 +874,13 @@ def validate_output(state: AgentState, deps: AgentDeps):
         "invoice_auto": invoice_auto,
         "suppress_draft": suppress,
         "invoice_vat": inv_mode == "VAT",
+        "carried_flags": sorted(carried),
+        "rule_flags": sorted(rule_flags),
     }
     return {"route": "persist", "result": result, "problems": problems,
-            "_detail": {"decision": gate.decision, "risk": gate.risk_level, "reasons": gate.reasons}}
+            "_detail": {"decision": gate.decision, "risk": gate.risk_level, "reasons": gate.reasons,
+                        "intent_confidence": parsed.get("intent_confidence") if parsed else None,
+                        "inherits_issue": parsed.get("inherits_issue") if parsed else None, "carried_flags": sorted(carried)}}
 
 
 # ---------------------------------------------------------------- 落库
@@ -862,6 +892,13 @@ def persist_candidate(state: AgentState, deps: AgentDeps):
     db.refresh(job)
     if job.state != JobState.RUNNING or job.run_generation != run.run_generation:
         return {"_status": "STALE_DISCARDED", "_detail": {"job_state": job.state, "generation": job.run_generation}}
+    # 生成期间同事已在 eBay 后台回复了买家（晚于本任务最后一条买家消息）：不进待审核，任务作废、草稿不落库
+    from ..ebay_replied import anchor_time, close_job, outside_reply_after
+
+    replied = outside_reply_after(db, job.conversation_id, anchor_time(db, job))
+    if replied is not None:
+        close_job(db, job, replied, actor="agent")
+        return {"_status": "REPLIED_ON_EBAY", "_detail": {"seller_message_id": replied.ebay_message_id}}
 
     res = state["result"]
     existing = db.scalar(select(Draft).where(Draft.job_id == job.id, Draft.run_generation == run.run_generation))
@@ -896,6 +933,9 @@ def persist_candidate(state: AgentState, deps: AgentDeps):
             model_config_version=deps.settings.model_config_version(),
             knowledge_versions=state["knowledge"]["versions"],
             token_usage=state.get("usage") or None,
+            intent_confidence=out.get("intent_confidence"),
+            intent_basis=out.get("intent_basis") or None,
+            inherits_issue=out.get("inherits_issue"),
         ))
 
     job.state = JobState.AUTO_ELIGIBLE if res["decision"] == "AUTO_ELIGIBLE" else JobState.REVIEW_REQUIRED
@@ -961,6 +1001,11 @@ def persist_candidate(state: AgentState, deps: AgentDeps):
     if marked:
         detail["aftersales_marked"] = marked
         logistics_followup.append_note(db.get(Conversation, job.conversation_id), follow)  # 补发库存、查件单写进备注
+    try:  # 会话状态卡：合并模型这次的 state_update，系统问题按库里最新的（含本次新建的查件单、异常包裹）重新生成
+        with db.begin_nested():
+            _update_state_card(db, job, state, res)
+    except Exception:  # noqa: BLE001
+        log.exception("更新会话状态卡失败 job=%s", job.id)
     notice = _submit_notice(db, follow)
     if notice:
         detail["submit_notice"] = notice
@@ -971,6 +1016,22 @@ def persist_candidate(state: AgentState, deps: AgentDeps):
         if detail["auto_send"] == "SENT":
             return {"_status": "AUTO_SENT", "_detail": detail}
     return {"_status": job.state, "_detail": detail}
+
+
+def _update_state_card(db, job: ReplyJob, state: AgentState, res: dict) -> None:
+    conv = db.get(Conversation, job.conversation_id)
+    if conv is None:
+        return
+    db.flush()
+    draft = res["draft"] if res["has_draft"] else None
+    sys_issues = conversation_state.system_issues(db, conv, state.get("observations"))
+    orders = _order_candidates(state)
+    card = conversation_state.merge(
+        state.get("state_card") or conv.state_card or {}, (draft or {}).get("state_update"), sys_issues,
+        conversation_state.system_facts(db, conv, sys_issues),
+        inherits=(draft or {}).get("inherits_issue"), intent=(draft or {}).get("intent"),
+        order_id=orders[0] if len(orders) == 1 else None, rule_flags=set(res.get("rule_flags") or []))
+    conversation_state.save(db, conv, card)
 
 
 def _submit_notice(db, follow: dict | None) -> str | None:
@@ -1130,10 +1191,13 @@ def _remembered_invoice_email(state: AgentState) -> str | None:
     return found[-1] if found else None
 
 
-def _asks_invoice_again(state: AgentState, deps: AgentDeps | None, intents: list[str] | None) -> bool:
+def _asks_invoice_again(state: AgentState, deps: AgentDeps | None, intents: list[str] | None,
+                        carried: set[str] | frozenset = frozenset()) -> bool:
     """这次是在（再）要发票：本次还没开过票的来信提到发票；校验时还要模型也判成发票意图、不是单纯道谢
-    （“谢谢，发票收到了”不再发）。"""
-    if any(INVOICE_WORDS.search(t or "") for t in _fresh_buyer_texts(state, deps)):
+    （“谢谢，发票收到了”不再发）。carried 里有 INVOICE：买家在追问状态卡里还没办完的发票申请（“有进展吗”），
+    这次来信没提“发票”也算。"""
+    asked = any(INVOICE_WORDS.search(t or "") for t in _fresh_buyer_texts(state, deps))
+    if asked or conversation_state.INVOICE in carried:
         return intents is None or ("invoice_vat" in intents and "thanks_closing" not in intents)
     if _waiting_order_choice(state, deps):  # 之前请买家选订单，这次买家回了订单号（来信里可能不再提“发票”）
         return intents is None or set(intents) != {"thanks_closing"}

@@ -8,7 +8,7 @@ import { reactive } from 'vue'
 export type ViewKey =
   | 'workbench' | 'knowledge' | 'aftersales' | 'tickets' | 'shipnotices' | 'cases' | 'invoices' | 'ebaycases' | 'customers' | 'sync'
   | 'followups'
-  | 'performance' | 'templates' | 'offers' | 'bestoffers'
+  | 'performance' | 'launch' | 'templates' | 'offers' | 'bestoffers'
   | 'usage' | 'status' | 'accounts' | 'settings' | 'todo'
 
 /** 工作台消息箱：决定列表查询条件 */
@@ -110,7 +110,10 @@ export const NAV: NavGroup[] = [
       },
       {
         id: 'perf', label: '绩效管理', icon: 'chart',
-        children: [{ id: 'performance', label: '绩效统计', view: 'performance' }],
+        children: [
+          { id: 'performance', label: '绩效统计', view: 'performance' },
+          { id: 'launch', label: '上线效果', view: 'launch' },
+        ],
       },
     ],
   },

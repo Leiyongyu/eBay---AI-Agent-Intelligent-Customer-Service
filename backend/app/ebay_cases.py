@@ -228,7 +228,10 @@ def save(db: Session, store_id: str, kind: str, rows: list[dict]) -> dict:
             changed += 1
         for k in FIELDS:
             if k in r:
-                setattr(c, k, r[k])
+                if k == "detail":  # 合并：本系统自己写的键（如基线补拉的 origin）不被 eBay 拉回来的值冲掉
+                    setattr(c, k, {**(c.detail or {}), **(r[k] or {})} or None)
+                else:
+                    setattr(c, k, r[k])
         c.last_seen_at = now
     db.flush()
     return {"new": new, "changed": changed, "total": len(rows)}

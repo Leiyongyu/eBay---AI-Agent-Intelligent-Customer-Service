@@ -80,6 +80,7 @@ class Settings(BaseSettings):
 
     # 聊天记录保留期（按消息在 eBay 的发送时间；店铺可在 stores.retention_days 单独设置）
     data_retention_days: int = 90  # 每个会话的消息保留 3 个月（按消息时间）；0 = 不清理
+    baseline_retention_days: int = 90  # 上线前基线消息（baseline_messages，含买家正文）保留天数，按消息时间；0 = 不清理
     retention_cleanup_time: str = "03:30"  # 每天几点清理（本机时间 HH:MM）；错过时下次启动补跑
     retention_batch_size: int = 500  # 每批删除的消息数，每批单独提交
     retention_dry_run: bool = True  # 试运行：只统计会删多少，不真删
@@ -271,8 +272,9 @@ class Settings(BaseSettings):
     auto_send_max_risk: str = "L0"  # 自动发送允许的最高风险：L0 / L1；L2、L3 永远不自动发
     auto_send_exclude_intents: str | None = None  # 白名单为 * 时仍要人工的意图，如 fitment,price_offer
     auto_send_evidence: str = "kb"  # kb：必须引用知识库；any：任一依据（知识库/商品/查询结果）或回复无事实陈述
-    # 事事有回应：转人工的来信 N 分钟内没人回复，自动给买家发“已收到，同事正在处理，会尽快回复”（见 review_ack.py）
-    review_ack_enabled: bool = True
+    # 转人工的来信 N 分钟内没人回复，自动给买家发“已收到，同事正在处理，会尽快回复”（见 review_ack.py）。
+    # 2026-11-09 按用户要求默认关闭：没人回复的来信一律保持待审核，系统不替人发（含买家致谢时的自动简短致谢）
+    review_ack_enabled: bool = False
     review_ack_delay_minutes: int = 30  # 来信后多少分钟还没人回复就发回执
     review_ack_max_age_hours: int = 24  # 超过多少小时的旧来信不再补发（刚开启时不给积压消息补发）
     review_ack_cooldown_hours: int = 12  # 发过回执还没正式回复时，买家追问多少小时内不重复发

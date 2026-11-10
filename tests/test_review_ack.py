@@ -1,7 +1,36 @@
-"""事事有回应：转人工的来信超时没人回复，先给买家发“已收到”回执。"""
+"""转人工的来信超时没人回复，给买家发“已收到”回执（REVIEW_ACK_ENABLED）。
+2026-11-09 起按用户要求默认关闭：没人回复的来信一律保持待审核，系统不替人发。下面的用例显式打开开关，验证打开时的行为。"""
 from datetime import timedelta
 
+import pytest
+
 from app.config import get_settings
+
+
+@pytest.fixture(autouse=True)
+def _ack_on(request, monkeypatch, app_env):
+    """原有用例按“打开回执”验证；test_default_off_* 保持默认（关闭）。"""
+    if not request.node.name.startswith("test_default_off"):
+        monkeypatch.setattr(get_settings(), "review_ack_enabled", True)
+
+
+def test_default_off_sends_nothing(app_env):
+    """默认关闭：回执任务不启动，run() 什么都不发、不产生发件箱记录，买家消息保持待审核（含只是致谢的）。"""
+    from sqlalchemy import func, select
+
+    from app import review_ack
+    from app.db import session_scope
+    from app.models import OutboundMessage
+
+    assert get_settings().review_ack_enabled is False
+    assert review_ack.ReviewAckWorker().start() is False
+    with session_scope() as db:
+        conv, job = _setup(db, "OFF1")
+        conv2, job2 = _setup(db, "OFF2", intents=("thanks_closing",))  # 只是致谢：原来会自动回简短致谢
+        assert review_ack.run(db) == {}
+        assert job.ack_status is None and job2.ack_status is None and job.state == "REVIEW_REQUIRED"
+        assert _sellers(db, conv.id) == [] and _sellers(db, conv2.id) == []
+        assert db.scalar(select(func.count()).select_from(OutboundMessage)) == 0
 
 
 def _setup(db, key, *, site="EBAY_DE", minutes_ago=40, intents=("fitment",), language="de", state="REVIEW_REQUIRED"):

@@ -7,6 +7,7 @@
 - 还没处理完的会话整段跳过，处理完后下一轮再删：有未结束的回复任务、发送中或结果不确定的发送、未过期的认领；
 - 审计日志不含聊天正文：同步流水（EBAY_SYNC）按 N 天删，其他按 AUDIT_RETENTION_DAYS 删；
 - N 取店铺的 stores.retention_days，空则用 DATA_RETENTION_DAYS；0 表示不清理。
+- 上线前基线消息（baseline_messages / baseline_conversations，见 baseline.py）按 BASELINE_RETENTION_DAYS 一起清理。
 拉取 eBay 消息时也跳过早于截止时间的消息（ebay/sync.py），否则会话来新消息时旧消息会被整段拉回来。
 
 执行：分批删除（RETENTION_BATCH_SIZE 条消息一批，每批单独提交，不长时间锁表）；与 eBay 同步互斥；
@@ -316,6 +317,14 @@ def run(dry_run: bool | None = None, actor: str = "system", now: datetime | None
                 pushes = (EbayNotification.received_at < now - timedelta(days=PUSH_RECORD_DAYS),)
                 result["push_notifications"] = _count(db, EbayNotification, pushes) if dry else                     db.execute(delete(EbayNotification).where(*pushes)).rowcount or 0
                 result["media_expired"] = None if dry else cleanup_expired(db)
+            try:  # 上线前基线消息（baseline_messages，含买家正文）：按 BASELINE_RETENTION_DAYS 清理
+                from .baseline import cleanup as baseline_cleanup
+
+                result["baseline"] = baseline_cleanup(now, dry)
+            except Exception as e:
+                log.exception("基线消息清理失败")
+                result["ok"] = False
+                result["baseline"] = {"error": f"{type(e).__name__}: {str(e)[:300]}"}
             result["finished_at"] = utcnow().isoformat(timespec="seconds") + "Z"
             with session_scope() as db:
                 db.add(AuditEvent(actor=actor, action="RETENTION_DRY_RUN" if dry else "RETENTION_CLEANUP",

@@ -18,6 +18,7 @@ from .schemas import RuntimeContext
 class AgentState(TypedDict, total=False):
     snapshot: dict  # 会话快照：row_version、本次覆盖的买家消息
     memory: dict  # 最近原文
+    state_card: dict  # 会话状态卡（见 conversation_state.py）：系统事实 + 模型整理的未解决问题、关键事实、承诺
     observations: list[dict]  # ToolResult
     attachments: list[dict]  # 本次任务买家消息的附件：处理状态 + 图片观察（证据 ID 形如 img:附件ID）
     knowledge: dict  # 全量注入的条款与 token 估算

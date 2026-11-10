@@ -4,6 +4,10 @@
   review_state=PUBLISHED；effective_at ≤ 查询日；expires_at 为空或 ≥ 查询日；
   store_id ∈ {当前店铺, ALL}；marketplace_id ∈ {当前站点, ALL}；对外回复通道只取 PUBLIC_REPLY。
 站点为 UNKNOWN 时只取 marketplace_id=ALL 的条款，不套用站点专属政策（第 11.3 节）。
+
+取数（2026-11-10 提速）：先在数据库里按同样的条件过滤（candidate_query，走 PUBLISHED 部分索引），再用 exclusion_reason
+逐条复核，结果与“全表读出再在应用侧过滤”完全一样。原来每次起草都把 8.3 万行（大多是 RETIRED / WITHDRAWN 的旧版本）
+整表读进内存，单这一步约 1.8 秒。
 """
 from __future__ import annotations
 
@@ -12,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .. import usage as usage_log
@@ -48,6 +52,22 @@ def exclusion_reason(c: KnowledgeChunk, store_id: str, marketplace_id: str, on: 
     return None
 
 
+def candidate_query(store_id: str, marketplace_id: str, on: date, audience: str):
+    """数据库侧过滤：条件与 exclusion_reason 一一对应（只会多取、不会漏取，取回后仍逐条复核）。"""
+    day = on.isoformat()
+    sites = ["ALL"] if marketplace_id == "UNKNOWN" else [marketplace_id, "ALL"]
+    return select(KnowledgeChunk).where(
+        KnowledgeChunk.review_state == "PUBLISHED", KnowledgeChunk.store_id.in_([store_id, "ALL"]),
+        KnowledgeChunk.marketplace_id.in_(sites), KnowledgeChunk.audience == audience,
+        KnowledgeChunk.effective_at <= day,
+        or_(KnowledgeChunk.expires_at.is_(None), KnowledgeChunk.expires_at == "", KnowledgeChunk.expires_at >= day))
+
+
+def eligible_chunks(db: Session, store_id: str, marketplace_id: str, on: date, audience: str) -> list[KnowledgeChunk]:
+    rows = db.scalars(candidate_query(store_id, marketplace_id, on, audience)).all()
+    return [c for c in rows if exclusion_reason(c, store_id, marketplace_id, on, audience) is None]
+
+
 @dataclass
 class KnowledgeContext:
     clauses: list[KnowledgeChunk] = field(default_factory=list)
@@ -64,8 +84,7 @@ def evidence_id(c: KnowledgeChunk) -> str:
 
 
 def load_full_context(db: Session, store_id: str, marketplace_id: str, on: date, budget_tokens: int) -> KnowledgeContext:
-    rows = db.scalars(select(KnowledgeChunk)).all()
-    clauses = [c for c in rows if exclusion_reason(c, store_id, marketplace_id, on, "PUBLIC_REPLY") is None]
+    clauses = eligible_chunks(db, store_id, marketplace_id, on, "PUBLIC_REPLY")
     # 优先级数值越小越优先；同优先级店铺专属在前
     clauses.sort(key=lambda c: (c.priority, c.store_id == "ALL", c.clause_id))
     tokens = sum(estimate_tokens(c.title + c.text) + 12 for c in clauses)
@@ -83,6 +102,7 @@ class RetrievalContext(KnowledgeContext):
     query_tokens: list[str] = field(default_factory=list)
     candidates: int = 0
     hits: list[dict] = field(default_factory=list)
+    query_vector_cached: bool = False
 
 
 def retrieve(db: Session, store_id: str, marketplace_id: str, on: date, query: str, *, top_k: int,
@@ -96,8 +116,7 @@ def retrieve(db: Session, store_id: str, marketplace_id: str, on: date, query: s
     from .tokenize import tokens
 
     vi.require_ready()
-    rows = db.scalars(select(KnowledgeChunk)).all()
-    eligible = [c for c in rows if exclusion_reason(c, store_id, marketplace_id, on, audience) is None]
+    eligible = eligible_chunks(db, store_id, marketplace_id, on, audience)
     q_tokens = tokens(query)
     ctx = RetrievalContext(query=query, query_tokens=q_tokens, candidates=len(eligible))
     if not eligible or not query.strip():
@@ -114,10 +133,12 @@ def retrieve(db: Session, store_id: str, marketplace_id: str, on: date, query: s
 
     ranks: dict[str, dict] = {c.chunk_id: {} for c in eligible}
     started = time.perf_counter()
-    qvec = vi.embed_query(query)
-    s = get_settings()
-    usage_log.record(db, "embedding_query", provider=s.embedding_provider, model=s.embedding_model, store_id=store_id,
-                     estimated_tokens=estimate_tokens(query), duration_ms=int((time.perf_counter() - started) * 1000))
+    qvec, cached = vi.embed_query_cached(query)
+    ctx.query_vector_cached = cached
+    if not cached:  # 同一段问题（如重新生成）用缓存的查询向量，不再调用、不记费用
+        s = get_settings()
+        usage_log.record(db, "embedding_query", provider=s.embedding_provider, model=s.embedding_model, store_id=store_id,
+                         estimated_tokens=estimate_tokens(query), duration_ms=int((time.perf_counter() - started) * 1000))
     for rank, (h, dist) in enumerate(vi.vector_search(db, qvec, list(by_hash), candidates), 1):
         for c in by_hash[h]:
             ranks[c.chunk_id].update(vector_rank=rank, distance=round(dist, 4))

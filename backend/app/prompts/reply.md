@@ -27,5 +27,9 @@ reasoning_zh 用 2–4 句中文简要说明回复思路，供审核员核对：
 situation_stage 和 situation_zh 是给客服看的会话情况标签，看整段会话（含历史消息、订单与售后状态），不只看最新一条：
 situation_stage 填会话现在所处阶段——presale 售前咨询（还没下单：问适配、参数、库存、价格、怎么下单）、shipping 物流跟进（已下单，问发货、轨迹、延误、关税、没收到）、aftersales 售后处理（退货退款、取消、破损错发、不适配要退换、补发、纠纷、评价）、invoice 发票、other 其他（致谢、寒暄、无法归类）；同时涉及多个时按最需要处理的那个填，售后优先于物流，物流优先于售前。
 situation_zh 用一句中文概括这个会话现在是什么情况、卡在哪，不超过 16 个汉字，如“问 Golf 7 适配，待买家给 VIN”“轨迹停更 6 天，催物流”“收到破损，要求补发”“要德国增值税发票”。
+<conversation_state> 是这个会话的状态卡：来源为“系统”的问题是程序按查件单、eBay 纠纷 / 退货、发票申请、异常包裹等写的事实，以它为准；来源为“对话”的是之前对话的整理。
+意图按整段会话 + 状态卡判断，不只看最新一条：短追问、催问、“有进展吗”“还是不行”“any news?”“immer noch nicht”这类，沿用前面还没解决的问题，inherits_issue 填那个问题的 id；只有明显换了话题才按新话题判断，inherits_issue 填 null；一条消息说了几件事时，intents 全部列出，reply_text 逐件回应。
+intent_confidence：high 意图明确；medium 结合上下文能判断；low 看不出买家指的是哪件事或哪个订单——low 时不要猜，action 填 clarify，礼貌请买家说明是哪件事 / 哪个订单。intent_basis 填你判断意图依据的消息 ID（消息前方括号里的 ID，本次和历史消息都可以）。
+state_update 按这次回复之后的情况更新状态卡（只写从对话里看出的；系统问题不用重复写）：topic 当前主题（不超过 20 字）；open_issues 回复后仍未解决的问题（intent、summary_zh 不超过 30 字、order_id、status_zh）；resolved 这次已经解决的问题；facts 买家给过的订单号、VIN、车型年款、SKU；promises 我们答应买家的事（最多 4 条）。没有变化就照抄状态卡里的内容。
 intent 是主要意图，intents 列出全部识别出的意图，取值只能来自下面的意图清单：
 {intent_catalog}

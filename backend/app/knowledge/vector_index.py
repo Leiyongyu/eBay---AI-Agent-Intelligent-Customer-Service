@@ -18,6 +18,7 @@ import logging
 import math
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 from sqlalchemy import select, text
@@ -68,6 +69,7 @@ def set_embedder_override(embedder) -> None:
     """测试注入假向量模型（需有 embed_documents / embed_query）。"""
     global _embedder_override
     _embedder_override = embedder
+    clear_query_cache()  # 换了模型：缓存的查询向量作废
 
 
 def _embedder():
@@ -92,6 +94,7 @@ def _ensure_pg() -> VectorStatus:
     with engine.begin() as conn:
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_knowledge_chunks_search_text ON knowledge_chunks "
                           "USING gin (to_tsvector('simple', coalesce(search_text, '')))"))
+        ensure_published_index(conn)
         if not conn.execute(text("SELECT to_tsvector('simple', '退款')::text <> ''")).scalar():
             st.reasons.append("数据库区域设置不把中文当作词，全文检索会漏掉中文（换 UTF-8 / 中文 locale 的库）")
         available = conn.execute(text("SELECT default_version, installed_version FROM pg_available_extensions "
@@ -122,8 +125,22 @@ def _ensure_pg() -> VectorStatus:
     return st
 
 
+PUBLISHED_INDEX = "ix_knowledge_chunks_published"
+PUBLISHED_INDEX_COMMENT = ("起草取知识用的部分索引：只含 review_state=PUBLISHED（当前有效版本）的条款，按店铺、站点、可见级别；"
+                           "表里大多是 RETIRED / WITHDRAWN 的旧版本，不用整表扫")
+
+
+def ensure_published_index(conn) -> None:
+    """已有的库建表时没有这个索引（create_all 只给新表建索引）：启动时幂等补建（模型里也声明了，新库建表时就有）。"""
+    conn.execute(text(f"CREATE INDEX IF NOT EXISTS {PUBLISHED_INDEX} ON knowledge_chunks (store_id, marketplace_id, audience) "
+                      "WHERE review_state = 'PUBLISHED'"))
+    if conn.dialect.name == "postgresql":
+        conn.execute(text(f"COMMENT ON INDEX {PUBLISHED_INDEX} IS {_sql_literal(PUBLISHED_INDEX_COMMENT)}"))
+
+
 def _ensure_sqlite() -> VectorStatus:
     with get_engine().begin() as conn:
+        ensure_published_index(conn)
         conn.execute(text(f"""
             CREATE TABLE IF NOT EXISTS {TABLE} (
                 profile_id INTEGER NOT NULL,
@@ -274,6 +291,36 @@ def index_status(db: Session, store_id: str) -> dict:
 def embed_query(query: str) -> list[float]:
     v = _embedder().embed_query(query)
     return _normalize(v) if get_settings().embedding_normalize else v
+
+
+# 查询向量缓存（进程内 LRU）：同一段问题（重新生成、合并窗口内重跑）不重复调用向量模型。
+# 键 = 向量档案（服务商、模型、维度、是否归一化）+ 问题文本 SHA-256；换模型或维度自然不命中；注入 / 换掉假模型时清空。
+QUERY_CACHE_SIZE = 512
+_query_cache: "OrderedDict[tuple, list[float]]" = OrderedDict()
+_query_cache_lock = threading.Lock()
+
+
+def embed_query_cached(query: str) -> tuple[list[float], bool]:
+    """返回 (查询向量, 是否来自缓存)。"""
+    s = get_settings()
+    key = (s.embedding_provider, s.embedding_model, int(s.embedding_dimension or 0), bool(s.embedding_normalize),
+           text_hash(query))
+    with _query_cache_lock:
+        hit = _query_cache.get(key)
+        if hit is not None:
+            _query_cache.move_to_end(key)
+            return list(hit), True
+    v = embed_query(query)
+    with _query_cache_lock:
+        _query_cache[key] = list(v)
+        while len(_query_cache) > QUERY_CACHE_SIZE:
+            _query_cache.popitem(last=False)
+    return v, False
+
+
+def clear_query_cache() -> None:
+    with _query_cache_lock:
+        _query_cache.clear()
 
 
 def vector_search(db: Session, query_vec: list[float], hashes: list[str], limit: int) -> list[tuple[str, float]]:

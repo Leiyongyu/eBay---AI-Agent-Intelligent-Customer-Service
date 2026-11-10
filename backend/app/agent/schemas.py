@@ -52,6 +52,78 @@ class Claim(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list, max_length=10)
 
 
+def _cut(v, n: int) -> str:
+    return " ".join(str(v or "").split())[:n]
+
+
+# 状态卡里的一个未解决问题（模型写；系统问题由程序写，模型不用重复）。类上不写 docstring：会进输出结构、多花 token
+class StateIssue(BaseModel):
+
+    model_config = ConfigDict(extra="ignore")
+
+    intent: str
+    summary_zh: str = ""
+    order_id: str | None = None
+    status_zh: str = ""
+
+    @field_validator("intent")
+    @classmethod
+    def _code(cls, v: str) -> str:
+        return v if v in INTENTS else "other"  # 写错了不让整份输出作废（省一次修复调用）
+
+    @field_validator("summary_zh", "status_zh")
+    @classmethod
+    def _cap(cls, v: str) -> str:
+        return _cut(v, 40)
+
+
+class StateFacts(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    order_ids: list[str] = Field(default_factory=list)
+    vin: str | None = None
+    vehicle: str | None = None
+    skus: list[str] = Field(default_factory=list)
+
+    @field_validator("order_ids", "skus")
+    @classmethod
+    def _few(cls, v: list[str]) -> list[str]:
+        return [_cut(x, 40) for x in v if x][:5]
+
+
+# 模型在起草时顺带给出的状态卡更新（同一次调用，不另外请求）
+class StateUpdate(BaseModel):
+
+    model_config = ConfigDict(extra="ignore")
+
+    # 字段说明写在提示词里（reply.md），这里不加 description，省输出结构的 token
+    topic: str = ""
+    open_issues: list[StateIssue] = Field(default_factory=list)
+    resolved: list[str] = Field(default_factory=list)
+    facts: StateFacts = Field(default_factory=StateFacts)
+    promises: list[str] | None = None
+
+    @field_validator("topic")
+    @classmethod
+    def _topic(cls, v: str) -> str:
+        return _cut(v, 30)
+
+    @field_validator("open_issues")
+    @classmethod
+    def _issues(cls, v: list) -> list:
+        return v[:6]
+
+    @field_validator("resolved")
+    @classmethod
+    def _resolved(cls, v: list[str]) -> list[str]:
+        return [_cut(x, 40) for x in v if x][:4]
+
+    @field_validator("promises")
+    @classmethod
+    def _promises(cls, v: list[str] | None) -> list[str] | None:
+        return None if v is None else [_cut(x, 40) for x in v if x][:4]
+
+
 class ReplyDraftOutput(BaseModel):
     """模型输出契约。risk_level 不让模型填：风险等级由程序按第 3.2 节决定。"""
 
@@ -59,6 +131,10 @@ class ReplyDraftOutput(BaseModel):
 
     intent: IntentCode
     intents: list[IntentCode] = Field(min_length=1, max_length=5)
+    # 意图把握度和依据：按整段会话 + 状态卡判断；low 时不硬猜（action 用 clarify，程序加审核原因 INTENT_UNCERTAIN）
+    intent_confidence: Literal["high", "medium", "low"] | None = None  # high 明确 / medium 结合上下文 / low 看不出指哪件事
+    intent_basis: list[str] = Field(default_factory=list)  # 判断意图依据的消息 ID
+    inherits_issue: str | None = None  # 沿用的状态卡未解决问题 id；新话题为 null
     language: str = Field(max_length=16, description="回复语言代码，如 en、de、zh")
     action: Literal["answer", "clarify", "handoff"]
     needs_human: bool
@@ -73,7 +149,29 @@ class ReplyDraftOutput(BaseModel):
     situation_stage: Literal["presale", "shipping", "aftersales", "invoice", "other"] = Field(
         default="other", description="会话现在所处阶段：presale 售前咨询 / shipping 物流跟进 / aftersales 售后处理 / invoice 发票 / other 其他")
     situation_zh: str = Field(default="", description="一句中文概括这个会话现在是什么情况、卡在哪，不超过 16 个汉字")
+    state_update: StateUpdate | None = None  # 这次回复后的会话状态卡更新（说明见 reply.md）
     reason_code: str = Field(max_length=64)
+
+    @field_validator("intent_basis")
+    @classmethod
+    def _basis(cls, v: list[str]) -> list[str]:
+        return list(dict.fromkeys(_cut(x, 128) for x in v if x))[:10]
+
+    @field_validator("intent_confidence", mode="before")
+    @classmethod
+    def _confidence(cls, v):
+        """清单外的值（如 "very high"、"高"）不让整份输出作废、多修复一次：能认出来的归一，认不出当 null。"""
+        if v is None:
+            return None
+        t = str(v).strip().lower()
+        return {"high": "high", "高": "high", "medium": "medium", "mid": "medium", "中": "medium",
+                "low": "low", "低": "low"}.get(t)
+
+    @field_validator("inherits_issue")
+    @classmethod
+    def _inherits(cls, v: str | None) -> str | None:
+        v = _cut(v, 80)
+        return v if v and v.lower() not in ("null", "none") else None
 
     @field_validator("situation_zh")
     @classmethod

@@ -25,12 +25,13 @@ import ShipNoticesView from './views/ShipNoticesView.vue'
 import AftersalesCasesView from './views/AftersalesCasesView.vue'
 import PlaceholderView from './views/PlaceholderView.vue'
 import PerformanceView from './views/PerformanceView.vue'
+import LaunchView from './views/LaunchView.vue'
 import MessageTemplatesView from './views/MessageTemplatesView.vue'
 import OffersView from './views/OffersView.vue'
 import LoginView from './views/LoginView.vue'
 
 const VIEW_KEYS: ViewKey[] = ['workbench', 'knowledge', 'aftersales', 'tickets', 'shipnotices', 'cases', 'invoices', 'ebaycases', 'customers', 'sync',
-  'usage', 'status', 'accounts', 'settings', 'todo', 'performance', 'templates', 'offers', 'bestoffers', 'followups']
+  'usage', 'status', 'accounts', 'settings', 'todo', 'performance', 'launch', 'templates', 'offers', 'bestoffers', 'followups']
 const ADMIN_VIEWS: ViewKey[] = ['usage', 'status', 'accounts', 'settings', 'sync']
 const BOXES: BoxKey[] = ['pending', 'resolved', 'handoff', 'failed', 'unassigned', 'mine', 'auto', 'all', 'system',
   'system_unread', 'system_read']
@@ -237,9 +238,18 @@ function toggleGroup(c: NavLeaf) {
 const collapsed = ref(false)
 
 // ---- 侧边栏数字：店铺未读 + 各消息箱数量（工作台打开时也会刷新）----
-async function refreshCounts() {
+// 定时刷新时先问会话列表的变更标记，没变化（且不到 60 秒）就不重新算；标签页隐藏时不刷新
+let countsVersion = ''
+let countsAt = 0
+async function refreshCounts(force = true) {
   if (!session.user || session.user.must_change_password) return
   try {
+    if (!force) {
+      const v = await get<{ version: string; changed: boolean }>(`/internal/conversations/version?since=${countsVersion}`)
+      if (!v.changed && Date.now() - countsAt < 60_000) return
+      countsVersion = v.version
+    }
+    countsAt = Date.now()
     const [stores, c] = await Promise.all([
       get<Store[]>('/internal/stores'),
       get<{ views?: Record<string, number>; boxes?: Record<string, number> }>('/internal/conversations/filter-counts'),
@@ -309,8 +319,9 @@ async function afterLogin() {
   refreshCounts()
   clearInterval(timer)
   timer = window.setInterval(() => {
+    if (document.hidden) return
     refreshStatus()
-    refreshCounts()
+    refreshCounts(false)
   }, 15000)
 }
 watch(() => [session.user?.id, session.user?.must_change_password], afterLogin)
@@ -495,6 +506,7 @@ onUnmounted(() => {
             <InvoicesView v-else-if="t.view === 'invoices'" @open="(id: number) => go('workbench', { box: 'all', conv: id })" />
             <AftersalesFilesView v-else-if="t.view === 'aftersales'" @open="(id: number) => go('workbench', { box: 'all', conv: id })" />
             <PerformanceView v-else-if="t.view === 'performance'" />
+            <LaunchView v-else-if="t.view === 'launch'" />
             <MessageTemplatesView v-else-if="t.view === 'templates'" />
             <OffersView v-else-if="t.view === 'offers'" />
             <BestOfferView v-else-if="t.view === 'bestoffers'" @open="(id: number) => go('workbench', { box: 'all', conv: id })" />

@@ -217,6 +217,40 @@ RELAX_NOT_NULL = [("aftersales_files", "mail_id")]
 # 唯一约束调整（PostgreSQL）：去掉旧的单列唯一，加上新的组合唯一
 DROP_UNIQUE = [("conversation_marks", ["conversation_id"])]  # 原来一个会话只能一个标记
 ADD_UNIQUE = [("conversation_marks", "uq_conversation_marks_conv_tag", ["conversation_id", "tag_id"])]
+# 工作台会话列表批量查询用的索引（create_all 只给新表建索引，已有的表靠这里补；启动时 CREATE INDEX IF NOT EXISTS）
+ADD_INDEXES = [
+    ("messages", "ix_messages_conv_seq", ["conversation_id", "conversation_seq"],
+     "会话内按顺序取最后一条消息 / 最后一条买家消息、未读条数（工作台会话列表）"),
+    ("reply_jobs", "ix_reply_jobs_conv_id", ["conversation_id", "id"], "每个会话最新的回复任务（工作台会话列表）"),
+    ("work_claims", "ix_work_claims_conversation", ["conversation_id"], "按会话查认领（工作台会话列表）"),
+    ("outbound_messages", "ix_outbound_messages_message_id", ["message_id"], "按发出的消息找提交人（会话列表的最后回复人）"),
+    ("send_intents", "ix_send_intents_platform_message_id", ["platform_message_id"], "按 eBay 消息 ID 找发送人（会话列表的最后回复人）"),
+]
+
+
+def add_missing_indexes() -> list[str]:
+    """补建 ADD_INDEXES 里的索引（已有就跳过），PostgreSQL 上同时写中文注释。"""
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    engine = get_engine()
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    added = []
+    with engine.begin() as conn:
+        for table, name, cols, comment in ADD_INDEXES:
+            if table not in tables:
+                continue
+            if any(ix["name"] == name for ix in inspector.get_indexes(table)):
+                continue
+            conn.execute(text(f'CREATE INDEX IF NOT EXISTS "{name}" ON "{table}" ({", ".join(chr(34) + c + chr(34) for c in cols)})'))
+            if engine.dialect.name == "postgresql":
+                conn.execute(text(f'COMMENT ON INDEX "{name}" IS {_sql_literal(comment)}'))
+            added.append(name)
+    if added:
+        logging.getLogger(__name__).info("已补建索引：%s", "、".join(added))
+    return added
 
 
 def migrate_unique() -> list[str]:
@@ -282,6 +316,7 @@ def init_db() -> None:
     add_missing_columns()
     relax_not_null()
     migrate_unique()
+    add_missing_indexes()
     sync_comments()
     install_credential_guards()
     from .knowledge.vector_index import vector_status

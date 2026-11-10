@@ -1,0 +1,1947 @@
+{
+ "_note": "多轮对话意图评测集。全部为合成或改写后的对话：买家账号、姓名、邮箱、电话、地址、订单号、VIN、跟踪号都是编造的，不对应真实买家。时间用“多久以前”（如 3d、2d20h、30m），回放时按当前时间换算。最后一条店铺消息之后的买家消息是本次要处理的来信，前面的是历史。expect.intent 是可接受的主意图（列表，任一即算对）；intents_required 是必须识别出的意图；intent_not 是不能当主意图的；inherits_issue 为 true 表示本次来信是在接着前面没解决的问题，null 表示不评；action 取 reply / clarify / handoff，可省略。 prior_issue：前面买家提过、还没解决的问题（只是历史事实，不是本次答案），回放前写进会话状态卡，模拟线上前几轮起草后卡片里已有的问题；有它（或有查件单 / 未结 case）时才评沿用判断。",
+ "version": "2026-11-09-3",
+ "listings": {
+  "turbo": {
+   "title": "Turbolader für VW Golf VI 1.6 TDI 77kW CAYC",
+   "sku": "EV-TC-1001",
+   "price": "289.00",
+   "currency": "EUR",
+   "compatibility": [
+    "VW Golf VI 1.6 TDI 2009-2013",
+    "VW Caddy III 1.6 TDI 2010-2015"
+   ]
+  },
+  "throttle": {
+   "title": "Throttle Body for Audi A4 B8 2.0 TFSI 06F133062",
+   "sku": "EV-TB-2002",
+   "price": "79.90",
+   "currency": "EUR",
+   "compatibility": [
+    "Audi A4 B8 2.0 TFSI 2008-2015",
+    "Audi A5 8T 2.0 TFSI 2008-2016"
+   ]
+  },
+  "mirror": {
+   "title": "Specchietto retrovisore sinistro per Fiat 500 2008-2015",
+   "sku": "EV-MR-3003",
+   "price": "45.00",
+   "currency": "EUR",
+   "compatibility": [
+    "Fiat 500 312 2008-2015"
+   ]
+  },
+  "brake": {
+   "title": "Front Brake Pads for BMW 3 Series E90 E91 320d 2005-2012",
+   "sku": "EV-BP-4004",
+   "price": "39.99",
+   "currency": "GBP",
+   "compatibility": [
+    "BMW E90 318d/320d 2005-2012",
+    "BMW E91 318d/320d 2005-2012"
+   ]
+  },
+  "egr": {
+   "title": "Vanne EGR pour Peugeot 308 1.6 HDi 9HX",
+   "sku": "EV-EG-5005",
+   "price": "119.00",
+   "currency": "EUR",
+   "compatibility": [
+    "Peugeot 308 1.6 HDi 2007-2014",
+    "Citroën C4 1.6 HDi 2006-2011"
+   ]
+  },
+  "pump": {
+   "title": "Bomba de agua para Seat Leon 1P 1.9 TDI",
+   "sku": "EV-WP-6006",
+   "price": "58.50",
+   "currency": "EUR",
+   "compatibility": [
+    "Seat Leon 1P 1.9 TDI 2005-2010"
+   ]
+  }
+ },
+ "cases": [
+  {
+   "case_id": "C01",
+   "tags": [
+    "short_followup",
+    "after_our_reply"
+   ],
+   "language": "de",
+   "marketplace": "EBAY_DE",
+   "listing": "turbo",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "6d"
+    },
+    "package": {
+     "carrier": "DHL",
+     "tracking_status": "IN_TRANSIT",
+     "latest_event": "Die Sendung wurde im Start-Paketzentrum bearbeitet.",
+     "event": "5d"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Hallo, wo ist meine Bestellung? Ich sehe keine Bewegung in der Sendungsverfolgung.",
+     "ago": "2d"
+    },
+    {
+     "role": "SELLER",
+     "text": "Hallo, Ihr Paket ist mit DHL unterwegs. Wir haben beim Paketdienst nachgefragt und melden uns.",
+     "ago": "1d22h"
+    },
+    {
+     "role": "BUYER",
+     "text": "Gibt es schon Neuigkeiten?",
+     "ago": "20m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "shipping_status",
+     "delivery_delay"
+    ],
+    "intents_required": [],
+    "intent_not": [
+     "thanks_closing",
+     "other"
+    ],
+    "inherits_issue": true
+   },
+   "prior_issue": {
+    "intent": "shipping_status",
+    "summary_zh": "买家问包裹到哪了，轨迹没动"
+   }
+  },
+  {
+   "case_id": "C02",
+   "tags": [
+    "short_followup",
+    "after_our_reply"
+   ],
+   "language": "en",
+   "marketplace": "EBAY_GB",
+   "listing": "brake",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "12d"
+    },
+    "package": {
+     "carrier": "Royal Mail",
+     "tracking_status": "DELIVERED",
+     "latest_event": "Delivered",
+     "event": "8d"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "The pads squeal really loudly after fitting and the brake warning light came on.",
+     "ago": "3d"
+    },
+    {
+     "role": "SELLER",
+     "text": "Sorry to hear that. Could you please send us a short video of the noise and a photo of the fitted pads?",
+     "ago": "2d23h"
+    },
+    {
+     "role": "BUYER",
+     "text": "Any update?",
+     "ago": "1h"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "quality_issue",
+     "damaged_wrong"
+    ],
+    "intents_required": [],
+    "intent_not": [
+     "shipping_status",
+     "thanks_closing",
+     "other"
+    ],
+    "inherits_issue": true
+   },
+   "prior_issue": {
+    "intent": "quality_issue",
+    "summary_zh": "装上后刹车异响、报警灯亮"
+   }
+  },
+  {
+   "case_id": "C03",
+   "tags": [
+    "short_followup",
+    "after_our_reply",
+    "with_open_case"
+   ],
+   "language": "de",
+   "marketplace": "EBAY_DE",
+   "listing": "throttle",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "15d"
+    },
+    "package": {
+     "carrier": "DHL",
+     "tracking_status": "DELIVERED",
+     "latest_event": "Zugestellt",
+     "event": "10d"
+    },
+    "case": {
+     "case_type": "RETURN",
+     "status": "OPEN",
+     "last_action": "Buyer opened return: Doesn't fit"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Ich möchte den Artikel zurückgeben, er passt leider nicht.",
+     "ago": "2d"
+    },
+    {
+     "role": "SELLER",
+     "text": "Kein Problem. Bitte eröffnen Sie die Rückgabe über eBay unter „Meine Käufe“.",
+     "ago": "1d23h"
+    },
+    {
+     "role": "BUYER",
+     "text": "Habe ich gemacht. Und jetzt?",
+     "ago": "30m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "return_refund"
+    ],
+    "intents_required": [
+     "return_refund"
+    ],
+    "intent_not": [
+     "thanks_closing"
+    ],
+    "inherits_issue": true
+   },
+   "prior_issue": {
+    "intent": "return_refund",
+    "summary_zh": "买家要退货（不适配）"
+   }
+  },
+  {
+   "case_id": "C04",
+   "tags": [
+    "short_followup",
+    "after_our_reply"
+   ],
+   "language": "en",
+   "marketplace": "EBAY_GB",
+   "listing": "throttle",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "9d"
+    },
+    "package": {
+     "carrier": "DPD",
+     "tracking_status": "DELIVERED",
+     "latest_event": "Delivered",
+     "event": "6d"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Do I need to reset or adapt the throttle body after fitting it?",
+     "ago": "2d"
+    },
+    {
+     "role": "SELLER",
+     "text": "Yes, please disconnect the battery for 10 minutes, then switch the ignition on for 30 seconds without starting the engine.",
+     "ago": "1d20h"
+    },
+    {
+     "role": "BUYER",
+     "text": "Still not working, the EPC light is still on.",
+     "ago": "2h"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "quality_issue",
+     "install_help"
+    ],
+    "intents_required": [],
+    "intent_not": [
+     "thanks_closing",
+     "shipping_status"
+    ],
+    "inherits_issue": true
+   },
+   "prior_issue": {
+    "intent": "install_help",
+    "summary_zh": "问节气门装后要不要匹配"
+   }
+  },
+  {
+   "case_id": "C05",
+   "tags": [
+    "short_followup",
+    "after_our_reply"
+   ],
+   "language": "fr",
+   "marketplace": "EBAY_FR",
+   "listing": "egr",
+   "context": {
+    "order": {
+     "status": "NOT_STARTED",
+     "paid": "4d"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Bonjour, quand ma commande sera-t-elle expédiée ?",
+     "ago": "3d"
+    },
+    {
+     "role": "SELLER",
+     "text": "Bonjour, votre commande sera expédiée demain depuis notre entrepôt.",
+     "ago": "2d22h"
+    },
+    {
+     "role": "BUYER",
+     "text": "Toujours rien ?",
+     "ago": "40m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "shipping_status",
+     "delivery_delay",
+     "handling_time"
+    ],
+    "intents_required": [],
+    "intent_not": [
+     "thanks_closing",
+     "other"
+    ],
+    "inherits_issue": true
+   },
+   "prior_issue": {
+    "intent": "shipping_status",
+    "summary_zh": "问什么时候发货"
+   }
+  },
+  {
+   "case_id": "C06",
+   "tags": [
+    "short_followup",
+    "after_our_reply",
+    "with_ticket"
+   ],
+   "language": "it",
+   "marketplace": "EBAY_IT",
+   "listing": "mirror",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "10d"
+    },
+    "package": {
+     "carrier": "GLS",
+     "tracking_status": "DELIVERED",
+     "latest_event": "Consegnato",
+     "event": "4d"
+    },
+    "ticket": {
+     "type": "妥投未收到",
+     "status": "处理中",
+     "submitted": "2d"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Il pacco risulta consegnato ma io non l'ho ricevuto.",
+     "ago": "3d"
+    },
+    {
+     "role": "SELLER",
+     "text": "Ci dispiace, abbiamo aperto una verifica con il corriere e la aggiorneremo appena possibile.",
+     "ago": "2d"
+    },
+    {
+     "role": "BUYER",
+     "text": "Novità?",
+     "ago": "1h"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "delivery_delay",
+     "shipping_status"
+    ],
+    "intents_required": [],
+    "intent_not": [
+     "thanks_closing",
+     "other"
+    ],
+    "inherits_issue": true
+   },
+   "prior_issue": {
+    "intent": "delivery_delay",
+    "summary_zh": "显示妥投但买家没收到"
+   }
+  },
+  {
+   "case_id": "C07",
+   "tags": [
+    "short_followup",
+    "after_our_reply"
+   ],
+   "language": "es",
+   "marketplace": "EBAY_ES",
+   "listing": "pump",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "8d"
+    },
+    "package": {
+     "carrier": "SEUR",
+     "tracking_status": "DELIVERED",
+     "latest_event": "Entregado",
+     "event": "3d"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Hola, la bomba llegó con la carcasa rota.",
+     "ago": "2d"
+    },
+    {
+     "role": "SELLER",
+     "text": "Lo sentimos mucho. ¿Podría enviarnos fotos del daño y del embalaje?",
+     "ago": "1d23h"
+    },
+    {
+     "role": "BUYER",
+     "text": "Ya las envié ayer. ¿Y ahora qué?",
+     "ago": "3h"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "damaged_wrong"
+    ],
+    "intents_required": [
+     "damaged_wrong"
+    ],
+    "intent_not": [
+     "thanks_closing"
+    ],
+    "inherits_issue": true
+   },
+   "prior_issue": {
+    "intent": "damaged_wrong",
+    "summary_zh": "水泵到货外壳破损"
+   }
+  },
+  {
+   "case_id": "C08",
+   "tags": [
+    "short_followup",
+    "after_our_reply",
+    "with_open_case"
+   ],
+   "language": "de",
+   "marketplace": "EBAY_DE",
+   "listing": "turbo",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "25d"
+    },
+    "package": {
+     "carrier": "DHL",
+     "tracking_status": "DELIVERED",
+     "latest_event": "Zugestellt",
+     "event": "20d"
+    },
+    "case": {
+     "case_type": "RETURN",
+     "status": "OPEN",
+     "last_action": "Item shipped back by buyer"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Ich habe das Teil zurückgeschickt.",
+     "ago": "5d"
+    },
+    {
+     "role": "SELLER",
+     "text": "Danke, sobald die Rücksendung bei uns ankommt, erstatten wir den Betrag.",
+     "ago": "4d22h"
+    },
+    {
+     "role": "BUYER",
+     "text": "Wann bekomme ich mein Geld?",
+     "ago": "2h"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "refund_status",
+     "return_refund"
+    ],
+    "intents_required": [],
+    "intent_not": [
+     "thanks_closing",
+     "shipping_status"
+    ],
+    "inherits_issue": true
+   },
+   "prior_issue": {
+    "intent": "refund_status",
+    "summary_zh": "买家已寄回，等退款"
+   }
+  },
+  {
+   "case_id": "C09",
+   "tags": [
+    "short_followup",
+    "after_our_reply"
+   ],
+   "language": "en",
+   "marketplace": "EBAY_GB",
+   "listing": "turbo",
+   "context": {},
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Will this fit my 2011 Golf 1.6 TDI?",
+     "ago": "1d"
+    },
+    {
+     "role": "SELLER",
+     "text": "Thanks for your message. Please send us your VIN so our technicians can check the fitment.",
+     "ago": "23h"
+    },
+    {
+     "role": "BUYER",
+     "text": "WVWZZZ1KZBW000123 - so?",
+     "ago": "15m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "fitment"
+    ],
+    "intents_required": [
+     "fitment"
+    ],
+    "intent_not": [
+     "other",
+     "thanks_closing"
+    ],
+    "inherits_issue": true
+   },
+   "prior_issue": {
+    "intent": "fitment",
+    "summary_zh": "问是否适配 2011 款 Golf 1.6 TDI"
+   }
+  },
+  {
+   "case_id": "C10",
+   "tags": [
+    "short_followup"
+   ],
+   "language": "de",
+   "marketplace": "EBAY_DE",
+   "listing": "throttle",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "11d"
+    },
+    "package": {
+     "carrier": "Hermes",
+     "tracking_status": "IN_TRANSIT",
+     "latest_event": "Die Sendung ist im Verteilzentrum eingetroffen.",
+     "event": "7d"
+    }
+   },
+   "messages": [
+    {
+     "role": "SELLER",
+     "text": "Guten Tag, Ihre Bestellung wurde heute mit Hermes verschickt. Sendungsnummer H0000000000000000001.",
+     "ago": "9d"
+    },
+    {
+     "role": "BUYER",
+     "text": "Immer noch nichts angekommen.",
+     "ago": "1h"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "delivery_delay",
+     "shipping_status"
+    ],
+    "intents_required": [],
+    "intent_not": [
+     "thanks_closing",
+     "other"
+    ],
+    "inherits_issue": null
+   }
+  },
+  {
+   "case_id": "C11",
+   "tags": [
+    "after_our_reply"
+   ],
+   "language": "en",
+   "marketplace": "EBAY_GB",
+   "listing": "brake",
+   "context": {},
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Do you ship to Norway?",
+     "ago": "6h"
+    },
+    {
+     "role": "SELLER",
+     "text": "Yes, we ship to Norway. Shipping costs 25 GBP, as shown in the listing.",
+     "ago": "5h"
+    },
+    {
+     "role": "BUYER",
+     "text": "And how long does it take?",
+     "ago": "10m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "handling_time",
+     "shipping_cost",
+     "shipping_status"
+    ],
+    "intents_required": [],
+    "intent_not": [
+     "other",
+     "thanks_closing"
+    ],
+    "inherits_issue": true
+   },
+   "prior_issue": {
+    "intent": "shipping_cost",
+    "summary_zh": "问能否寄挪威"
+   }
+  },
+  {
+   "case_id": "C12",
+   "tags": [
+    "after_our_reply",
+    "topic_switch"
+   ],
+   "language": "de",
+   "marketplace": "EBAY_DE",
+   "listing": "throttle",
+   "context": {},
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Ist der Artikel auf Lager?",
+     "ago": "4h"
+    },
+    {
+     "role": "SELLER",
+     "text": "Ja, wir haben aktuell 5 Stück auf Lager.",
+     "ago": "3h"
+    },
+    {
+     "role": "BUYER",
+     "text": "Super. Kann ich 3 Stück zum Preis von 2 bekommen?",
+     "ago": "5m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "price_offer"
+    ],
+    "intents_required": [
+     "price_offer"
+    ],
+    "intent_not": [
+     "stock"
+    ],
+    "inherits_issue": false
+   },
+   "prior_issue": {
+    "intent": "stock",
+    "summary_zh": "问有没有货"
+   }
+  },
+  {
+   "case_id": "C13",
+   "tags": [
+    "after_our_reply",
+    "multi_issue"
+   ],
+   "language": "en",
+   "marketplace": "EBAY_GB",
+   "listing": "brake",
+   "context": {},
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Can I pay with PayPal?",
+     "ago": "3h"
+    },
+    {
+     "role": "SELLER",
+     "text": "Yes, eBay checkout accepts PayPal.",
+     "ago": "2h"
+    },
+    {
+     "role": "BUYER",
+     "text": "Ok great. If I buy two sets, can you combine the shipping?",
+     "ago": "5m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "shipping_cost",
+     "order_how_to"
+    ],
+    "intents_required": [
+     "shipping_cost"
+    ],
+    "intent_not": [
+     "thanks_closing"
+    ],
+    "inherits_issue": false
+   },
+   "prior_issue": {
+    "intent": "order_how_to",
+    "summary_zh": "问能否用 PayPal 付款"
+   }
+  },
+  {
+   "case_id": "C14",
+   "tags": [
+    "after_our_reply"
+   ],
+   "language": "fr",
+   "marketplace": "EBAY_FR",
+   "listing": "egr",
+   "context": {},
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Bonjour, cette vanne est-elle compatible avec ma Peugeot 308 de 2012 ?",
+     "ago": "1d"
+    },
+    {
+     "role": "SELLER",
+     "text": "Bonjour, merci de nous envoyer le numéro VIN de votre véhicule pour vérifier.",
+     "ago": "23h"
+    },
+    {
+     "role": "BUYER",
+     "text": "Je ne trouve pas le VIN. Sur la carte grise il y a écrit 1.6 HDi 110 ch, moteur 9HZ.",
+     "ago": "30m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "fitment"
+    ],
+    "intents_required": [
+     "fitment"
+    ],
+    "intent_not": [
+     "other"
+    ],
+    "inherits_issue": true,
+    "action": "clarify"
+   },
+   "prior_issue": {
+    "intent": "fitment",
+    "summary_zh": "问是否适配 2012 款 Peugeot 308"
+   }
+  },
+  {
+   "case_id": "C15",
+   "tags": [
+    "topic_switch",
+    "multi_issue"
+   ],
+   "language": "de",
+   "marketplace": "EBAY_DE",
+   "listing": "throttle",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "3d"
+    },
+    "package": {
+     "carrier": "DHL",
+     "tracking_status": "IN_TRANSIT",
+     "latest_event": "Die Sendung wird heute zugestellt.",
+     "event": "2h"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Wo ist mein Paket?",
+     "ago": "1d"
+    },
+    {
+     "role": "SELLER",
+     "text": "Ihr Paket ist in der Zustellung und kommt voraussichtlich heute an.",
+     "ago": "23h"
+    },
+    {
+     "role": "BUYER",
+     "text": "Danke! Noch eine Frage: muss die Drosselklappe nach dem Einbau mit einem Diagnosegerät angelernt werden?",
+     "ago": "10m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "install_help"
+    ],
+    "intents_required": [
+     "install_help"
+    ],
+    "intent_not": [
+     "shipping_status",
+     "thanks_closing"
+    ],
+    "inherits_issue": false
+   },
+   "prior_issue": {
+    "intent": "shipping_status",
+    "summary_zh": "问包裹在哪"
+   }
+  },
+  {
+   "case_id": "C16",
+   "tags": [
+    "topic_switch"
+   ],
+   "language": "en",
+   "marketplace": "EBAY_GB",
+   "listing": "brake",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "6d"
+    },
+    "package": {
+     "carrier": "Royal Mail",
+     "tracking_status": "DELIVERED",
+     "latest_event": "Delivered",
+     "event": "2d"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Package arrived today, thanks.",
+     "ago": "1d"
+    },
+    {
+     "role": "SELLER",
+     "text": "Glad to hear it arrived safely!",
+     "ago": "23h"
+    },
+    {
+     "role": "BUYER",
+     "text": "Actually, could you send me an invoice with VAT for my company?",
+     "ago": "20m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "invoice_vat"
+    ],
+    "intents_required": [
+     "invoice_vat"
+    ],
+    "intent_not": [
+     "thanks_closing",
+     "shipping_status"
+    ],
+    "inherits_issue": false
+   }
+  },
+  {
+   "case_id": "C17",
+   "tags": [
+    "topic_switch"
+   ],
+   "language": "it",
+   "marketplace": "EBAY_IT",
+   "listing": "mirror",
+   "context": {
+    "order": {
+     "status": "NOT_STARTED",
+     "paid": "6h"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Quando spedite?",
+     "ago": "5h"
+    },
+    {
+     "role": "SELLER",
+     "text": "Spediamo oggi entro le 17.",
+     "ago": "4h"
+    },
+    {
+     "role": "BUYER",
+     "text": "Ho sbagliato indirizzo, posso cambiarlo? Il numero civico giusto è 12.",
+     "ago": "15m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "address_change"
+    ],
+    "intents_required": [
+     "address_change"
+    ],
+    "intent_not": [
+     "shipping_status",
+     "handling_time"
+    ],
+    "inherits_issue": false,
+    "action": "handoff"
+   },
+   "prior_issue": {
+    "intent": "shipping_status",
+    "summary_zh": "问什么时候发货"
+   }
+  },
+  {
+   "case_id": "C18",
+   "tags": [
+    "topic_switch"
+   ],
+   "language": "es",
+   "marketplace": "EBAY_ES",
+   "listing": "pump",
+   "context": {
+    "order": {
+     "status": "NOT_STARTED",
+     "paid": "2h"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "¿Tienen también el termostato para el mismo coche?",
+     "ago": "3h"
+    },
+    {
+     "role": "SELLER",
+     "text": "Por el momento solo tenemos la bomba de agua para este modelo.",
+     "ago": "2h"
+    },
+    {
+     "role": "BUYER",
+     "text": "Entonces quiero cancelar el pedido de la bomba, ya no la necesito.",
+     "ago": "10m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "cancel_request"
+    ],
+    "intents_required": [
+     "cancel_request"
+    ],
+    "intent_not": [
+     "stock"
+    ],
+    "inherits_issue": false,
+    "action": "handoff"
+   },
+   "prior_issue": {
+    "intent": "stock",
+    "summary_zh": "问有没有同车型的节温器"
+   }
+  },
+  {
+   "case_id": "C19",
+   "tags": [
+    "topic_switch"
+   ],
+   "language": "en",
+   "marketplace": "EBAY_GB",
+   "listing": "brake",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "14d"
+    },
+    "package": {
+     "carrier": "Royal Mail",
+     "tracking_status": "DELIVERED",
+     "latest_event": "Delivered",
+     "event": "10d"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Pads fitted, all good now.",
+     "ago": "2d"
+    },
+    {
+     "role": "SELLER",
+     "text": "Great to hear, thank you for letting us know!",
+     "ago": "1d23h"
+    },
+    {
+     "role": "BUYER",
+     "text": "I left you positive feedback. Could you leave feedback for me as well?",
+     "ago": "30m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "feedback"
+    ],
+    "intents_required": [
+     "feedback"
+    ],
+    "intent_not": [
+     "quality_issue",
+     "thanks_closing"
+    ],
+    "inherits_issue": false
+   }
+  },
+  {
+   "case_id": "C20",
+   "tags": [
+    "multi_issue",
+    "single_turn"
+   ],
+   "language": "de",
+   "marketplace": "EBAY_DE",
+   "listing": "turbo",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "5d"
+    },
+    "package": {
+     "carrier": "DHL",
+     "tracking_status": "DELIVERED",
+     "latest_event": "Zugestellt",
+     "event": "1d"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Das Paket ist beschädigt angekommen, der Karton war eingedrückt und ein Flansch ist verbogen. Außerdem brauche ich noch eine Rechnung.",
+     "ago": "30m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "damaged_wrong"
+    ],
+    "intents_required": [
+     "damaged_wrong",
+     "invoice_vat"
+    ],
+    "intent_not": [
+     "invoice_vat"
+    ],
+    "inherits_issue": false
+   }
+  },
+  {
+   "case_id": "C21",
+   "tags": [
+    "multi_issue",
+    "single_turn"
+   ],
+   "language": "en",
+   "marketplace": "EBAY_US",
+   "listing": "brake",
+   "context": {
+    "order": {
+     "status": "NOT_STARTED",
+     "paid": "1d"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Where is my order? Also, I need to change the delivery address to my office, 100 Example Street, Springfield.",
+     "ago": "20m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "address_change",
+     "shipping_status"
+    ],
+    "intents_required": [
+     "address_change",
+     "shipping_status"
+    ],
+    "intent_not": [
+     "other"
+    ],
+    "inherits_issue": false
+   }
+  },
+  {
+   "case_id": "C22",
+   "tags": [
+    "multi_issue",
+    "single_turn"
+   ],
+   "language": "fr",
+   "marketplace": "EBAY_FR",
+   "listing": "egr",
+   "context": {
+    "order": {
+     "status": "NOT_STARTED",
+     "paid": "3h"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Je veux annuler ma commande, sauf si vous pouvez me faire un meilleur prix.",
+     "ago": "15m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "cancel_request",
+     "price_offer"
+    ],
+    "intents_required": [
+     "cancel_request",
+     "price_offer"
+    ],
+    "intent_not": [
+     "other"
+    ],
+    "inherits_issue": false
+   }
+  },
+  {
+   "case_id": "C23",
+   "tags": [
+    "multi_issue",
+    "single_turn"
+   ],
+   "language": "it",
+   "marketplace": "EBAY_IT",
+   "listing": "mirror",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "9d"
+    },
+    "package": {
+     "carrier": "GLS",
+     "tracking_status": "DELIVERED",
+     "latest_event": "Consegnato",
+     "event": "5d"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Lo specchietto elettrico non funziona, il motorino non si muove. Voglio un rimborso.",
+     "ago": "1h"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "quality_issue",
+     "return_refund"
+    ],
+    "intents_required": [
+     "quality_issue",
+     "return_refund"
+    ],
+    "intent_not": [
+     "install_help"
+    ],
+    "inherits_issue": false
+   }
+  },
+  {
+   "case_id": "C24",
+   "tags": [
+    "multi_issue",
+    "single_turn"
+   ],
+   "language": "es",
+   "marketplace": "EBAY_ES",
+   "listing": "pump",
+   "context": {},
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "¿Cuánto cuesta el envío a Canarias? ¿Y tengo que pagar aduana?",
+     "ago": "10m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "shipping_cost",
+     "customs_duty"
+    ],
+    "intents_required": [
+     "shipping_cost",
+     "customs_duty"
+    ],
+    "intent_not": [
+     "other"
+    ],
+    "inherits_issue": false
+   }
+  },
+  {
+   "case_id": "C25",
+   "tags": [
+    "thanks_closing",
+    "after_our_reply"
+   ],
+   "language": "de",
+   "marketplace": "EBAY_DE",
+   "listing": "turbo",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "6d"
+    },
+    "package": {
+     "carrier": "DHL",
+     "tracking_status": "DELIVERED",
+     "latest_event": "Zugestellt",
+     "event": "3h"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Wann kommt mein Paket?",
+     "ago": "1d"
+    },
+    {
+     "role": "SELLER",
+     "text": "Ihr Paket wird heute zugestellt.",
+     "ago": "23h"
+    },
+    {
+     "role": "BUYER",
+     "text": "Vielen Dank, alles angekommen!",
+     "ago": "20m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "thanks_closing"
+    ],
+    "intents_required": [
+     "thanks_closing"
+    ],
+    "intent_not": [
+     "shipping_status",
+     "delivery_delay"
+    ],
+    "inherits_issue": false,
+    "action": "reply"
+   },
+   "prior_issue": {
+    "intent": "shipping_status",
+    "summary_zh": "问包裹什么时候到"
+   }
+  },
+  {
+   "case_id": "C26",
+   "tags": [
+    "thanks_closing",
+    "after_our_reply"
+   ],
+   "language": "en",
+   "marketplace": "EBAY_GB",
+   "listing": "throttle",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "9d"
+    },
+    "package": {
+     "carrier": "DPD",
+     "tracking_status": "DELIVERED",
+     "latest_event": "Delivered",
+     "event": "6d"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "The EPC light is on after fitting.",
+     "ago": "2d"
+    },
+    {
+     "role": "SELLER",
+     "text": "Please disconnect the battery for 10 minutes and let the throttle body adapt with the ignition on.",
+     "ago": "1d22h"
+    },
+    {
+     "role": "BUYER",
+     "text": "That did it, works perfectly now. Thanks a lot!",
+     "ago": "1h"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "thanks_closing"
+    ],
+    "intents_required": [
+     "thanks_closing"
+    ],
+    "intent_not": [
+     "quality_issue",
+     "install_help"
+    ],
+    "inherits_issue": false,
+    "action": "reply"
+   },
+   "prior_issue": {
+    "intent": "quality_issue",
+    "summary_zh": "装后 EPC 灯亮"
+   }
+  },
+  {
+   "case_id": "C27",
+   "tags": [
+    "thanks_closing",
+    "single_turn"
+   ],
+   "language": "fr",
+   "marketplace": "EBAY_FR",
+   "listing": "egr",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "7d"
+    },
+    "package": {
+     "carrier": "Colissimo",
+     "tracking_status": "DELIVERED",
+     "latest_event": "Livré",
+     "event": "1d"
+    }
+   },
+   "messages": [
+    {
+     "role": "SELLER",
+     "text": "Bonjour, votre colis a été livré. N'hésitez pas à nous contacter si besoin.",
+     "ago": "1d"
+    },
+    {
+     "role": "BUYER",
+     "text": "Merci beaucoup, bonne journée !",
+     "ago": "2h"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "thanks_closing"
+    ],
+    "intents_required": [
+     "thanks_closing"
+    ],
+    "intent_not": [
+     "shipping_status"
+    ],
+    "inherits_issue": false,
+    "action": "reply"
+   }
+  },
+  {
+   "case_id": "C28",
+   "tags": [
+    "thanks_closing",
+    "short_followup",
+    "after_our_reply"
+   ],
+   "language": "en",
+   "marketplace": "EBAY_GB",
+   "listing": "brake",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "13d"
+    },
+    "package": {
+     "carrier": "Evri",
+     "tracking_status": "IN_TRANSIT",
+     "latest_event": "Your parcel is at our hub",
+     "event": "8d"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "My parcel hasn't moved for a week.",
+     "ago": "3d"
+    },
+    {
+     "role": "SELLER",
+     "text": "Sorry for the delay, we have contacted the carrier and will update you.",
+     "ago": "2d22h"
+    },
+    {
+     "role": "BUYER",
+     "text": "Thanks, but it still hasn't arrived.",
+     "ago": "1h"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "delivery_delay",
+     "shipping_status"
+    ],
+    "intents_required": [],
+    "intent_not": [
+     "thanks_closing"
+    ],
+    "inherits_issue": true
+   },
+   "prior_issue": {
+    "intent": "delivery_delay",
+    "summary_zh": "包裹一周没更新"
+   }
+  },
+  {
+   "case_id": "C29",
+   "tags": [
+    "thanks_closing",
+    "after_our_reply",
+    "with_ticket"
+   ],
+   "language": "de",
+   "marketplace": "EBAY_DE",
+   "listing": "turbo",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "12d"
+    },
+    "package": {
+     "carrier": "DHL",
+     "tracking_status": "IN_TRANSIT",
+     "latest_event": "Die Sendung wurde im Ziel-Paketzentrum bearbeitet.",
+     "event": "6d"
+    },
+    "ticket": {
+     "type": "断更",
+     "status": "处理中",
+     "submitted": "1d"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Die Sendungsverfolgung bewegt sich seit Tagen nicht.",
+     "ago": "1d2h"
+    },
+    {
+     "role": "SELLER",
+     "text": "Wir haben eine Nachforschung beim Paketdienst eingeleitet und melden uns, sobald wir eine Antwort haben.",
+     "ago": "1d"
+    },
+    {
+     "role": "BUYER",
+     "text": "Ok danke, dann warte ich.",
+     "ago": "30m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "thanks_closing",
+     "delivery_delay",
+     "shipping_status"
+    ],
+    "intents_required": [],
+    "intent_not": [
+     "other"
+    ],
+    "inherits_issue": null,
+    "action": "reply"
+   },
+   "prior_issue": {
+    "intent": "delivery_delay",
+    "summary_zh": "轨迹多天不动"
+   }
+  },
+  {
+   "case_id": "C30",
+   "tags": [
+    "single_turn"
+   ],
+   "language": "en",
+   "marketplace": "EBAY_US",
+   "listing": "brake",
+   "context": {},
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Are these OEM or aftermarket? Do they come with wear sensors?",
+     "ago": "10m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "item_spec"
+    ],
+    "intents_required": [
+     "item_spec"
+    ],
+    "intent_not": [
+     "fitment"
+    ],
+    "inherits_issue": false
+   }
+  },
+  {
+   "case_id": "C31",
+   "tags": [
+    "single_turn"
+   ],
+   "language": "de",
+   "marketplace": "EBAY_DE",
+   "listing": "turbo",
+   "context": {},
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Passt der Turbolader auf einen VW Caddy 1.6 TDI Baujahr 2012?",
+     "ago": "10m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "fitment"
+    ],
+    "intents_required": [
+     "fitment"
+    ],
+    "intent_not": [
+     "item_spec"
+    ],
+    "inherits_issue": false
+   }
+  },
+  {
+   "case_id": "C32",
+   "tags": [
+    "single_turn"
+   ],
+   "language": "en",
+   "marketplace": "EBAY_GB",
+   "listing": "brake",
+   "context": {},
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Can you give me your phone number or WhatsApp? It's easier to talk there.",
+     "ago": "10m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "off_platform"
+    ],
+    "intents_required": [
+     "off_platform"
+    ],
+    "intent_not": [
+     "other"
+    ],
+    "inherits_issue": false,
+    "action": "handoff"
+   }
+  },
+  {
+   "case_id": "C33",
+   "tags": [
+    "single_turn"
+   ],
+   "language": "es",
+   "marketplace": "EBAY_ES",
+   "listing": "pump",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "4d"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "¿Me pueden hacer una factura con IVA a nombre de mi taller?",
+     "ago": "10m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "invoice_vat"
+    ],
+    "intents_required": [
+     "invoice_vat"
+    ],
+    "intent_not": [
+     "other"
+    ],
+    "inherits_issue": false
+   }
+  },
+  {
+   "case_id": "C34",
+   "tags": [
+    "single_turn"
+   ],
+   "language": "it",
+   "marketplace": "EBAY_IT",
+   "listing": "mirror",
+   "context": {},
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Quanto tempo ci vuole per la spedizione in Sicilia?",
+     "ago": "10m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "handling_time",
+     "shipping_cost"
+    ],
+    "intents_required": [],
+    "intent_not": [
+     "shipping_status",
+     "other"
+    ],
+    "inherits_issue": false
+   }
+  },
+  {
+   "case_id": "C35",
+   "tags": [
+    "single_turn"
+   ],
+   "language": "en",
+   "marketplace": "EBAY_US",
+   "listing": "brake",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "20d"
+    },
+    "package": {
+     "carrier": "USPS",
+     "tracking_status": "DELIVERED",
+     "latest_event": "Delivered, In/At Mailbox",
+     "event": "15d"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "This is a scam. I will report you to the police and my lawyer.",
+     "ago": "10m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "abuse_fraud_legal"
+    ],
+    "intents_required": [
+     "abuse_fraud_legal"
+    ],
+    "intent_not": [
+     "thanks_closing"
+    ],
+    "inherits_issue": false,
+    "action": "handoff"
+   }
+  },
+  {
+   "case_id": "C36",
+   "tags": [
+    "single_turn"
+   ],
+   "language": "de",
+   "marketplace": "EBAY_DE",
+   "listing": "throttle",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "8d"
+    },
+    "package": {
+     "carrier": "DHL",
+     "tracking_status": "DELIVERED",
+     "latest_event": "Zugestellt",
+     "event": "2d"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Laut DHL zugestellt, aber ich habe nichts bekommen. Der Briefkasten war leer.",
+     "ago": "30m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "delivery_delay",
+     "shipping_status"
+    ],
+    "intents_required": [],
+    "intent_not": [
+     "thanks_closing",
+     "damaged_wrong"
+    ],
+    "inherits_issue": false,
+    "action": "handoff"
+   }
+  },
+  {
+   "case_id": "C37",
+   "tags": [
+    "single_turn",
+    "with_open_case"
+   ],
+   "language": "en",
+   "marketplace": "EBAY_US",
+   "listing": "brake",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "21d"
+    },
+    "package": {
+     "carrier": "USPS",
+     "tracking_status": "IN_TRANSIT",
+     "latest_event": "In Transit to Next Facility",
+     "event": "12d"
+    },
+    "case": {
+     "case_type": "INR",
+     "status": "OPEN",
+     "last_action": "Buyer opened item not received inquiry"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "I opened a case because nothing arrived. Any news?",
+     "ago": "1h"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "delivery_delay",
+     "shipping_status"
+    ],
+    "intents_required": [],
+    "intent_not": [
+     "thanks_closing"
+    ],
+    "inherits_issue": true,
+    "action": "handoff"
+   }
+  },
+  {
+   "case_id": "C38",
+   "tags": [
+    "short_followup",
+    "after_our_reply"
+   ],
+   "language": "de",
+   "marketplace": "EBAY_DE",
+   "listing": "throttle",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "14d"
+    },
+    "package": {
+     "carrier": "DHL",
+     "tracking_status": "DELIVERED",
+     "latest_event": "Zugestellt",
+     "event": "9d"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Können Sie mir ein Rücksendeetikett schicken?",
+     "ago": "1d"
+    },
+    {
+     "role": "SELLER",
+     "text": "Bitte eröffnen Sie die Rückgabe über eBay, dann erhalten Sie das Etikett automatisch.",
+     "ago": "23h"
+    },
+    {
+     "role": "BUYER",
+     "text": "Wie genau?",
+     "ago": "1h"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "return_refund",
+     "order_how_to"
+    ],
+    "intents_required": [],
+    "intent_not": [
+     "other",
+     "thanks_closing"
+    ],
+    "inherits_issue": true
+   },
+   "prior_issue": {
+    "intent": "return_refund",
+    "summary_zh": "要退货标签"
+   }
+  },
+  {
+   "case_id": "C39",
+   "tags": [
+    "after_our_reply",
+    "topic_switch"
+   ],
+   "language": "en",
+   "marketplace": "EBAY_US",
+   "listing": "brake",
+   "context": {},
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "Do these come as a set for both front wheels?",
+     "ago": "5h"
+    },
+    {
+     "role": "SELLER",
+     "text": "Yes, the set contains 4 pads for the front axle.",
+     "ago": "4h"
+    },
+    {
+     "role": "BUYER",
+     "text": "Ok, I'll take two sets then. How do I change the quantity before paying?",
+     "ago": "10m"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "order_how_to"
+    ],
+    "intents_required": [
+     "order_how_to"
+    ],
+    "intent_not": [
+     "item_spec"
+    ],
+    "inherits_issue": false
+   },
+   "prior_issue": {
+    "intent": "item_spec",
+    "summary_zh": "问是不是一套前轮刹车片"
+   }
+  },
+  {
+   "case_id": "C40",
+   "tags": [
+    "topic_switch"
+   ],
+   "language": "en",
+   "marketplace": "EBAY_GB",
+   "listing": "turbo",
+   "context": {
+    "order": {
+     "status": "SHIPPED",
+     "paid": "10d"
+    },
+    "package": {
+     "carrier": "DPD",
+     "tracking_status": "DELIVERED",
+     "latest_event": "Delivered",
+     "event": "3d"
+    }
+   },
+   "messages": [
+    {
+     "role": "BUYER",
+     "text": "When will my turbo be delivered?",
+     "ago": "5d"
+    },
+    {
+     "role": "SELLER",
+     "text": "It is out for delivery with DPD and should arrive in the next two days.",
+     "ago": "4d23h"
+    },
+    {
+     "role": "BUYER",
+     "text": "Got it. But now that it's fitted, it is leaking oil from the oil feed line.",
+     "ago": "1h"
+    }
+   ],
+   "expect": {
+    "intent": [
+     "quality_issue",
+     "damaged_wrong",
+     "install_help"
+    ],
+    "intents_required": [],
+    "intent_not": [
+     "shipping_status",
+     "delivery_delay",
+     "thanks_closing"
+    ],
+    "inherits_issue": false
+   },
+   "prior_issue": {
+    "intent": "shipping_status",
+    "summary_zh": "问涡轮什么时候到"
+   }
+  }
+ ]
+}

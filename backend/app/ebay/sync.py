@@ -359,6 +359,7 @@ class EbayMessageSync:
             # 店铺开关只处理 24 小时内的来信：补拉到的旧消息（如已读回填、首次同步）不自动回复
             store_ai = bool(db.get(Store, store_id).auto_send_enabled)
             recent_from = utcnow() - AUTO_REPLY_MAX_AGE
+            new_seller: list[Message] = []  # 这次新拉到的店铺回复：同事可能直接在 eBay 后台回了买家
 
             for m in messages:
                 mid = m.get("messageId")
@@ -383,6 +384,8 @@ class EbayMessageSync:
                 msg.platform_read = m.get("readStatus")
                 if role == "BUYER":
                     new_buyer.append(msg.id)
+                elif role == "SELLER":
+                    new_seller.append(msg)
                 if msg.media and role in ("BUYER", "UNKNOWN"):
                     atts = register_ebay_media(db, msg, msg.media)
                     ensure_stored(db, atts)  # 拉到就下载（安全处理后存本地），审核员打开会话立刻能看到；按消息时间 30 天后清理
@@ -391,6 +394,13 @@ class EbayMessageSync:
                 stats["messages_new"] += 1
                 stats[f"messages_{role.lower()}"] += 1
             db.flush()
+            if new_seller:
+                # 同事在 eBay 后台回复了买家：被它回复掉的、还没发出的任务和 AI 草稿作废（不发任何消息；本系统发出的不算）
+                from ..ebay_replied import close_replied_jobs
+
+                for sm in new_seller:
+                    closed = close_replied_jobs(db, c, sm, actor="ebay_sync")
+                    stats["replied_on_ebay_closed"] = stats.get("replied_on_ebay_closed", 0) + len(closed)
             if ctype == "FROM_MEMBERS" and store_ai:
                 # 规则：会话最后一句永远是我们的。最后一条是买家发的、又没有待处理任务（超过 24 小时的旧来信、首次同步）：
                 # 补一个回复任务，进“未处理”，不让买家的消息停在最后没人看见（每个会话最多一个）

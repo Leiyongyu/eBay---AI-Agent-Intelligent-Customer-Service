@@ -1,6 +1,7 @@
 """人工工作台接口（第 5 章、第 13 章“内部 API”）。"""
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from datetime import date, timedelta, timezone
@@ -9,7 +10,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import and_, case, delete, func, or_, select, true
 from sqlalchemy.orm import Session, defer
 
 from ..config import get_settings
@@ -124,6 +125,7 @@ def _draft_dict(d: Draft) -> dict:
         "review_reasons": d.review_reasons or [], "compliance": d.compliance_result,
         "prompt_version": d.prompt_version, "model_config_version": d.model_config_version,
         "knowledge_versions": d.knowledge_versions or [], "token_usage": d.token_usage, "created_at": iso(d.created_at),
+        "intent_confidence": d.intent_confidence, "intent_basis": d.intent_basis or [], "inherits_issue": d.inherits_issue,
     }
 
 
@@ -257,12 +259,14 @@ def list_conversations(store_id: str | None = None, group: str = "pending", q: s
                            content=content, first_from=first_from, first_to=first_to, last_from=last_from, last_to=last_to)
     items = []
     now = utcnow()
-    store_names = dict(db.execute(select(Store.id, Store.name)).all())  # 卡片上显示店铺名
-    for conv, unread_n in db.execute(query):
-        job = _current_job(db, conv.id)
-        auto_replied = bool(job and job.state == JobState.SENT and db.scalar(
-            select(SendIntent.id).where(SendIntent.job_id == job.id, SendIntent.actor == AUTO_ACTOR)))
-        inv_status = db.scalar(select(InvoiceRequest.status).where(InvoiceRequest.conversation_id == conv.id))
+    rows = db.execute(query).all()
+    # 这一页会话的附加信息一次性批量取齐（不再每个会话十几次查询），SQL 次数和会话数无关
+    ex = _list_extras(db, [c for c, _ in rows], now)
+    store_names = {sid: st[0] for sid, st in ex["stores"].items()}  # 卡片上显示店铺名
+    for conv, unread_n in rows:
+        job = ex["jobs"].get(conv.id)
+        auto_replied = bool(job and job.state == JobState.SENT and job.id in ex["auto_jobs"])
+        inv_status = ex["invoice"].get(conv.id)
         if view == "pending" and (job is None or job.state not in JobState.PENDING_REVIEW):
             continue
         if view == "auto" and not auto_replied:
@@ -283,11 +287,9 @@ def list_conversations(store_id: str | None = None, group: str = "pending", q: s
             if not auto_replied:
                 continue
         elif group in ("failed", "unassigned", "mine"):
-            if group == "failed" and not db.scalar(select(OutboundMessage.id).where(
-                    OutboundMessage.conversation_id == conv.id,
-                    OutboundMessage.state.in_(("FAILED", "UNCERTAIN"))).limit(1)):
+            if group == "failed" and not ex["outbox_problem"].get(conv.id):
                 continue
-            claim_now = _active_claim(db, conv)
+            claim_now = ex["claims"].get(conv.id)
             if group == "unassigned" and claim_now is not None:
                 continue
             if group == "mine" and (claim_now is None or claim_now.claimed_by != reviewer):
@@ -295,25 +297,21 @@ def list_conversations(store_id: str | None = None, group: str = "pending", q: s
         elif group != "all":
             if job is None or job.state not in GROUPS.get(group, ()):
                 continue
-        claim_row = _active_claim(db, conv)
+        claim_row = ex["claims"].get(conv.id)
         if assignee:
             if assignee == "unassigned" and claim_row is not None:
                 continue
             if assignee != "unassigned" and (claim_row is None or claim_row.claimed_by != assignee):
                 continue
-        draft_row = db.scalar(select(Draft.id).where(Draft.job_id == job.id, Draft.status == "ACTIVE").limit(1)) if job else None
+        draft_row = ex["drafts"].get(job.id) if job else None  # 最新一版进行中的草稿（id, intent）
         if draft == "has" and draft_row is None or draft == "none" and draft_row is not None:
             continue
-        replier = _last_replier(db, conv.id)
+        replier = ex["replier"].get(conv.id)
         if last_replier and (replier or "") != last_replier:
             continue
-        last = db.scalar(select(Message).where(Message.conversation_id == conv.id)
-                         .order_by(Message.conversation_seq.desc()).limit(1))
-        last_buyer = db.scalar(select(Message).where(Message.conversation_id == conv.id, Message.sender_role == "BUYER")
-                               .order_by(Message.conversation_seq.desc()).limit(1))
-        draft = db.scalar(select(Draft).where(Draft.job_id == job.id, Draft.status == "ACTIVE")
-                          .order_by(Draft.id.desc()).limit(1)) if job else None
-        waiting = int((now - last_buyer.sent_at).total_seconds()) if last_buyer and job and job.state not in GROUPS["resolved"] else None
+        last = ex["last"].get(conv.id)  # (正文, 发送方)
+        last_buyer_at = ex["last_buyer_at"].get(conv.id)
+        waiting = int((now - last_buyer_at).total_seconds()) if last_buyer_at and job and job.state not in GROUPS["resolved"] else None
         items.append({
             "id": conv.id, "store_id": conv.store_id, "store_name": store_names.get(conv.store_id) or conv.store_id,
             "marketplace_id": conv.marketplace_id,
@@ -321,21 +319,19 @@ def list_conversations(store_id: str | None = None, group: str = "pending", q: s
             "channel_source": conv.channel_source, "conversation_type": conv.conversation_type,
             "conversation_title": conv.conversation_title,
             "last_message_at": iso(conv.last_message_at),
-            "preview": (last.body[:80] if last else ""), "preview_role": last.sender_role if last else None,
+            "preview": ((last[0] or "")[:80] if last else ""), "preview_role": last[1] if last else None,
             "waiting_seconds": waiting,
-            "job": _job_dict(job), "intent": draft.intent if draft else None,
+            "job": _job_dict(job), "intent": draft_row[1] if draft_row else None,
             "claim": _claim_dict(claim_row),
             "auto_replied": auto_replied,
             "starred": bool(conv.starred), "last_replier": replier,
             "aftersales": _aftersales_dict(conv), "situation": _situation_dict(conv),
-            "mark": _conversation_mark(db, conv.id), "marks": _conversation_marks(db, conv.id),
+            "mark": (ex["marks"].get(conv.id) or [None])[0], "marks": ex["marks"].get(conv.id) or [],
             "invoice_status": inv_status,  # 发票申请：OPEN 待开票发送 / DONE 已发 / CANCELLED
-            "blacklist": _blacklisted(db, conv),
-            "outbox_pending": db.scalar(select(func.count(OutboundMessage.id)).where(
-                OutboundMessage.conversation_id == conv.id, OutboundMessage.state.in_(("PENDING", "SENDING")))) or 0,
-            "outbox_problem": bool(db.scalar(select(OutboundMessage.id).where(
-                OutboundMessage.conversation_id == conv.id, OutboundMessage.state.in_(("FAILED", "UNCERTAIN"))).limit(1))),
-            "item_url": _conv_item_url(db, conv),
+            "blacklist": ex["blacklist"].get(conv.id),
+            "outbox_pending": ex["outbox_pending"].get(conv.id, 0),
+            "outbox_problem": bool(ex["outbox_problem"].get(conv.id)),
+            "item_url": _item_url_for(conv, ex["stores"]),
             "unread_count": unread_n or 0, "platform_unread_count": conv.platform_unread_count,
             "read_by": conv.read_by, "read_at": iso(conv.read_at),
         })
@@ -345,6 +341,106 @@ def list_conversations(store_id: str | None = None, group: str = "pending", q: s
         items.sort(key=lambda i: (-(i["waiting_seconds"] or -1),
                                   risk_rank.get((i["job"] or {}).get("risk_level"), 4)))
     return items
+
+
+def _item_url_for(conv: Conversation, stores: dict[str, tuple]) -> str | None:
+    """同 _conv_item_url，店铺默认站点从已取好的店铺表里拿（列表用，不再逐个查店铺）。"""
+    if not conv.item_id:
+        return None
+    site = conv.marketplace_id
+    if not site or site == "UNKNOWN":
+        site = (stores.get(conv.store_id) or (None, None))[1]
+    return item_url(conv.item_id, site)
+
+
+def _chunks(ids: list, n: int = 500):
+    for i in range(0, len(ids), n):
+        yield ids[i:i + n]
+
+
+def _latest_per_conv(db: Session, ids: list[int], *conds):
+    """每个会话（满足 conds 的）最后一条消息：按 conversation_seq 取最大的那条。"""
+    out: dict[int, Message] = {}
+    for part in _chunks(ids):
+        last = (select(Message.conversation_id.label("cid"), func.max(Message.conversation_seq).label("seq"))
+                .where(Message.conversation_id.in_(part), *conds).group_by(Message.conversation_id).subquery())
+        for m in db.scalars(select(Message).join(last, (Message.conversation_id == last.c.cid)
+                                                 & (Message.conversation_seq == last.c.seq))):
+            out[m.conversation_id] = m
+    return out
+
+
+def _list_extras(db: Session, convs: list[Conversation], now) -> dict:
+    """会话列表的附加信息，按这一页会话批量取（每类一两次 IN 查询），结果和逐个会话查完全一样：
+    当前任务（最新一个非作废任务）、是否 AI 自动发出、发票申请状态、发件箱待发 / 失败、有效认领、最新进行中的草稿、
+    最后一条消息、最后一条买家消息时间、最后回复人、会话标记、黑名单、店铺名和默认站点。"""
+    from ..customers import blacklist_dict
+    from ..models import BuyerBlacklist
+
+    ids = [c.id for c in convs]
+    out = {"stores": {sid: (name, mk) for sid, name, mk in db.execute(select(Store.id, Store.name, Store.default_marketplace_id))},
+           "jobs": {}, "auto_jobs": set(), "invoice": {}, "outbox_pending": {}, "outbox_problem": {}, "claims": {},
+           "drafts": {}, "last": {}, "last_buyer_at": {}, "replier": {}, "marks": {}, "blacklist": {}}
+    if not ids:
+        return out
+    for part in _chunks(ids):
+        latest = (select(func.max(ReplyJob.id)).where(ReplyJob.conversation_id.in_(part), ReplyJob.state != JobState.CANCELLED_STALE)
+                  .group_by(ReplyJob.conversation_id))
+        for j in db.scalars(select(ReplyJob).where(ReplyJob.id.in_(latest))):
+            out["jobs"][j.conversation_id] = j
+        for cid, status in db.execute(select(InvoiceRequest.conversation_id, InvoiceRequest.status)
+                                      .where(InvoiceRequest.conversation_id.in_(part))):
+            out["invoice"].setdefault(cid, status)
+        for cid, state, n in db.execute(select(OutboundMessage.conversation_id, OutboundMessage.state, func.count(OutboundMessage.id))
+                                        .where(OutboundMessage.conversation_id.in_(part),
+                                               OutboundMessage.state.in_(("PENDING", "SENDING", "FAILED", "UNCERTAIN")))
+                                        .group_by(OutboundMessage.conversation_id, OutboundMessage.state)):
+            key = "outbox_pending" if state in ("PENDING", "SENDING") else "outbox_problem"
+            out[key][cid] = out[key].get(cid, 0) + n
+        store_of = {c.id: c.store_id for c in convs}
+        for cl in db.scalars(select(WorkClaim).where(WorkClaim.conversation_id.in_(part))):
+            if cl.store_id == store_of.get(cl.conversation_id) and cl.expires_at > now:
+                out["claims"][cl.conversation_id] = cl
+        for m, t in db.execute(select(ConversationMark, MessageTag).join(MessageTag, MessageTag.id == ConversationMark.tag_id)
+                               .where(ConversationMark.conversation_id.in_(part)).order_by(MessageTag.sort, MessageTag.id)):
+            out["marks"].setdefault(m.conversation_id, []).append(
+                {"tag_id": t.id, "tag": t.name, "color": t.color, "note": m.note, "marked_by": m.marked_by,
+                 "marked_at": iso(m.marked_at)})
+    job_ids = [j.id for j in out["jobs"].values()]
+    for part in _chunks(job_ids):
+        out["auto_jobs"] |= set(db.scalars(select(SendIntent.job_id).where(SendIntent.job_id.in_(part), SendIntent.actor == AUTO_ACTOR)))
+        for job_id, did, intent in db.execute(select(Draft.job_id, Draft.id, Draft.intent)
+                                              .where(Draft.job_id.in_(part), Draft.status == "ACTIVE").order_by(Draft.id)):
+            out["drafts"][job_id] = (did, intent)  # 按 id 升序覆盖：留下最新一版
+    out["last"] = {cid: (m.body, m.sender_role) for cid, m in _latest_per_conv(db, ids).items()}
+    out["last_buyer_at"] = {cid: m.sent_at for cid, m in _latest_per_conv(db, ids, Message.sender_role == "BUYER").items()}
+    # 最后回复人：最后一条店铺消息（不含系统自动发的）；本系统发出的记提交人，其余记“本系统 / eBay 后台”（同 _last_replier）
+    sellers = {cid: m for cid, m in _latest_per_conv(db, ids, Message.sender_role == "SELLER", Message.auto_kind.is_(None)).items()
+               if not is_ack(m.ebay_message_id)}
+    ob_actor: dict[int, str] = {}
+    intent_actor: dict[str, str] = {}
+    for part in _chunks([m.id for m in sellers.values()]):
+        for mid, actor in db.execute(select(OutboundMessage.message_id, OutboundMessage.actor).where(OutboundMessage.message_id.in_(part))):
+            ob_actor.setdefault(mid, actor)
+    for part in _chunks([m.ebay_message_id for m in sellers.values()]):
+        for pid, actor in db.execute(select(SendIntent.platform_message_id, SendIntent.actor)
+                                     .where(SendIntent.platform_message_id.in_(part))):
+            intent_actor.setdefault(pid, actor)
+    for cid, m in sellers.items():
+        out["replier"][cid] = ob_actor.get(m.id) or intent_actor.get(m.ebay_message_id) or \
+            ("本系统" if m.ebay_message_id.startswith(SIMULATED_PREFIX) else "eBay 后台")
+    # 黑名单：和 blacklist_entry 一样，“全部店铺”的记录优先，其次这个店铺的
+    buyers = {(c.buyer_key or "").strip().lower() for c in convs if c.buyer_key}
+    entries = list(db.scalars(select(BuyerBlacklist).where(BuyerBlacklist.buyer.in_(buyers)))) if buyers else []
+    for c in convs:
+        b = (c.buyer_key or "").strip().lower()
+        if not b:
+            continue
+        hit = next((e for e in entries if e.buyer == b and e.store_id is None), None) or \
+            next((e for e in entries if e.buyer == b and e.store_id == c.store_id), None)
+        if hit:
+            out["blacklist"][c.id] = blacklist_dict(hit)
+    return out
 
 
 def _split(v: str | None) -> list[str]:
@@ -474,6 +570,56 @@ def star_conversation(conv_id: int, body: StarBody, reviewer: str = Depends(revi
     conv.starred_by, conv.starred_at = (reviewer[:64], utcnow()) if body.starred else (None, None)
     db.commit()
     return {"id": conv.id, "starred": bool(conv.starred), "starred_by": conv.starred_by}
+
+
+def list_version(db: Session, store_id: str | None = None) -> str:
+    """会话列表的变更标记：这些店铺的会话、消息、回复任务、发件箱、认领、标记、发票申请、黑名单的条数和最近变更时间，
+    合成一个短字符串（一条 SQL）。列表、左侧菜单数字会变的情况都会让它变；前端轮询先问它，没变就不重新拉整表。"""
+    allowed = allowed_store_ids()
+    stores = [store_id] if store_id else (None if allowed is None else sorted(allowed))
+
+    def scoped(q, col):
+        return q if stores is None else q.where(col.in_(stores or ["__none__"]))
+
+    now = utcnow()
+    conv_ids = scoped(select(Conversation.id), Conversation.store_id)
+    parts = [
+        scoped(select(func.count(Conversation.id), func.max(Conversation.id), func.sum(Conversation.row_version),
+                      func.max(Conversation.last_message_at), func.max(Conversation.read_at), func.sum(func.coalesce(Conversation.read_seq, 0)),
+                      func.max(Conversation.starred_at), func.sum(case((Conversation.starred.is_(True), 1), else_=0)),
+                      func.max(Conversation.aftersales_updated_at), func.sum(case((Conversation.handoff_state == "HUMAN", 1), else_=0)),
+                      func.max(Conversation.situation_at), func.max(Conversation.state_updated_at)), Conversation.store_id),
+        scoped(select(func.max(Message.id), func.count(Message.id)), Message.store_id),
+        scoped(select(func.count(ReplyJob.id), func.max(ReplyJob.updated_at), func.sum(ReplyJob.lock_version)), ReplyJob.store_id),
+        scoped(select(func.count(OutboundMessage.id), func.max(OutboundMessage.updated_at)), OutboundMessage.store_id),
+        scoped(select(func.sum(case((WorkClaim.expires_at > now, 1), else_=0)), func.max(WorkClaim.claimed_at), func.count(WorkClaim.id)),
+               WorkClaim.store_id),
+        select(func.count(ConversationMark.id), func.max(ConversationMark.marked_at)).where(ConversationMark.conversation_id.in_(conv_ids)),
+        select(func.count(InvoiceRequest.id), func.max(InvoiceRequest.updated_at),
+               func.sum(case((InvoiceRequest.status == "OPEN", 1), else_=0)),
+               func.sum(case((InvoiceRequest.status == "DONE", 1), else_=0))).where(InvoiceRequest.conversation_id.in_(conv_ids)),
+        select(func.count(MessageTag.id), func.max(MessageTag.id)),
+    ]
+    from ..models import BuyerBlacklist
+
+    parts.append(select(func.count(BuyerBlacklist.id), func.max(BuyerBlacklist.id)))
+    # 每部分都只有一行聚合结果：横向拼成一条 SELECT（每部分只算一次）
+    subs = [q.subquery() for q in parts]
+    stmt = select(*[c for sub in subs for c in sub.c]).select_from(subs[0])
+    for sub in subs[1:]:
+        stmt = stmt.join(sub, true())
+    row = db.execute(stmt).one()
+    raw = "|".join("" if v is None else str(v) for v in row)
+    return hashlib.sha1(raw.encode()).hexdigest()[:16]
+
+
+@router.get("/conversations/version")
+def conversations_version(store_id: str | None = None, since: str | None = None, db: Session = Depends(get_db)):
+    """轮询用：返回当前的变更标记；带上上次的 since 时顺带告诉是否有变化（没变化前端就不重新拉列表和数字）。"""
+    if store_id:
+        check_store(store_id)
+    v = list_version(db, store_id)
+    return {"version": v, "changed": since != v}
 
 
 @router.get("/conversations/filter-options")
@@ -794,6 +940,9 @@ def _trace(db: Session, job: ReplyJob, generation: int) -> dict:
                               .order_by(ToolCall.id))],
         "run": None, "steps": [], "agent_draft": None, "cited_knowledge": [],
     }
+    conv = db.get(Conversation, job.conversation_id)  # 会话状态卡（当前的）：主题、未解决问题、关键事实
+    out["state_card"] = conv.state_card if conv else None
+    out["state_updated_at"] = iso(conv.state_updated_at) if conv else None
     run = db.scalar(select(AgentRun).where(AgentRun.job_id == job.id, AgentRun.run_generation == generation))
     if run:
         out["run"] = {"id": run.id, "state": run.state, "thread_id": run.thread_id, "mode": run.mode,

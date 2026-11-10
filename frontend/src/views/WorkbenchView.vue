@@ -105,10 +105,33 @@ function boxQuery(): URLSearchParams {
   return q
 }
 
+// ---- 增量刷新：每 6 秒先问一下有没有变化（一条 SQL），有变化才重新拉列表；最多 60 秒也整体刷新一次
+// （等待时长、认领到期随时间变）。浏览器标签页隐藏时不轮询，切回来马上查一次
+let lastVersion = ''
+let lastFull = 0
+const FULL_EVERY = 60_000
+const versionUrl = () => `/internal/conversations/version?${new URLSearchParams({
+  ...(f.storeId ? { store_id: f.storeId } : {}), since: lastVersion })}`
+async function poll() {
+  if (document.hidden) return
+  try {
+    const r = await get<{ version: string; changed: boolean }>(versionUrl())
+    if (r.changed || Date.now() - lastFull > FULL_EVERY) await refresh()
+  } catch {
+    /* 下次再查 */
+  }
+}
+function onVisible() {
+  if (!document.hidden) poll()
+}
+
 async function refresh() {
   loading.value = true
   loadTags()
   try {
+    // 先记下这一刻的变更标记再拉列表：拉的过程中又有变化，下一次轮询还能发现
+    lastVersion = (await get<{ version: string }>(versionUrl()).catch(() => ({ version: '' }))).version
+    lastFull = Date.now()
     const q = boxQuery()
     if (f.tagId) q.set('tag_id', f.tagId)
     if (f.stage) q.set('stage', f.stage)
@@ -398,10 +421,12 @@ onMounted(async () => {
   get('/internal/auto-reply/settings').then((r) => (autoSettings.value = r)).catch(() => null)
   await refresh()
   if (props.focus) setRead(props.focus)
-  timer = window.setInterval(refresh, 6000)
+  timer = window.setInterval(poll, 6000)
+  document.addEventListener('visibilitychange', onVisible)
 })
 onUnmounted(() => {
   clearInterval(timer)
+  document.removeEventListener('visibilitychange', onVisible)
   document.title = BASE_TITLE
 })
 </script>

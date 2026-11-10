@@ -6,6 +6,21 @@ import { fmtTime, intentLabel, isGateInfo, reasonLabel, toolTag } from '../forma
 import type { ChatMessage, DraftTrace } from '../types'
 
 const props = defineProps<{ trace: DraftTrace; messages: ChatMessage[]; live?: boolean; reasons?: string[] }>()
+const emit = defineEmits<{ jump: [ebayMessageId: string] }>()
+
+// ---- 意图判断（把握度、依据消息、沿用的问题）与会话状态卡 ----
+const CONFIDENCE: Record<string, { label: string; type: 'success' | 'warning' | 'danger' }> = {
+  high: { label: '把握高', type: 'success' }, medium: { label: '把握中', type: 'warning' }, low: { label: '把握低', type: 'danger' },
+}
+const card = computed(() => props.trace.state_card || null)
+const basisMsgs = computed(() => (draft.value?.intent_basis || [])
+  .map((id) => props.messages.find((m) => m.ebay_message_id === id) || { ebay_message_id: id, missing: true } as any))
+const inherited = computed(() => card.value?.issues.find((i) => i.id === draft.value?.inherits_issue) || null)
+const factLine = computed(() => {
+  const f = card.value?.facts || {}
+  return [f.order_ids?.length ? `订单 ${f.order_ids.join('、')}` : '', f.vin ? `VIN ${f.vin}` : '', f.vehicle ? `车型 ${f.vehicle}` : '',
+    f.skus?.length ? `SKU ${f.skus.join('、')}` : '', f.media || ''].filter(Boolean)
+})
 
 const TOOL_LABELS: Record<string, string> = {
   get_listing_context: '刊登信息',
@@ -112,6 +127,48 @@ function evidenceTag(id: string) {
         共 {{ trace.steps.length }} 步 · {{ secs(totalMs) }}<template v-if="tokens"> · {{ tokens }} token</template>
         <template v-if="trace.run"> · {{ fmtTime(trace.run.started_at) }}</template>
       </span>
+    </div>
+
+    <div v-if="draft && (draft.intent_confidence || draft.intent_basis?.length || draft.inherits_issue)" class="intent-box">
+      <div class="ib-row">
+        <span class="ib-k">意图判断</span>
+        <el-tag v-if="draft.intent_confidence" size="small" :type="CONFIDENCE[draft.intent_confidence]?.type" effect="plain">
+          {{ CONFIDENCE[draft.intent_confidence]?.label || draft.intent_confidence }}
+        </el-tag>
+        <span v-if="draft.intents?.length > 1" class="muted">同时识别：{{ draft.intents.map(intentLabel).join('、') }}</span>
+      </div>
+      <div class="ib-row">
+        <span class="ib-k">沿用问题</span>
+        <span v-if="inherited">{{ inherited.summary_zh }}<span class="muted">（{{ inherited.source === 'system' ? '系统' : '对话' }}{{ inherited.order_id ? ` · ${inherited.order_id}` : '' }}）</span></span>
+        <span v-else-if="draft.inherits_issue" class="muted">{{ draft.inherits_issue }}（已不在状态卡里）</span>
+        <span v-else class="muted">新话题</span>
+      </div>
+      <div v-if="basisMsgs.length" class="ib-row">
+        <span class="ib-k">依据消息</span>
+        <span class="basis">
+          <button v-for="m in basisMsgs" :key="m.ebay_message_id" class="bm" :disabled="m.missing"
+                  :title="m.missing ? '这条消息不在当前会话里' : '点击定位到这条消息'" @click="emit('jump', m.ebay_message_id)">
+            <template v-if="!m.missing">#{{ m.seq }} {{ snippet(m.body, 40) || '（无文字）' }}</template>
+            <template v-else>{{ m.ebay_message_id }}</template>
+          </button>
+        </span>
+      </div>
+    </div>
+
+    <div v-if="card && (card.topic || card.issues.length || factLine.length)" class="state-card">
+      <div class="sc-title">会话状态卡<span v-if="card.topic">：{{ card.topic }}</span>
+        <span class="muted">{{ trace.state_updated_at ? fmtTime(trace.state_updated_at) : '' }}</span></div>
+      <div v-if="card.issues.length" class="sc-issues">
+        <div v-for="i in card.issues" :key="i.id" class="sc-issue" :class="{ on: i.id === draft?.inherits_issue }">
+          <el-tag size="small" :type="i.source === 'system' ? 'primary' : 'info'" effect="plain">{{ i.source === 'system' ? '系统' : '对话' }}</el-tag>
+          <span class="sc-sum">{{ i.summary_zh || intentLabel(i.intent) }}</span>
+          <span class="muted">{{ [i.order_id, i.status, i.since].filter(Boolean).join(' · ') }}</span>
+        </div>
+      </div>
+      <div v-else class="muted">没有未解决的问题</div>
+      <div v-if="factLine.length" class="sc-line"><span class="ib-k">关键事实</span>{{ factLine.join('；') }}</div>
+      <div v-if="card.promises?.length" class="sc-line"><span class="ib-k">答应过</span>{{ card.promises.join('；') }}</div>
+      <div v-if="card.resolved?.length" class="sc-line muted"><span class="ib-k">已解决</span>{{ card.resolved.map((r) => r.summary_zh).join('；') }}</div>
     </div>
 
     <div v-if="draft?.reasoning_zh" class="reasoning">
@@ -314,6 +371,81 @@ function evidenceTag(id: string) {
 <style scoped>
 .trace {
   font-size: var(--fs-sm);
+}
+.intent-box,
+.state-card {
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  background: var(--sunken);
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.ib-row,
+.sc-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.ib-k {
+  flex: none;
+  color: var(--muted);
+  min-width: 4.5em;
+}
+.basis {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+.bm {
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--panel);
+  color: var(--text-2);
+  font: inherit;
+  padding: 1px 6px;
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bm:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.sc-title {
+  font-weight: 600;
+  color: var(--text);
+}
+.sc-title .muted {
+  font-weight: 400;
+  margin-left: 6px;
+}
+.sc-issues {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.sc-issue {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+.sc-issue.on {
+  background: var(--accent-soft);
+}
+.sc-sum {
+  color: var(--text);
 }
 .summary {
   display: flex;

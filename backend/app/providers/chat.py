@@ -54,11 +54,20 @@ def extract_json(text: str) -> Any:
         raise
 
 
+def _no_titles(node):
+    """去掉 Pydantic 自动生成的 title（字段名的英文重复），省提示词 token，不影响约束。"""
+    if isinstance(node, dict):
+        return {k: _no_titles(v) for k, v in node.items() if not (k == "title" and isinstance(v, str))}
+    if isinstance(node, list):
+        return [_no_titles(v) for v in node]
+    return node
+
+
 def schema_instruction(schema: type[BaseModel]) -> str:
     return (
         "只输出一个 JSON 对象，不要输出 Markdown 代码块或任何解释文字。"
         "JSON 必须符合以下 JSON Schema（不要输出额外字段）：\n"
-        + json.dumps(schema.model_json_schema(), ensure_ascii=False)
+        + json.dumps(_no_titles(schema.model_json_schema()), ensure_ascii=False, separators=(",", ":"))
     )
 
 
