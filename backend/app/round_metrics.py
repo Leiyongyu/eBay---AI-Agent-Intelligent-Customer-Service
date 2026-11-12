@@ -394,8 +394,10 @@ def _buyer_intents(db: Session, ebay_ids: list[str]) -> dict[str, str]:
 
 def baseline_available(db: Session) -> bool:
     """基线表在不在（表由 1 号的补拉脚本 / models.py 定义，线上库要重启后才建好）。"""
-    insp = inspect(db.get_bind())
-    return all(insp.has_table(t) for t in ("baseline_batches", "baseline_conversations", "baseline_messages"))
+    from .models import BaselineBatch, BaselineConversation, BaselineMessage
+
+    insp = inspect(db.get_bind())  # 表名按模型取（MySQL 上带 cs_ 前缀）
+    return all(insp.has_table(m.__tablename__) for m in (BaselineBatch, BaselineConversation, BaselineMessage))
 
 
 def baseline_status(db: Session) -> tuple[str, tuple[datetime, datetime] | None, list[int]]:
@@ -466,7 +468,9 @@ def cases_incomplete(coverage: dict[str, dict], stores: list[str], lo: datetime)
 
 
 def snapshot_table_ready(db: Session) -> bool:
-    return inspect(db.get_bind()).has_table("baseline_metric_snapshots")
+    from .models import BaselineSnapshot
+
+    return inspect(db.get_bind()).has_table(BaselineSnapshot.__tablename__)
 
 
 def baseline_conversations(db: Session, stores: list[str] | None, lo: datetime, hi: datetime) -> list[Conv]:

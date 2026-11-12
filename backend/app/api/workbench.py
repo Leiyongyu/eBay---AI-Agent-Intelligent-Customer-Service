@@ -298,10 +298,12 @@ def list_conversations(store_id: str | None = None, group: str = "pending", q: s
             if job is None or job.state not in GROUPS.get(group, ()):
                 continue
         claim_row = ex["claims"].get(conv.id)
-        if assignee:
-            if assignee == "unassigned" and claim_row is not None:
+        owner = ex["owners"].get(conv.store_id)
+        if assignee:  # 负责人 = 店铺客服；正在认领处理的人也算
+            mine = (owner and assignee in owner.split("、")) or (claim_row is not None and claim_row.claimed_by == assignee)
+            if assignee == "unassigned" and (owner or claim_row is not None):
                 continue
-            if assignee != "unassigned" and (claim_row is None or claim_row.claimed_by != assignee):
+            if assignee != "unassigned" and not mine:
                 continue
         draft_row = ex["drafts"].get(job.id) if job else None  # 最新一版进行中的草稿（id, intent）
         if draft == "has" and draft_row is None or draft == "none" and draft_row is not None:
@@ -323,6 +325,7 @@ def list_conversations(store_id: str | None = None, group: str = "pending", q: s
             "waiting_seconds": waiting,
             "job": _job_dict(job), "intent": draft_row[1] if draft_row else None,
             "claim": _claim_dict(claim_row),
+            "store_owner": owner,  # 店铺负责客服（账号管理里分配）；没有分配为 None
             "auto_replied": auto_replied,
             "starred": bool(conv.starred), "last_replier": replier,
             "aftersales": _aftersales_dict(conv), "situation": _situation_dict(conv),
@@ -370,6 +373,24 @@ def _latest_per_conv(db: Session, ids: list[int], *conds):
     return out
 
 
+def store_owner_names(db: Session) -> dict[str, str]:
+    """店铺负责人：账号管理里分配了这个店铺的客服（不含管理员，多人用顿号连起来）；
+    店铺没有专门分配时，用“负责全部店铺”的客服；都没有就不在字典里（页面显示“未分配”）。"""
+    from ..models import Role, User, UserStore
+
+    active = (User.is_active.is_(True), User.role != Role.ADMIN)
+    owners: dict[str, list[str]] = {}
+    for sid, name in db.execute(select(UserStore.store_id, User.display_name).join(User, User.id == UserStore.user_id)
+                                .where(*active).order_by(User.id)):
+        owners.setdefault(sid, []).append(name)
+    everyone = list(db.scalars(select(User.display_name).where(*active, User.all_stores.is_(True)).order_by(User.id)))
+    out = {sid: "、".join(dict.fromkeys(names)) for sid, names in owners.items()}
+    if everyone:
+        for sid in db.scalars(select(Store.id)):
+            out.setdefault(sid, "、".join(dict.fromkeys(everyone)))
+    return out
+
+
 def _list_extras(db: Session, convs: list[Conversation], now) -> dict:
     """会话列表的附加信息，按这一页会话批量取（每类一两次 IN 查询），结果和逐个会话查完全一样：
     当前任务（最新一个非作废任务）、是否 AI 自动发出、发票申请状态、发件箱待发 / 失败、有效认领、最新进行中的草稿、
@@ -380,7 +401,8 @@ def _list_extras(db: Session, convs: list[Conversation], now) -> dict:
     ids = [c.id for c in convs]
     out = {"stores": {sid: (name, mk) for sid, name, mk in db.execute(select(Store.id, Store.name, Store.default_marketplace_id))},
            "jobs": {}, "auto_jobs": set(), "invoice": {}, "outbox_pending": {}, "outbox_problem": {}, "claims": {},
-           "drafts": {}, "last": {}, "last_buyer_at": {}, "replier": {}, "marks": {}, "blacklist": {}}
+           "drafts": {}, "last": {}, "last_buyer_at": {}, "replier": {}, "marks": {}, "blacklist": {},
+           "owners": store_owner_names(db)}
     if not ids:
         return out
     for part in _chunks(ids):

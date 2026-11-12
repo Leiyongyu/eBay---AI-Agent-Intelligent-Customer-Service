@@ -87,8 +87,13 @@ class Settings(BaseSettings):
     audit_retention_days: int = 180  # 审计日志（不含聊天正文）保留天数；0 = 不清理
 
     # 基础设施
+    # 业务数据库（2026-11-12 起计划迁到 MySQL jmh_ai_agent，表名统一加 TABLE_PREFIX=cs_；向量仍在 PostgreSQL）
     database_url: str | None = None
     database_password: str | None = None  # 单独填写，避免密码里的 @ : / 等字符破坏连接串
+    table_prefix: str = ""  # 业务表名前缀：MySQL 上为 cs_（和同库的 AI 数据助手表区分）；只在启动时读一次
+    # 向量库（pgvector）：留空 = 和业务库同一个库（迁移前、SQLite 测试）；业务库换成 MySQL 后填 PostgreSQL 连接串
+    vector_database_url: str | None = None
+    vector_database_password: str | None = None  # 留空用 DATABASE_PASSWORD
     business_mysql_url: str | None = None
     redis_url: str | None = None
     redis_key_prefix: str = "ebaycs:"
@@ -307,6 +312,18 @@ class Settings(BaseSettings):
             return make_url(self.database_url).set(password=self.database_password).render_as_string(hide_password=False)
         DATA_DIR.mkdir(exist_ok=True)
         return f"sqlite:///{(DATA_DIR / 'app.db').as_posix()}"
+
+    @property
+    def effective_vector_database_url(self) -> str:
+        """向量库连接串；没单独配置时和业务库同一个。"""
+        if not self.vector_database_url:
+            return self.effective_database_url
+        pwd = self.vector_database_password or self.database_password
+        if not pwd:
+            return self.vector_database_url
+        from sqlalchemy.engine import make_url
+
+        return make_url(self.vector_database_url).set(password=pwd).render_as_string(hide_password=False)
 
     @property
     def database_display(self) -> str:

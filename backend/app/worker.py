@@ -88,7 +88,7 @@ class Worker:
                 .order_by(ReplyJob.ready_at)
                 .limit(1)
             )
-            if dialect_name() == "postgresql":
+            if dialect_name() in ("postgresql", "mysql"):  # MySQL 8+ 也支持 FOR UPDATE SKIP LOCKED
                 # 多个 Worker 并发时互不阻塞（第 9.1 节）；lock_version 乐观锁仍保留作为第二道保护
                 q = q.with_for_update(skip_locked=True)
             job = db.scalar(q)

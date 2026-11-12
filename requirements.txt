@@ -23,6 +23,7 @@ boto3==1.43.123
 # 店铺凭证 AES-256-GCM 加密（backend/app/security）
 cryptography==50.0.2
 psycopg[binary]==3.3.6
+pymysql==1.1.2  # 业务库 MySQL（jmh_ai_agent）
 # 本机 Redis 为 5.0：redis_bus.py 里固定 protocol=2（RESP2）
 redis==8.1.0
 # 测试

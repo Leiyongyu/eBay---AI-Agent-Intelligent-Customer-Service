@@ -136,16 +136,31 @@ def options(kind: str, db: Session = Depends(get_db)):
 def list_cases(kind: str, store_id: str | None = None, open_only: bool = False, q: str | None = None,
                q_field: str = "any", match: str = "contains", rating: str | None = None, view: str = "all",
                store_ids: str | None = None, status: str | None = None, reason: str | None = None,
-               tag_id: int | None = None, starred: bool = False, operator: str | None = None,
+               tag_id: int | None = None, tag_ids: str | None = None, tag_mode: str = "any",
+               starred: bool = False, operator: str | None = None,
                hold_reason: str | None = None, opened_from: date | None = None, opened_to: date | None = None,
                updated_from: date | None = None, updated_to: date | None = None,
                limit: int = 300, db: Session = Depends(get_db)):
     """筛选（可组合）：q 编号/订单号/买家…（多个用逗号或换行分隔；q_field 选字段，match=prefix 开头 / contains 包含 / exact 完全一致）、
-    view 页签、store_ids 多个店铺、status eBay 状态、reason 原因、tag_id、starred、operator（unassigned = 没人认领）、
+    view 页签、store_ids 多个店铺、status eBay 状态、reason 原因、tag_ids 多个标签（逗号分隔；tag_mode=any 有其一 /
+    all 全都有；旧参数 tag_id 等于只选一个）、starred、operator（unassigned = 没人认领）、
     hold_reason、opened_from/to 创建日期、updated_from/to 最后处理（状态变化）日期。"""
     if kind not in KINDS:
         raise HTTPException(422, "没有这个类型")
+    if tag_mode not in ("any", "all"):
+        raise HTTPException(422, "tag_mode 只能是 any 或 all")
+    try:
+        want = {int(x) for x in _split(tag_ids)} | ({tag_id} if tag_id else set())
+    except ValueError:
+        raise HTTPException(422, "tag_ids 要是数字") from None
     query = _visible(_scoped(select(EbayCase).where(EbayCase.kind == kind), store_id))
+    if want:  # 标签存在 JSON 里：先在这个类型里找出符合的记录，再和其他条件一起查（在 limit 之前过滤）
+        hit = [cid for cid, ids in db.execute(select(EbayCase.id, EbayCase.tag_ids).where(
+                   EbayCase.kind == kind, EbayCase.tag_ids.is_not(None)))
+               if (want <= set(ids or []) if tag_mode == "all" else want & set(ids or []))]
+        if not hit:
+            return []
+        query = query.where(EbayCase.id.in_(hit))
     if open_only:
         query = query.where(EbayCase.is_open.is_(True))
     if view in VIEW_CONDS:
@@ -184,8 +199,6 @@ def list_cases(kind: str, store_id: str | None = None, open_only: bool = False, 
     # 待处理的按截止时间（快到期的在前），其余按开始时间从新到旧
     query = query.order_by(EbayCase.is_open.desc(), EbayCase.due_at.is_(None), EbayCase.due_at, EbayCase.opened_at.desc())
     cases = list(db.scalars(query.limit(min(limit, 1000))))
-    if tag_id:  # 标签存在 JSON 里，取出来再过滤（各类型数据量不大）
-        cases = [c for c in cases if tag_id in (c.tag_ids or [])]
     names = dict(db.execute(select(Store.id, Store.name)).all())
     buyers = {(c.store_id, (c.buyer or "").lower()) for c in cases if c.buyer}
     conv = {}
@@ -329,10 +342,20 @@ class TagPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=32)
     color: str | None = None
     sort: int | None = None
+    pinned: bool | None = None
+
+
+_HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _color_ok(c: str | None) -> bool:
+    """颜色：任意 #rrggbb，或早期的 5 个名字。"""
+    return bool(c) and (c in TAG_COLORS or bool(_HEX.match(c)))
 
 
 def _tag_dict(t: EbayCaseTag) -> dict:
-    return {"id": t.id, "kind": t.kind, "name": t.name, "color": t.color, "sort": t.sort}
+    return {"id": t.id, "kind": t.kind, "name": t.name, "color": t.color, "sort": t.sort,
+            "pinned": t.pinned is not False, "created_by": t.created_by}
 
 
 @router.get("/tags")
@@ -341,48 +364,77 @@ def list_tags(kind: str, db: Session = Depends(get_db)):
                                               .order_by(EbayCaseTag.sort, EbayCaseTag.id))]
 
 
+def _name_taken(db: Session, kind: str, name: str, except_id: int | None = None) -> bool:
+    q = select(EbayCaseTag.id).where(EbayCaseTag.kind == kind, func.lower(EbayCaseTag.name) == name.lower())
+    if except_id is not None:
+        q = q.where(EbayCaseTag.id != except_id)
+    return db.scalar(q) is not None
+
+
 @router.post("/tags")
 def create_tag(body: TagBody, request: Request, db: Session = Depends(get_db)):
+    """新建标签：所有人都可以（改名、改颜色、固定、删除只有管理员）。"""
     if body.kind not in KINDS:
         raise HTTPException(422, "没有这个类型")
     name = body.name.strip()
-    if db.scalar(select(EbayCaseTag.id).where(EbayCaseTag.kind == body.kind, EbayCaseTag.name == name)):
+    if not name:
+        raise HTTPException(422, "标签名不能为空")
+    if _name_taken(db, body.kind, name):
         raise HTTPException(409, "已经有这个标签")
     sort = (db.scalar(select(func.max(EbayCaseTag.sort)).where(EbayCaseTag.kind == body.kind)) or 0) + 1
-    t = EbayCaseTag(kind=body.kind, name=name, color=body.color if body.color in TAG_COLORS else "primary",
-                    sort=sort, created_by=_who(request))
+    t = EbayCaseTag(kind=body.kind, name=name, color=body.color.lower() if _color_ok(body.color) else "primary",
+                    sort=sort, pinned=True, created_by=_who(request))
     db.add(t)
+    db.add(AuditEvent(actor=_who(request), action="EBAY_CASE_TAG_CREATE",
+                      detail={"kind": body.kind, "name": name, "color": t.color}))
     db.commit()
     return _tag_dict(t)
 
 
-@router.patch("/tags/{tag_id}")
-def update_tag(tag_id: int, body: TagPatch, db: Session = Depends(get_db)):
+@router.patch("/tags/{tag_id}", dependencies=[Depends(require_admin)])
+def update_tag(tag_id: int, body: TagPatch, request: Request, db: Session = Depends(get_db)):
+    """管理员：改名、改颜色、排序、固定到快捷标签栏。"""
     t = db.get(EbayCaseTag, tag_id)
     if t is None:
         raise HTTPException(404, "标签不存在")
+    before = _tag_dict(t)
     if body.name is not None:
-        t.name = body.name.strip()
-    if body.color in TAG_COLORS:
-        t.color = body.color
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(422, "标签名不能为空")
+        if _name_taken(db, t.kind, name, except_id=t.id):
+            raise HTTPException(409, "已经有这个标签")
+        t.name = name
+    if body.color is not None:
+        if not _color_ok(body.color):
+            raise HTTPException(422, "颜色不对")
+        t.color = body.color.lower()
     if body.sort is not None:
         t.sort = body.sort
+    if body.pinned is not None:
+        t.pinned = body.pinned
+    db.add(AuditEvent(actor=_who(request), action="EBAY_CASE_TAG_UPDATE",
+                      detail={"tag_id": t.id, "before": before, "patch": body.model_dump(exclude_none=True)}))
     db.commit()
     return _tag_dict(t)
 
 
-@router.delete("/tags/{tag_id}")
-def delete_tag(tag_id: int, db: Session = Depends(get_db)):
-    """删掉标签，并从所有记录上去掉。"""
+@router.delete("/tags/{tag_id}", dependencies=[Depends(require_admin)])
+def delete_tag(tag_id: int, request: Request, db: Session = Depends(get_db)):
+    """管理员：删掉标签，并从所有记录上去掉。"""
     t = db.get(EbayCaseTag, tag_id)
     if t is None:
         raise HTTPException(404, "标签不存在")
+    removed = 0
     for c in db.scalars(select(EbayCase).where(EbayCase.kind == t.kind, EbayCase.tag_ids.is_not(None))):
         if tag_id in (c.tag_ids or []):
             c.tag_ids = [x for x in c.tag_ids if x != tag_id] or None
+            removed += 1
+    db.add(AuditEvent(actor=_who(request), action="EBAY_CASE_TAG_DELETE",
+                      detail={"tag_id": t.id, "kind": t.kind, "name": t.name, "removed_from": removed}))
     db.delete(t)
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "removed_from": removed}
 
 
 @router.post("/sync", dependencies=[Depends(require_admin)])

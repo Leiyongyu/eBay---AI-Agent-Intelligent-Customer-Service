@@ -120,10 +120,18 @@ def import_credentials(db: Session, path: Path, actor: str, profile_fetcher=None
         if progress:
             progress(i, len(ebay_rows), r["store_name"])
     fetched_at = utcnow()
-    if db.get_bind().dialect.name == "postgresql":
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
         db.execute(text("SET LOCAL app.credentials_import = 'on'"))  # 触发器只在导入事务里放行 DELETE
     replaced = db.scalar(select(func.count()).select_from(StoreCredential)) or 0
-    db.execute(delete(StoreCredential))
+    if dialect == "mysql":  # MySQL 没有事务级变量：会话变量只在删除这一句前后打开，删完马上清掉（连接会被连接池复用）
+        db.execute(text("SET @credentials_import = 'on'"))
+        try:
+            db.execute(delete(StoreCredential))
+        finally:
+            db.execute(text("SET @credentials_import = NULL"))
+    else:
+        db.execute(delete(StoreCredential))
     batch = StoreCredentialImport(file_name=path.name, file_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                                   rows=len(records), rows_with_secret=sum(bool(r.get("secret")) for r in records),
                                   replaced_rows=replaced, key_version=KEY_VERSION, imported_by=actor[:64])

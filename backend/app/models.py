@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
-    JSON,
+    JSON as _JSON,
     BigInteger,
     Boolean,
     DateTime,
@@ -27,7 +27,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .db import Base, utcnow
+from .db import Base, T, VectorBase, apply_mysql_table_options, utcnow
+
+# JSON 字段存 Python None 时写数据库 NULL（不是 JSON 的 null）：PostgreSQL / MySQL 一致，
+# “字段 IS NOT NULL” 这类筛选不会把空值筛进来（默认写 JSON null，is_not(None) 会漏掉它们）
+JSON = _JSON(none_as_null=True)
 
 
 class JobState:
@@ -75,7 +79,7 @@ class Aftersales:
 
 
 class User(Base):
-    __tablename__ = "users"
+    __tablename__ = T("users")
     __table_args__ = {"comment": "工作台账号：只有管理员能创建；密码只存 scrypt 哈希"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
@@ -97,20 +101,20 @@ class User(Base):
 
 
 class UserStore(Base):
-    __tablename__ = "user_stores"
+    __tablename__ = T("user_stores")
     __table_args__ = {"comment": "账号负责的店铺（客服、售后只看得到、只处理这些店铺）"}
 
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True, comment="账号 ID")
+    user_id: Mapped[int] = mapped_column(ForeignKey(T("users") + ".id"), primary_key=True, comment="账号 ID")
     store_id: Mapped[str] = mapped_column(String(64), primary_key=True, comment="店铺 ID")
 
 
 class UserSession(Base):
-    __tablename__ = "user_sessions"
+    __tablename__ = T("user_sessions")
     __table_args__ = {"comment": "登录会话：浏览器 Cookie 里只放随机令牌，库里只存令牌的 SHA-256"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, comment="会话令牌的 SHA-256（不存明文令牌）")
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, comment="账号 ID")
+    user_id: Mapped[int] = mapped_column(ForeignKey(T("users") + ".id"), index=True, comment="账号 ID")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="登录时间（UTC）")
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="最近访问时间（UTC）")
     expires_at: Mapped[datetime] = mapped_column(DateTime, comment="过期时间（UTC），访问时顺延")
@@ -120,7 +124,7 @@ class UserSession(Base):
 
 
 class Store(Base):
-    __tablename__ = "stores"
+    __tablename__ = T("stores")
     __table_args__ = {"comment": "店铺：内部店铺主键映射已授权的 eBay 卖家账号，一个账号可覆盖多个站点"}
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, comment="内部店铺 ID，如 STORE_A")
@@ -138,12 +142,12 @@ class Store(Base):
 
 
 class Conversation(Base):
-    __tablename__ = "conversations"
+    __tablename__ = T("conversations")
     __table_args__ = (UniqueConstraint("store_id", "ebay_conversation_id"),
                       {"comment": "买家会话：一个店铺内的一条 eBay 会话，按 (店铺, eBay 会话 ID) 唯一"})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="本系统会话主键")
-    store_id: Mapped[str] = mapped_column(ForeignKey("stores.id"), index=True, comment="所属店铺 ID")
+    store_id: Mapped[str] = mapped_column(ForeignKey(T("stores") + ".id"), index=True, comment="所属店铺 ID")
     ebay_conversation_id: Mapped[str] = mapped_column(String(128), comment="eBay 平台会话 ID（不透明键）")
     conversation_type: Mapped[str] = mapped_column(String(32), default="FROM_MEMBERS",
                                                    comment="会话类型：FROM_MEMBERS 买卖双方 / FROM_EBAY 系统会话等")
@@ -195,14 +199,14 @@ class Conversation(Base):
 
 
 class Message(Base):
-    __tablename__ = "messages"
+    __tablename__ = T("messages")
     __table_args__ = (UniqueConstraint("store_id", "ebay_message_id"),
                       {"comment": "会话消息：买家来信、店铺实际发出的回复、eBay 系统消息；按 (店铺, 平台消息 ID) 去重"})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="本系统消息主键")
     store_id: Mapped[str] = mapped_column(String(64), index=True, comment="所属店铺 ID")
     ebay_message_id: Mapped[str] = mapped_column(String(128), comment="eBay 平台消息 ID（模拟器生成的以 SIM-/MOCK- 开头）")
-    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), index=True, comment="所属会话 ID")
+    conversation_id: Mapped[int] = mapped_column(ForeignKey(T("conversations") + ".id"), index=True, comment="所属会话 ID")
     conversation_seq: Mapped[int] = mapped_column(Integer, comment="会话内顺序号，从 1 开始")
     sender_role: Mapped[str] = mapped_column(String(16), comment="发送方：BUYER 买家 / SELLER 店铺 / SYSTEM eBay 系统")
     direction: Mapped[str] = mapped_column(String(8), comment="方向：IN 收到 / OUT 店铺发出")
@@ -221,7 +225,7 @@ class Message(Base):
 
 
 class MessageTag(Base):
-    __tablename__ = "message_tags"
+    __tablename__ = T("message_tags")
     __table_args__ = {"comment": "会话标记的可选项，如 查适配中、不适配、等买家回复；所有账号都能在标记弹窗里新建、删除，管理员可改名、排序、停用"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
@@ -235,14 +239,14 @@ class MessageTag(Base):
 
 
 class ConversationMark(Base):
-    __tablename__ = "conversation_marks"
+    __tablename__ = T("conversation_marks")
     __table_args__ = (UniqueConstraint("conversation_id", "tag_id", name="uq_conversation_marks_conv_tag"),
                       {"comment": "会话标记：给整段会话标当前状态（如 查适配中、不适配）并写备注；一个会话可以打多个标记，同一标记只打一次"})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
-    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), index=True, comment="被标记的会话 ID")
+    conversation_id: Mapped[int] = mapped_column(ForeignKey(T("conversations") + ".id"), index=True, comment="被标记的会话 ID")
     store_id: Mapped[str] = mapped_column(String(64), index=True, comment="所属店铺 ID")
-    tag_id: Mapped[int] = mapped_column(ForeignKey("message_tags.id"), index=True, comment="标记项 ID")
+    tag_id: Mapped[int] = mapped_column(ForeignKey(T("message_tags") + ".id"), index=True, comment="标记项 ID")
     note: Mapped[str | None] = mapped_column(Text, comment="备注")
     marked_by: Mapped[str] = mapped_column(String(64), comment="标记人（显示名）")
     marked_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="最近标记/修改时间（UTC）")
@@ -257,14 +261,14 @@ class AttachmentStatus:
 
 
 class MessageAttachment(Base):
-    __tablename__ = "message_attachments"
+    __tablename__ = T("message_attachments")
     __table_args__ = (UniqueConstraint("message_id", "seq"),
                       {"comment": "消息附件：eBay messageMedia 或模拟器上传的图片；只保存校验后去除 EXIF、重新编码的副本（第 20 章）"})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="附件主键")
     store_id: Mapped[str] = mapped_column(String(64), index=True, comment="所属店铺 ID")
-    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), index=True, comment="所属会话 ID")
-    message_id: Mapped[int] = mapped_column(ForeignKey("messages.id"), index=True, comment="所属消息 ID（messages.id）")
+    conversation_id: Mapped[int] = mapped_column(ForeignKey(T("conversations") + ".id"), index=True, comment="所属会话 ID")
+    message_id: Mapped[int] = mapped_column(ForeignKey(T("messages") + ".id"), index=True, comment="所属消息 ID（messages.id）")
     seq: Mapped[int] = mapped_column(Integer, comment="消息内附件序号，从 1 开始")
     media_name: Mapped[str | None] = mapped_column(String(300), comment="原始附件名")
     media_type: Mapped[str] = mapped_column(String(16), comment="附件类型：IMAGE / PDF / DOC / TXT（eBay 取值）")
@@ -286,11 +290,11 @@ class MessageAttachment(Base):
 
 
 class ImageObservation(Base):
-    __tablename__ = "image_observations"
+    __tablename__ = T("image_observations")
     __table_args__ = {"comment": "图片观察：视觉模型对附件的客观描述（只观察不下结论），审核员可确认或纠正"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="观察记录主键")
-    attachment_id: Mapped[int] = mapped_column(ForeignKey("message_attachments.id"), index=True, comment="对应附件 ID")
+    attachment_id: Mapped[int] = mapped_column(ForeignKey(T("message_attachments") + ".id"), index=True, comment="对应附件 ID")
     sha256: Mapped[str] = mapped_column(String(64), index=True, comment="图片副本的 SHA-256（同图同配置复用结果）")
     model_config_version: Mapped[str] = mapped_column(String(32), comment="视觉模型配置版本（不含密钥的配置哈希）")
     prompt_version: Mapped[str] = mapped_column(String(32), comment="观察提示词版本（内容哈希）")
@@ -308,12 +312,12 @@ class ImageObservation(Base):
 
 
 class ConversationEvent(Base):
-    __tablename__ = "conversation_events"
+    __tablename__ = T("conversation_events")
     __table_args__ = {"comment": "会话事件：eBay 系统消息、售后 case 等转成的事件，用于触发人工接管和风险升级"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="事件主键")
     store_id: Mapped[str] = mapped_column(String(64), index=True, comment="所属店铺 ID")
-    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), index=True, comment="所属会话 ID")
+    conversation_id: Mapped[int] = mapped_column(ForeignKey(T("conversations") + ".id"), index=True, comment="所属会话 ID")
     event_type: Mapped[str] = mapped_column(String(64), comment="事件类型，如 RETURN_OPENED、CASE_ESCALATED")
     source: Mapped[str] = mapped_column(String(64), comment="事件来源，如 ebay_system_message、post_order_api")
     case_id: Mapped[str | None] = mapped_column(String(64), comment="关联的售后 case ID")
@@ -322,13 +326,13 @@ class ConversationEvent(Base):
 
 
 class ReplyJob(Base):
-    __tablename__ = "reply_jobs"
+    __tablename__ = T("reply_jobs")
     __table_args__ = (UniqueConstraint("store_id", "conversation_id", "anchor_source_message_id"),
                       {"comment": "回复任务：对一组买家消息做一次回复决策的单位；合并窗口内的连续来信合并为一个任务"})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="任务主键")
     store_id: Mapped[str] = mapped_column(String(64), index=True, comment="所属店铺 ID")
-    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), index=True, comment="所属会话 ID")
+    conversation_id: Mapped[int] = mapped_column(ForeignKey(T("conversations") + ".id"), index=True, comment="所属会话 ID")
     anchor_source_message_id: Mapped[str] = mapped_column(String(128), comment="锚点消息：本任务覆盖的最后一条买家消息的平台 ID")
     state: Mapped[str] = mapped_column(String(32), default=JobState.RECEIVED, index=True, comment=f"任务状态：{JOB_STATE_DOC}")
     ready_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="可开始处理的时间（合并窗口结束或重试退避结束，UTC）")
@@ -349,24 +353,24 @@ class ReplyJob(Base):
 
 
 class ReplyJobSource(Base):
-    __tablename__ = "reply_job_sources"
+    __tablename__ = T("reply_job_sources")
     __table_args__ = (UniqueConstraint("store_id", "source_message_id"),
                       {"comment": "任务覆盖的买家消息：一条买家消息同一时刻只归属一个回复任务"})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
     store_id: Mapped[str] = mapped_column(String(64), comment="所属店铺 ID")
     source_message_id: Mapped[str] = mapped_column(String(128), comment="被覆盖的买家消息平台 ID")
-    job_id: Mapped[int] = mapped_column(ForeignKey("reply_jobs.id"), index=True, comment="当前归属的回复任务 ID")
+    job_id: Mapped[int] = mapped_column(ForeignKey(T("reply_jobs") + ".id"), index=True, comment="当前归属的回复任务 ID")
     assigned_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="归属时间（UTC）")
 
 
 class Draft(Base):
-    __tablename__ = "drafts"
+    __tablename__ = T("drafts")
     __table_args__ = (UniqueConstraint("job_id", "run_generation", "version"),
                       {"comment": "回复草稿：AI 生成或审核员撰写，记录依据、合规结果和所用版本，批准时绑定会话版本"})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="草稿主键")
-    job_id: Mapped[int] = mapped_column(ForeignKey("reply_jobs.id"), index=True, comment="所属回复任务 ID")
+    job_id: Mapped[int] = mapped_column(ForeignKey(T("reply_jobs") + ".id"), index=True, comment="所属回复任务 ID")
     run_generation: Mapped[int] = mapped_column(Integer, comment="生成代次")
     version: Mapped[int] = mapped_column(Integer, default=1, comment="任务内草稿版本号，从 1 递增")
     author: Mapped[str] = mapped_column(String(64), default="agent", comment="作者：agent 表示 AI 生成，否则为审核员名")
@@ -402,7 +406,7 @@ class Draft(Base):
 
 
 class EbayOrder(Base):
-    __tablename__ = "ebay_orders"
+    __tablename__ = T("ebay_orders")
     __table_args__ = (UniqueConstraint("store_id", "order_id"),
                       {"comment": "客户管理用的订单汇总（只读拉自 eBay getOrders）：只存买家账号、国家、金额、状态、商品，不存姓名地址电话"})
 
@@ -428,7 +432,7 @@ class EbayOrder(Base):
 
 
 class EbayOrderLine(Base):
-    __tablename__ = "ebay_order_lines"
+    __tablename__ = T("ebay_order_lines")
     __table_args__ = (UniqueConstraint("store_id", "order_id", "line_item_id"),
                       {"comment": "订单里的每件商品（随订单同步每小时更新）：售后管理列表的 SKU、数量、单价从这里读，不再实时查 eBay"})
 
@@ -450,7 +454,7 @@ class EbayOrderLine(Base):
 
 
 class EbayListingInfo(Base):
-    __tablename__ = "ebay_listing_info"
+    __tablename__ = T("ebay_listing_info")
     __table_args__ = (UniqueConstraint("store_id", "item_id"),
                       {"comment": "售后管理用的刊登信息（主图、标题、SKU）：售后同步时补拉新出现的商品，过期的重新拉"})
 
@@ -466,7 +470,7 @@ class EbayListingInfo(Base):
 
 
 class BestOffer(Base):
-    __tablename__ = "best_offers"
+    __tablename__ = T("best_offers")
     __table_args__ = (UniqueConstraint("store_id", "best_offer_id"),
                       {"comment": "Best offer：买家在刊登上出的报价（GetBestOffers 拉取）与卖家回应（接受 / 还价 / 拒绝）；不存买家邮箱地址"})
 
@@ -499,7 +503,7 @@ class BestOffer(Base):
 
 
 class OrderNote(Base):
-    __tablename__ = "order_notes"
+    __tablename__ = T("order_notes")
     __table_args__ = {"comment": "客服内部备注：记在订单上（或只记在买家上），会话右侧“相关信息”里所有同事可见，不发给买家"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
@@ -512,7 +516,7 @@ class OrderNote(Base):
 
 
 class BuyerBlacklist(Base):
-    __tablename__ = "buyer_blacklist"
+    __tablename__ = T("buyer_blacklist")
     __table_args__ = {"comment": "系统内黑名单：这些买家来信 AI 不起草回复、直接交人工，界面标红（eBay 屏蔽名单需在各店铺后台手动加）"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
@@ -524,7 +528,7 @@ class BuyerBlacklist(Base):
 
 
 class EbayCase(Base):
-    __tablename__ = "ebay_cases"
+    __tablename__ = T("ebay_cases")
     __table_args__ = (UniqueConstraint("store_id", "kind", "external_id"),
                       {"comment": "售后管理：从 eBay 拉来的咨询（未收到货）、纠纷、退货、付款纠纷、评价、取消交易、退款单（只读，定时更新）"})
 
@@ -571,20 +575,21 @@ class EbayCase(Base):
 
 
 class EbayCaseTag(Base):
-    __tablename__ = "ebay_case_tags"
+    __tablename__ = T("ebay_case_tags")
     __table_args__ = {"comment": "售后管理的快捷标签（按类型分：咨询、纠纷、退货、付款纠纷、评价各自一套）"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
     kind: Mapped[str] = mapped_column(String(16), index=True, comment="适用的类型：INQUIRY / CASE / RETURN / PAYMENT_DISPUTE / FEEDBACK …")
     name: Mapped[str] = mapped_column(String(32), comment="标签名，如 不退回、已询问VIN")
-    color: Mapped[str] = mapped_column(String(16), default="primary", comment="颜色：primary / success / warning / danger / info")
+    color: Mapped[str] = mapped_column(String(16), default="primary", comment="颜色：#rrggbb，或早期的 primary / success / warning / danger / info")
     sort: Mapped[int] = mapped_column(Integer, default=0, comment="排序")
+    pinned: Mapped[bool | None] = mapped_column(Boolean, comment="固定在列表上方的快捷标签栏（空当作固定，兼容旧数据；只有管理员能改）")
     created_by: Mapped[str | None] = mapped_column(String(64), comment="创建人")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="创建时间（UTC）")
 
 
 class MessageTemplate(Base):
-    __tablename__ = "message_templates"
+    __tablename__ = T("message_templates")
     __table_args__ = {"comment": "消息模板：客服回复买家、回复评价用的常用话术，可带 {{buyer}} 等占位符和图片附件"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
@@ -604,7 +609,7 @@ class MessageTemplate(Base):
 
 
 class OfferRecord(Base):
-    __tablename__ = "offer_records"
+    __tablename__ = T("offer_records")
     __table_args__ = {"comment": "议价：给“感兴趣的买家”（关注 / 加购了商品的买家）发的折扣报价记录（Negotiation API，一次一个商品）"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
@@ -627,12 +632,12 @@ class OfferRecord(Base):
 
 
 class OutboundMessage(Base):
-    __tablename__ = "outbound_messages"
+    __tablename__ = T("outbound_messages")
     __table_args__ = {"comment": "待发消息（发件箱）：所有发给买家的消息先进这里，延迟 SEND_DELAY_SECONDS（默认 5 分钟）后由 Worker 发出，发出前可撤回"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
     store_id: Mapped[str] = mapped_column(String(64), index=True, comment="所属店铺 ID")
-    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), index=True, comment="所属会话 ID")
+    conversation_id: Mapped[int] = mapped_column(ForeignKey(T("conversations") + ".id"), index=True, comment="所属会话 ID")
     body: Mapped[str] = mapped_column(Text, comment="发给买家的正文")
     zh_translation: Mapped[str | None] = mapped_column(Text, comment="正文的中文对照（只给审核员看）")
     source: Mapped[str] = mapped_column(String(32), comment="来源：manual 人工 / auto AI 自动回复 / ack 已收到回执 / ticket 查件结果 / "
@@ -656,12 +661,12 @@ class OutboundMessage(Base):
 
 
 class SendIntent(Base):
-    __tablename__ = "send_intents"
+    __tablename__ = T("send_intents")
     __table_args__ = {"comment": "发送意图：每个回复任务唯一的外发请求，人工与自动发送共用；记录平台回执"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="发送意图主键")
-    job_id: Mapped[int] = mapped_column(ForeignKey("reply_jobs.id"), unique=True, comment="回复任务 ID（唯一：一个任务最多一个外发意图）")
-    draft_id: Mapped[int] = mapped_column(ForeignKey("drafts.id"), comment="被批准的草稿 ID")
+    job_id: Mapped[int] = mapped_column(ForeignKey(T("reply_jobs") + ".id"), unique=True, comment="回复任务 ID（唯一：一个任务最多一个外发意图）")
+    draft_id: Mapped[int] = mapped_column(ForeignKey(T("drafts") + ".id"), comment="被批准的草稿 ID")
     idempotency_key: Mapped[str] = mapped_column(String(128), unique=True, comment="幂等键：重复提交返回同一意图")
     actor: Mapped[str] = mapped_column(String(64), comment="提交人：审核员名，自动发送时为系统")
     text: Mapped[str] = mapped_column(Text, comment="最终外发正文")
@@ -675,12 +680,12 @@ class SendIntent(Base):
 
 
 class SendAttempt(Base):
-    __tablename__ = "send_attempts"
+    __tablename__ = T("send_attempts")
     __table_args__ = (UniqueConstraint("intent_id", "attempt_no"),
                       {"comment": "发送尝试：每次调用平台发送接口的记录，超时与对账证据不被后续请求覆盖"})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
-    intent_id: Mapped[int] = mapped_column(ForeignKey("send_intents.id"), index=True, comment="发送意图 ID")
+    intent_id: Mapped[int] = mapped_column(ForeignKey(T("send_intents") + ".id"), index=True, comment="发送意图 ID")
     attempt_no: Mapped[int] = mapped_column(Integer, comment="第几次尝试，从 1 开始")
     started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="开始时间（UTC）")
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, comment="结束时间（UTC）")
@@ -689,11 +694,11 @@ class SendAttempt(Base):
 
 
 class ToolCall(Base):
-    __tablename__ = "tool_calls"
+    __tablename__ = T("tool_calls")
     __table_args__ = {"comment": "工具调用记录：Agent 预取/查询业务数据的每次调用，供审核核对与回放"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
-    job_id: Mapped[int] = mapped_column(ForeignKey("reply_jobs.id"), index=True, comment="所属回复任务 ID")
+    job_id: Mapped[int] = mapped_column(ForeignKey(T("reply_jobs") + ".id"), index=True, comment="所属回复任务 ID")
     run_generation: Mapped[int] = mapped_column(Integer, comment="生成代次")
     request_id: Mapped[str] = mapped_column(String(64), comment="本次运行内的请求编号，如 step-1")
     tool_name: Mapped[str] = mapped_column(String(64), comment="工具名，如 get_listing_context")
@@ -708,12 +713,12 @@ class ToolCall(Base):
 
 
 class AgentRun(Base):
-    __tablename__ = "agent_runs"
+    __tablename__ = T("agent_runs")
     __table_args__ = (UniqueConstraint("job_id", "run_generation"),
                       {"comment": "Agent 运行记录：每个任务每个生成代次一条，关联提示词、模型和规则版本"})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="运行主键")
-    job_id: Mapped[int] = mapped_column(ForeignKey("reply_jobs.id"), index=True, comment="回复任务 ID")
+    job_id: Mapped[int] = mapped_column(ForeignKey(T("reply_jobs") + ".id"), index=True, comment="回复任务 ID")
     run_generation: Mapped[int] = mapped_column(Integer, comment="生成代次")
     thread_id: Mapped[str] = mapped_column(String(200), comment="运行标识 store:…:conversation:…:job:…:generation:…")
     mode: Mapped[str] = mapped_column(String(32), comment="运行模式：fixed_pipeline 固定流程 / planner_loop 规划循环")
@@ -728,11 +733,11 @@ class AgentRun(Base):
 
 
 class AgentStep(Base):
-    __tablename__ = "agent_steps"
+    __tablename__ = T("agent_steps")
     __table_args__ = {"comment": "Agent 步骤：运行中每个节点的结果摘要，不保存模型思维过程"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
-    run_id: Mapped[int] = mapped_column(ForeignKey("agent_runs.id"), index=True, comment="所属运行 ID")
+    run_id: Mapped[int] = mapped_column(ForeignKey(T("agent_runs") + ".id"), index=True, comment="所属运行 ID")
     node: Mapped[str] = mapped_column(String(64), comment="节点名，如 prefetch、compose_reply")
     result_status: Mapped[str] = mapped_column(String(32), comment="节点结果，如 OK、SKIPPED、PARSE_ERROR")
     detail: Mapped[dict | None] = mapped_column(JSON, comment="节点结果摘要")
@@ -744,7 +749,7 @@ class AgentStep(Base):
 class KnowledgeChunk(Base):
     """公司知识条款。首期把 knowledge_documents/knowledge_chunks 合成一张表，按条款存储。"""
 
-    __tablename__ = "knowledge_chunks"
+    __tablename__ = T("knowledge_chunks")
     __table_args__ = (
         # 起草取知识只查当前有效版本（PUBLISHED）：部分索引，已有的库由 vector_index.ensure_published_index 启动时补建
         Index("ix_knowledge_chunks_published", "store_id", "marketplace_id", "audience",
@@ -783,7 +788,7 @@ class KnowledgeChunk(Base):
 
 
 class KbDocument(Base):
-    __tablename__ = "kb_documents"
+    __tablename__ = T("kb_documents")
     __table_args__ = {"comment": "参考文档库：第三方文件和内部资料（报表、手册、供应商资料、物流手册），知识条款按编号引用；"
                                  "只给人看，AI 不读、不发给买家"}
 
@@ -811,12 +816,12 @@ class KbDocument(Base):
 
 
 class KbDocumentVersion(Base):
-    __tablename__ = "kb_document_versions"
+    __tablename__ = T("kb_document_versions")
     __table_args__ = (UniqueConstraint("doc_id", "version"),
                       {"comment": "参考文档的历史版本：替换新版本时把旧版本记在这里，旧文件保留不删，可下载"})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
-    doc_id: Mapped[int] = mapped_column(ForeignKey("kb_documents.id", ondelete="CASCADE"), index=True, comment="所属文档 ID")
+    doc_id: Mapped[int] = mapped_column(ForeignKey(T("kb_documents") + ".id", ondelete="CASCADE"), index=True, comment="所属文档 ID")
     version: Mapped[int] = mapped_column(Integer, comment="版本号")
     file_name: Mapped[str] = mapped_column(String(255), comment="这个版本的原始文件名")
     content_type: Mapped[str | None] = mapped_column(String(128), comment="这个版本的文件类型（MIME）")
@@ -827,8 +832,8 @@ class KbDocumentVersion(Base):
     uploaded_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="这个版本的上传时间（UTC）")
 
 
-class EmbeddingProfile(Base):
-    __tablename__ = "embedding_profiles"
+class EmbeddingProfile(VectorBase):
+    __tablename__ = "embedding_profiles"  # 向量库里的表：不加业务表前缀
     __table_args__ = (UniqueConstraint("provider", "model", "dimension", "distance", "normalize"),
                       {"comment": "向量模型档案：模型、维度、距离度量的组合；不同档案的向量不能混用（第 15.3 节）"})
 
@@ -842,7 +847,7 @@ class EmbeddingProfile(Base):
 
 
 class KnowledgeImport(Base):
-    __tablename__ = "knowledge_imports"
+    __tablename__ = T("knowledge_imports")
     __table_args__ = {"comment": "知识库上传版本：每次在工作台上传 Excel 整体替换一个店铺的知识，记录一个版本，可回滚"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="版本号")
@@ -862,25 +867,25 @@ class KnowledgeImport(Base):
 
 
 class WorkClaim(Base):
-    __tablename__ = "work_claims"
+    __tablename__ = T("work_claims")
     __table_args__ = (UniqueConstraint("store_id", "conversation_id"),
                       {"comment": "工作台认领锁：审核员打开会话即认领，过期前其他人只读，避免两人同时回复"})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
     store_id: Mapped[str] = mapped_column(String(64), comment="所属店铺 ID")
-    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), comment="被认领的会话 ID")
+    conversation_id: Mapped[int] = mapped_column(ForeignKey(T("conversations") + ".id"), comment="被认领的会话 ID")
     claimed_by: Mapped[str] = mapped_column(String(64), comment="认领审核员")
     claimed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="认领或续期时间（UTC）")
     expires_at: Mapped[datetime] = mapped_column(DateTime, comment="到期时间（UTC），默认认领后 10 分钟")
 
 
 class ReviewFeedback(Base):
-    __tablename__ = "review_feedback"
+    __tablename__ = T("review_feedback")
     __table_args__ = {"comment": "审核反馈：批准、修改、拒绝、人工撰写的记录，是草稿采纳率等效率指标的来源"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
-    draft_id: Mapped[int | None] = mapped_column(ForeignKey("drafts.id"), comment="相关草稿 ID（标记无需回复时为空）")
-    job_id: Mapped[int] = mapped_column(ForeignKey("reply_jobs.id"), index=True, comment="回复任务 ID")
+    draft_id: Mapped[int | None] = mapped_column(ForeignKey(T("drafts") + ".id"), comment="相关草稿 ID（标记无需回复时为空）")
+    job_id: Mapped[int] = mapped_column(ForeignKey(T("reply_jobs") + ".id"), index=True, comment="回复任务 ID")
     reviewer: Mapped[str] = mapped_column(String(64), comment="审核员")
     action: Mapped[str] = mapped_column(String(16),
                                         comment="动作：APPROVE 原样批准 / EDIT_APPROVE 修改后批准 / REJECT 拒绝 / MANUAL 人工撰写 / NO_REPLY 无需回复")
@@ -892,7 +897,7 @@ class ReviewFeedback(Base):
 
 
 class AuditEvent(Base):
-    __tablename__ = "audit_events"
+    __tablename__ = T("audit_events")
     __table_args__ = {"comment": "审计日志：消息接入、审批、发送、开关变更等关键操作"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
@@ -905,7 +910,7 @@ class AuditEvent(Base):
 
 
 class LlmUsage(Base):
-    __tablename__ = "llm_usage"
+    __tablename__ = T("llm_usage")
     __table_args__ = {"comment": "模型调用用量：每次调用大模型/视觉/向量模型记一行，供“用量统计”页汇总"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
@@ -928,7 +933,7 @@ class LlmUsage(Base):
 
 
 class EbaySyncState(Base):
-    __tablename__ = "ebay_sync_state"
+    __tablename__ = T("ebay_sync_state")
     __table_args__ = (UniqueConstraint("store_id", "conversation_type"),
                       {"comment": "eBay 消息同步游标：每个店铺、每种会话类型一行，记录上次成功拉取的时间与结果"})
 
@@ -944,7 +949,7 @@ class EbaySyncState(Base):
 
 
 class EbayListing(Base):
-    __tablename__ = "ebay_listings"
+    __tablename__ = T("ebay_listings")
     __table_args__ = {"comment": "eBay 刊登缓存：按刊登号从 Browse API 查到的基本信息，用于确定会话所属站点"}
 
     item_id: Mapped[str] = mapped_column(String(64), primary_key=True, comment="eBay 刊登号（legacy item ID）")
@@ -961,7 +966,7 @@ class EbayListing(Base):
 
 
 class EbayNotification(Base):
-    __tablename__ = "ebay_notifications"
+    __tablename__ = T("ebay_notifications")
     __table_args__ = {"comment": "eBay 实时推送收件记录（Notification API，如 NEW_MESSAGE）：只用来触发对应店铺立即拉取，正文以拉取为准"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
@@ -978,7 +983,7 @@ class EbayNotification(Base):
 
 
 class EbayPushSubscription(Base):
-    __tablename__ = "ebay_push_subscriptions"
+    __tablename__ = T("ebay_push_subscriptions")
     __table_args__ = {"comment": "各店铺在 eBay Notification API 的推送订阅（一个店铺一行），由工作台“启用推送订阅”创建/更新"}
 
     store_id: Mapped[str] = mapped_column(String(64), primary_key=True, comment="店铺 ID")
@@ -992,7 +997,7 @@ class EbayPushSubscription(Base):
 
 
 class DataDeletionRequest(Base):
-    __tablename__ = "data_deletion_requests"
+    __tablename__ = T("data_deletion_requests")
     __table_args__ = {"comment": "数据删除请求：eBay 账号删除通知与买家删除请求的执行跟踪，只存用户键哈希"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
@@ -1006,7 +1011,7 @@ class DataDeletionRequest(Base):
 
 
 class StoreCredentialImport(Base):
-    __tablename__ = "store_credential_imports"
+    __tablename__ = T("store_credential_imports")
     __table_args__ = {"comment": "店铺凭证导入批次：每次整表覆盖导入记一行（只记文件指纹与数量，不含任何秘钥）"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="批次主键")
@@ -1021,7 +1026,7 @@ class StoreCredentialImport(Base):
 
 
 class StoreCredential(Base):
-    __tablename__ = "store_credentials"
+    __tablename__ = T("store_credentials")
     __table_args__ = {"comment": "店铺凭证（紫鸟店铺全量表）：账号、IP、browserId、秘钥整体 AES-256-GCM 加密；"
                                  "只能整表覆盖导入，数据库触发器禁止修改，接口不返回明文或密文"}
 
@@ -1038,7 +1043,7 @@ class StoreCredential(Base):
     encrypted_payload: Mapped[str] = mapped_column(
         Text, comment="加密载荷（Base64：nonce + 密文），内含店铺账号、店铺 IP、IP 是否过期、browserId、秘钥")
     key_version: Mapped[str] = mapped_column(String(16), comment="加密主密钥版本（主密钥只在 .env，不入库）")
-    import_id: Mapped[int] = mapped_column(ForeignKey("store_credential_imports.id"), comment="所属导入批次")
+    import_id: Mapped[int] = mapped_column(ForeignKey(T("store_credential_imports") + ".id"), comment="所属导入批次")
     # 以下由导入时用该店秘钥只读查询 eBay（GetUser / GetStore）得到；只能随整表覆盖导入刷新
     store_id: Mapped[str | None] = mapped_column(String(64), comment="对应本系统店铺 ID（stores.id），供工作台店铺筛选")
     ebay_user_id: Mapped[str | None] = mapped_column(String(128), comment="eBay 卖家账号（UserID，明文）")
@@ -1069,7 +1074,7 @@ class InvoiceRequestStatus:
 
 
 class AppSetting(Base):
-    __tablename__ = "app_settings"
+    __tablename__ = T("app_settings")
     __table_args__ = {"comment": "系统配置页：管理员在页面上改的配置项，优先于 .env；删掉一行就回到 .env 的值"}
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True, comment="配置项（Settings 字段名，小写）")
@@ -1079,7 +1084,7 @@ class AppSetting(Base):
 
 
 class InvoiceIssuer(Base):
-    __tablename__ = "invoice_issuers"
+    __tablename__ = T("invoice_issuers")
     __table_args__ = {"comment": "开票主体：发票上的卖方公司信息；一个主体可给多个店铺用（stores.invoice_issuer_id）；只有管理员维护"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
@@ -1098,7 +1103,7 @@ class InvoiceIssuer(Base):
 
 
 class Invoice(Base):
-    __tablename__ = "invoices"
+    __tablename__ = T("invoices")
     __table_args__ = {"comment": "发票留底：每次生成的 PDF 都存一份（data/invoices/），开出后内容不改；只有管理员能查看留底。"
                                  "不随聊天记录保留期清理"}
 
@@ -1130,7 +1135,7 @@ class Invoice(Base):
 
 
 class InvoiceRequest(Base):
-    __tablename__ = "invoice_requests"
+    __tablename__ = T("invoice_requests")
     __table_args__ = {"comment": "发票申请：买家要发票时自动登记（先等买家邮箱，给了邮箱后待审核），在发票页人工审核后发邮件并通知买家；一个会话一条"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
@@ -1165,7 +1170,7 @@ class AsFileStatus:
 
 
 class AftersalesMail(Base):
-    __tablename__ = "aftersales_mails"
+    __tablename__ = T("aftersales_mails")
     __table_args__ = {"comment": "售后邮箱收到并处理过的邮件：认出的订单号、店铺、会话；处理完邮件移到“已处理”文件夹"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
@@ -1185,7 +1190,7 @@ class AftersalesMail(Base):
 
 
 class MailboxCursor(Base):
-    __tablename__ = "mailbox_cursors"
+    __tablename__ = T("mailbox_cursors")
     __table_args__ = {"comment": "售后邮箱收信进度：收件箱里看过的最大 UID。只看新来的邮件；和售后无关的邮件不记录、不移动、不改已读状态"}
 
     folder: Mapped[str] = mapped_column(String(100), primary_key=True, comment="IMAP 文件夹名（如 INBOX）")
@@ -1198,7 +1203,7 @@ class MailboxCursor(Base):
 
 
 class AftersalesFile(Base):
-    __tablename__ = "aftersales_files"
+    __tablename__ = T("aftersales_files")
     __table_args__ = {"comment": "售后邮件附件：邮件直接带的附件或 WeTransfer 链接里的文件，按店铺存放在 AFTERSALES_FILES_DIR；"
                                  "满保留期删文件、留记录"}
 
@@ -1237,7 +1242,7 @@ class BuyerUploadStatus:
 
 
 class BuyerUpload(Base):
-    __tablename__ = "buyer_uploads"
+    __tablename__ = T("buyer_uploads")
     __table_args__ = {"comment": "买家上传页的上传记录：买家用订单号 + 邮编/eBay 用户名校验（或客服给的签名链接）后，"
                                  "填问题、传视频；文件先直传 Cloudflare R2，再由后台拉回本机售后附件目录"}
 
@@ -1268,7 +1273,7 @@ class BuyerUpload(Base):
 
 
 class TrackingNumber(Base):
-    __tablename__ = "tracking_numbers"
+    __tablename__ = T("tracking_numbers")
     __table_args__ = {"comment": "物流号与 17TRACK 轨迹缓存：每个物流号只注册一次（注册扣额度），轨迹按缓存时长复用"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
@@ -1289,7 +1294,7 @@ class TrackingNumber(Base):
 
 
 class LogisticsTicket(Base):
-    __tablename__ = "logistics_tickets"
+    __tablename__ = T("logistics_tickets")
     __table_args__ = {"comment": "谷仓查件单（同步自谷仓 OMS，含在谷仓后台手动建的）：关联到店铺和买家会话；谷仓回复后生成给买家的回复建议"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
@@ -1339,7 +1344,7 @@ class LogisticsTicket(Base):
 
 
 class ShipNotice(Base):
-    __tablename__ = "ship_notices"
+    __tablename__ = T("ship_notices")
     __table_args__ = {"comment": "发货通知：每天汇总当天在 eBay 标记已发货的订单，按站点语言写好订单号、承运商、跟踪号、查件链接，人工审核后发给买家（目前为模拟发送）"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
@@ -1364,7 +1369,7 @@ class ShipNotice(Base):
 
 
 class AftersalesCase(Base):
-    __tablename__ = "aftersales_cases"
+    __tablename__ = T("aftersales_cases")
     __table_args__ = {"comment": "飞书售后群工单：需技术/售后判断的问题整理后发到飞书售后群，群里回复后 AI 起草买家回复（人工审核后才发）"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
@@ -1404,7 +1409,7 @@ class AftersalesCase(Base):
 
 
 class ParcelFollowup(Base):
-    __tablename__ = "parcel_followups"
+    __tablename__ = T("parcel_followups")
     __table_args__ = {"comment": "异常包裹跟进表：断更、无轨迹、妥投未收到、退回、损坏、发错等包裹的处理记录（重发、退款、索赔…），"
                                  "替代原 Excel《异常包裹跟进表》。每人只看自己记的，管理员看全部；可关联到买家会话"}
 
@@ -1441,7 +1446,7 @@ class ParcelFollowup(Base):
 
 # ---------------------------------------------------------------- 上线前业务基线（第 2.1 节）
 class BaselineBatch(Base):
-    __tablename__ = "baseline_batches"
+    __tablename__ = T("baseline_batches")
     __table_args__ = {"comment": "上线前业务基线补拉批次：每次从 eBay 只读补拉历史消息记一行，带进度和统计；断点续拉按批次接着拉"}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键（批次号）")
@@ -1456,7 +1461,7 @@ class BaselineBatch(Base):
 
 
 class BaselineConversation(Base):
-    __tablename__ = "baseline_conversations"
+    __tablename__ = T("baseline_conversations")
     __table_args__ = (UniqueConstraint("store_id", "ebay_conversation_id"),
                       {"comment": "上线前基线会话：从 eBay 补拉的纯人工时期买家会话，只用于统计（上线效果页的基线对比），不进工作台和客户资料；随 BASELINE_RETENTION_DAYS 清理"})
 
@@ -1473,13 +1478,13 @@ class BaselineConversation(Base):
 
 
 class BaselineMessage(Base):
-    __tablename__ = "baseline_messages"
+    __tablename__ = T("baseline_messages")
     __table_args__ = (UniqueConstraint("store_id", "ebay_message_id"),
                       {"comment": "上线前基线消息：基线会话里时间段内的每条消息（买家 / 店铺同事在 eBay 后台的人工回复），只用于统计；正文是买家个人数据，只给管理员看，随 BASELINE_RETENTION_DAYS 清理"})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, comment="主键")
     store_id: Mapped[str] = mapped_column(String(64), index=True, comment="店铺 ID")
-    conversation_id: Mapped[int] = mapped_column(ForeignKey("baseline_conversations.id"), index=True,
+    conversation_id: Mapped[int] = mapped_column(ForeignKey(T("baseline_conversations") + ".id"), index=True,
                                                  comment="所属基线会话（baseline_conversations.id）")
     ebay_message_id: Mapped[str] = mapped_column(String(128), comment="eBay 消息 ID（同店铺唯一，重复拉取不重复写）")
     sender_role: Mapped[str] = mapped_column(String(8), comment="发送方：BUYER 买家 / SELLER 店铺（店铺自己的 eBay 账号）")
@@ -1489,7 +1494,7 @@ class BaselineMessage(Base):
 
 
 class BaselineSnapshot(Base):
-    __tablename__ = "baseline_metric_snapshots"
+    __tablename__ = T("baseline_metric_snapshots")
     __table_args__ = (UniqueConstraint("batch_key", "store_id"),
                       {"comment": "上线前基线统计快照（上线效果页的基线对比优先读它）：按补拉批次 + 店铺存算好的各项指标值，"
                                   "不存买家正文；基线原始消息按 BASELINE_RETENTION_DAYS 清理后仍能对比"})
@@ -1508,7 +1513,7 @@ class BaselineSnapshot(Base):
 
 # ---------------------------------------------------------------- 订单售后原因最终分类
 class OrderAftersalesReason(Base):
-    __tablename__ = "order_aftersales_reasons"
+    __tablename__ = T("order_aftersales_reasons")
     __table_args__ = (UniqueConstraint("store_id", "order_id"),
                       {"comment": "订单维度的售后原因最终分类：一张有售后信号（退款、退货、咨询、纠纷、付款纠纷、取消、转售后、飞书工单、"
                                   "异常包裹、查件单）的订单一行；AI 按规则自动分类，人工可改（人工优先），用于按原因、SKU 统计退款率"})
@@ -1546,3 +1551,7 @@ class OrderAftersalesReason(Base):
                                         comment="UNCLASSIFIED 未分类（AI 和人工都没标）/ AI 规则自动分类 / MANUAL 人工标记")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="建立时间（UTC）")
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, comment="最后更新时间（UTC）")
+
+
+apply_mysql_table_options(Base.metadata)
+apply_mysql_table_options(VectorBase.metadata)

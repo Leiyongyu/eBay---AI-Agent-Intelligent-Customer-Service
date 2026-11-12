@@ -50,7 +50,7 @@ export interface NavGroup {
 
 export type IconName =
   | 'rocket' | 'users' | 'store' | 'mail' | 'inbox' | 'check' | 'up' | 'warn' | 'team' | 'ban' | 'user'
-  | 'service' | 'robot' | 'gear' | 'book' | 'chart'
+  | 'service' | 'robot' | 'gear' | 'book' | 'chart' | 'receipt'
 
 export const NAV: NavGroup[] = [
   { id: 'start', label: '快速入门', icon: 'rocket', leaf: { id: 'start', label: '快速入门', view: 'todo' } },
@@ -70,7 +70,6 @@ export const NAV: NavGroup[] = [
           { id: 'buyer', label: '买家消息', view: 'workbench', box: 'all', count: 'buyerUnread', group: true },
           { id: 'box-pending', label: '未处理', view: 'workbench', box: 'pending', count: 'pending', icon: 'inbox' },
           { id: 'box-resolved', label: '已处理', view: 'workbench', box: 'resolved', count: 'resolved', icon: 'check' },
-          { id: 'box-handoff', label: '升级的消息', view: 'workbench', box: 'handoff', count: 'handoff', icon: 'up' },
           { id: 'box-failed', label: '发送失败', view: 'workbench', box: 'failed', count: 'failed', icon: 'warn' },
           { id: 'sep-1', label: '', view: 'workbench', caption: true },
           { id: 'box-system', label: '平台消息', view: 'workbench', box: 'system', count: 'system', group: true },
@@ -91,6 +90,12 @@ export const NAV: NavGroup[] = [
           { id: 'feedback', label: '评价管理', view: 'ebaycases' },
           { id: 'cancel', label: '取消交易', view: 'ebaycases' },
           { id: 'refund', label: '退款单', view: 'ebaycases' },
+        ],
+      },
+      {
+        // 本系统里的单据：售后工单、查件单、异常包裹跟进、售后原因、发货通知、发票、售后附件
+        id: 'bills', label: '票据管理', icon: 'receipt',
+        children: [
           { id: 'cases', label: '售后工单', view: 'cases' },
           { id: 'tickets', label: '查件单', view: 'tickets' },
           { id: 'followups', label: '异常包裹跟进', view: 'followups' },

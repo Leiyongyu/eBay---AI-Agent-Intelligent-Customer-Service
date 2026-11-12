@@ -99,3 +99,66 @@ def test_unknown_api_path_returns_json_404(client):
     """不存在的接口返回 JSON 404，不回首页 HTML（前端才能提示“请重启后端”）。"""
     r = client.get("/internal/ebay-cases-no-such/thing")
     assert r.status_code == 404 and r.headers["content-type"].startswith("application/json")
+
+
+def test_tag_permissions_pin_color_and_multi_filter(client):
+    """标签：所有人都能新建，改名 / 改颜色 / 固定 / 删除只有管理员；任意颜色；多个标签“或 / 且”筛选，且在 limit 之前过滤。"""
+    from fastapi.testclient import TestClient
+
+    from conftest import login, make_user
+
+    rows = _seed()
+    by_ext = {r["external_id"]: r["id"] for r in client.get("/internal/ebay-cases", params={"kind": "RETURN"}).json()}
+    a, b, c, _closed = (by_ext[r["external_id"]] for r in rows)
+
+    make_user("cs_tag", "CS", all_stores=True)
+    cs = TestClient(client.app)
+    login(cs, "cs_tag")
+    # 客服新建：默认固定在快捷栏，颜色可以是任意 #rrggbb；名字不分大小写查重
+    t1 = cs.post("/internal/ebay-cases/tags", json={"kind": "RETURN", "name": "妥投未收到", "color": "#D1008A"})
+    assert t1.status_code == 200, t1.text
+    t1 = t1.json()
+    assert t1["pinned"] is True and t1["color"] == "#d1008a" and t1["created_by"]
+    assert cs.post("/internal/ebay-cases/tags", json={"kind": "RETURN", "name": "  "}).status_code == 422
+    t2 = cs.post("/internal/ebay-cases/tags", json={"kind": "RETURN", "name": "POD"}).json()
+    assert cs.post("/internal/ebay-cases/tags", json={"kind": "RETURN", "name": "pod"}).status_code == 409
+    assert t2["color"] == "primary"
+    # 客服不能改、不能删
+    assert cs.patch(f"/internal/ebay-cases/tags/{t1['id']}", json={"name": "改名"}).status_code == 403
+    assert cs.patch(f"/internal/ebay-cases/tags/{t1['id']}", json={"pinned": False}).status_code == 403
+    assert cs.delete(f"/internal/ebay-cases/tags/{t1['id']}").status_code == 403
+    # 客服可以给记录打标签
+    assert cs.post("/internal/ebay-cases/batch", json={"ids": [a, b], "action": "tag_add", "tag_id": t1["id"]}).status_code == 200
+    cs.post("/internal/ebay-cases/batch", json={"ids": [b, c], "action": "tag_add", "tag_id": t2["id"]})
+
+    # 管理员：改名（重名 409）、改颜色（不合法 422）、取消固定
+    assert client.patch(f"/internal/ebay-cases/tags/{t2['id']}", json={"name": "妥投未收到"}).status_code == 409
+    assert client.patch(f"/internal/ebay-cases/tags/{t2['id']}", json={"color": "red"}).status_code == 422
+    r = client.patch(f"/internal/ebay-cases/tags/{t2['id']}", json={"name": "已提供POD", "color": "#13A3AD", "pinned": False}).json()
+    assert (r["name"], r["color"], r["pinned"]) == ("已提供POD", "#13a3ad", False)
+    listed = {t["id"]: t for t in cs.get("/internal/ebay-cases/tags", params={"kind": "RETURN"}).json()}
+    assert listed[t2["id"]]["pinned"] is False and listed[t1["id"]]["pinned"] is True
+
+    # 多个标签：或（有其一）/ 且（全都有）；旧参数 tag_id 照常
+    ids = f"{t1['id']},{t2['id']}"
+    assert set(_ids(client, tag_ids=ids)) == {"5300000", "5300001", "5300002"}
+    assert _ids(client, tag_ids=ids, tag_mode="all") == ["5300001"]
+    assert set(_ids(client, tag_id=t1["id"])) == {"5300000", "5300001"}
+    assert client.get("/internal/ebay-cases", params={"kind": "RETURN", "tag_mode": "x"}).status_code == 422
+    assert client.get("/internal/ebay-cases", params={"kind": "RETURN", "tag_ids": "a"}).status_code == 422
+    # 在 limit 之前过滤：limit=1 也能找到打了标签的那条
+    assert _ids(client, tag_ids=str(t2["id"]), tag_mode="all", limit=1)
+    assert len(_ids(client, tag_ids=ids, limit=1)) == 1
+
+    # 管理员删除：从记录上去掉，返回去掉了几条；审计有记录
+    d = client.delete(f"/internal/ebay-cases/tags/{t1['id']}").json()
+    assert d == {"ok": True, "removed_from": 2}
+    assert _ids(client, tag_ids=str(t1["id"])) == []
+    from sqlalchemy import select
+
+    from app.db import session_scope
+    from app.models import AuditEvent
+
+    with session_scope() as db:
+        acts = set(db.scalars(select(AuditEvent.action).where(AuditEvent.action.like("EBAY_CASE_TAG_%"))))
+    assert {"EBAY_CASE_TAG_CREATE", "EBAY_CASE_TAG_UPDATE", "EBAY_CASE_TAG_DELETE"} <= acts  # 批量打标签是 EBAY_CASE_TAG_ADD

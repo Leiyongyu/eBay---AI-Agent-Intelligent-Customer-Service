@@ -1,11 +1,11 @@
 <script setup lang="ts">
-// 售后管理的快捷标签配置：新建、改颜色、改名、删除（删除会从所有记录上去掉）
+// 售后管理的标签管理：所有人都能新建；改名、改颜色、固定到快捷标签栏、删除（会从所有记录上去掉）只有管理员
 import { ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
-import { TAG_COLORS, TAG_DOT } from '../caseCommon'
 import type { CaseTag } from '../caseCommon'
+import { TAG_PALETTE, dotStyle, pickerValue } from '../tagColor'
 
-const props = defineProps<{ modelValue: boolean; tags: CaseTag[]; title: string }>()
+const props = defineProps<{ modelValue: boolean; tags: CaseTag[]; title: string; isAdmin: boolean }>()
 const emit = defineEmits<{
   'update:modelValue': [v: boolean]
   create: [name: string, color: string]
@@ -14,23 +14,28 @@ const emit = defineEmits<{
 }>()
 
 const name = ref('')
-const color = ref('primary')
+const color = ref<string>(TAG_PALETTE[0])
 function add() {
   if (!name.value.trim()) return
-  emit('create', name.value.trim(), color.value)
+  emit('create', name.value.trim(), color.value || TAG_PALETTE[0])
   name.value = ''
+  color.value = TAG_PALETTE[(props.tags.length + 1) % TAG_PALETTE.length]
 }
 async function rename(t: CaseTag) {
   try {
     const { value } = await ElMessageBox.prompt('新的标签名', '改名', { inputValue: t.name, inputPattern: /\S/, inputErrorMessage: '不能为空' })
-    emit('update', t, { name: value })
+    if (value.trim() !== t.name) emit('update', t, { name: value.trim() })
   } catch {
     /* 取消 */
   }
 }
+function recolor(t: CaseTag, v: string | null) {
+  if (v && v.toLowerCase() !== pickerValue(t.color).toLowerCase()) emit('update', t, { color: v.toLowerCase() })
+}
 async function remove(t: CaseTag) {
   try {
-    await ElMessageBox.confirm(`删除标签「${t.name}」？已经打上这个标签的记录会一起去掉它。`, '删除标签', { type: 'warning' })
+    await ElMessageBox.confirm(`删除标签「${t.name}」？已经打上这个标签的记录会一起去掉它，不能恢复。`, '删除标签',
+      { type: 'warning', confirmButtonText: '删除' })
     emit('remove', t)
   } catch {
     /* 取消 */
@@ -39,29 +44,36 @@ async function remove(t: CaseTag) {
 </script>
 
 <template>
-  <el-dialog :model-value="props.modelValue" :title="`${title}的快捷标签`" width="480px" append-to-body
+  <el-dialog :model-value="props.modelValue" :title="`${title}的标签管理`" width="min(520px, calc(100vw - 24px))" append-to-body
              @update:model-value="(v: boolean) => emit('update:modelValue', v)">
     <!-- 最多显示 10 行，多了在框里上下滑动 -->
     <div class="list">
-    <div v-for="t in tags" :key="t.id" class="row">
-      <i class="dot" :style="{ background: TAG_DOT[t.color] || TAG_DOT.info }" />
-      <span class="name">{{ t.name }}</span>
-      <el-select :model-value="t.color" size="small" style="width: 72px" @update:model-value="(v: string) => emit('update', t, { color: v })">
-        <el-option v-for="c in TAG_COLORS" :key="c.value" :label="c.label" :value="c.value" />
-      </el-select>
-      <el-button link size="small" @click="rename(t)">改名</el-button>
-      <el-button link size="small" type="danger" @click="remove(t)">删除</el-button>
-    </div>
-    <div v-if="!tags.length" class="muted empty">还没有标签，在下面新建</div>
+      <div v-for="t in tags" :key="t.id" class="row">
+        <el-color-picker v-if="isAdmin" :model-value="pickerValue(t.color)" size="small" :predefine="TAG_PALETTE" title="改颜色"
+                         @change="(v: string | null) => recolor(t, v)" />
+        <i v-else class="dot" :style="dotStyle(t.color)" />
+        <span class="name">{{ t.name }}</span>
+        <span v-if="t.created_by" class="by" :title="`由 ${t.created_by} 新建`">{{ t.created_by }}</span>
+        <template v-if="isAdmin">
+          <el-switch :model-value="t.pinned" size="small" inline-prompt active-text="固定" inactive-text="不固定"
+                     title="固定 = 显示在列表上方的快捷标签栏" @change="(v: string | number | boolean) => emit('update', t, { pinned: !!v })" />
+          <el-button link size="small" @click="rename(t)">改名</el-button>
+          <el-button link size="small" type="danger" @click="remove(t)">删除</el-button>
+        </template>
+        <span v-else-if="t.pinned" class="by">已固定</span>
+      </div>
+      <div v-if="!tags.length" class="muted empty">还没有标签，在下面新建</div>
     </div>
     <div class="row add">
-      <el-input v-model="name" size="small" maxlength="32" placeholder="新标签，如 不退回、已询问VIN" @keyup.enter="add" />
-      <el-select v-model="color" size="small" style="width: 72px">
-        <el-option v-for="c in TAG_COLORS" :key="c.value" :label="c.label" :value="c.value" />
-      </el-select>
+      <el-color-picker v-model="color" size="small" :predefine="TAG_PALETTE" title="标签颜色" />
+      <el-input v-model="name" size="small" maxlength="32" placeholder="新标签，如 妥投未收到、已提供POD" @keyup.enter="add" />
       <el-button size="small" type="primary" :disabled="!name.trim()" @click="add">新建</el-button>
     </div>
-    <p class="muted">标签只在本系统，同事共用；点列表上方的标签可以快速筛选。</p>
+    <p class="muted">
+      标签只在本系统，同事共用；所有人都可以新建。<template v-if="isAdmin">改名、改颜色、固定、删除只有管理员能做。</template>
+      <template v-else>改名、改颜色、固定、删除请找管理员。</template>
+      固定的标签显示在列表上方，点一下就能筛选。
+    </p>
   </el-dialog>
 </template>
 
@@ -76,7 +88,7 @@ async function remove(t: CaseTag) {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 36px;
+  min-height: 36px;
   padding: 0 10px;
   border-bottom: 1px solid var(--line-soft);
 }
@@ -89,12 +101,22 @@ async function remove(t: CaseTag) {
   padding: 0;
 }
 .dot {
-  width: 8px;
-  height: 8px;
+  flex: none;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
 }
 .name {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.by {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
 }
 .empty {
   padding: 10px;

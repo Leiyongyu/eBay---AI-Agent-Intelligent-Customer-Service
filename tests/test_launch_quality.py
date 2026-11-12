@@ -195,8 +195,10 @@ def test_baseline_missing_then_compare(client):
 
     # 线上库重启前还没有基线表：不报错，显示“基线未采集”
     with get_engine().begin() as conn:
-        for t in ("baseline_messages", "baseline_conversations", "baseline_batches"):
-            conn.execute(text(f"drop table {t}"))
+        from app.models import BaselineBatch, BaselineConversation, BaselineMessage
+
+        for m in (BaselineMessage, BaselineConversation, BaselineBatch):  # 表名按模型取（MySQL 上带 cs_ 前缀）
+            conn.execute(text(f"drop table {conn.dialect.identifier_preparer.quote(m.__tablename__)}"))
     d = client.get("/api/performance/launch", params={"start": start}).json()
     assert d["baseline"]["available"] is False and d["baseline"]["status"] == "NONE" and d["baseline"]["data"] is None
     Base.metadata.create_all(get_engine())

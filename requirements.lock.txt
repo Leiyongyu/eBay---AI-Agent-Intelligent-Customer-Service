@@ -43,6 +43,7 @@ pillow==13.0.0
 pluggy==1.7.0
 psycopg-binary==3.3.6
 psycopg==3.3.6
+pymysql==1.1.2
 pycparser==3.12
 pydantic-core==2.50.1
 pydantic-settings==2.16.1

@@ -56,7 +56,7 @@ def status(db: Session = Depends(get_db)):
     if s.knowledge_mode == "retrieval":
         rag_reasons += vector.reasons
     emb_ok, emb_missing = embedding_ready()
-    db_version = db.execute(text("SELECT version()")).scalar() if dialect_name() == "postgresql" else "SQLite"
+    db_version = db.execute(text("SELECT version()")).scalar() if dialect_name() in ("postgresql", "mysql") else "SQLite"
     return {
         "database": {"dialect": dialect_name(), "display": s.database_display, "server": str(db_version)[:80]},
         "redis": bus.ping(),

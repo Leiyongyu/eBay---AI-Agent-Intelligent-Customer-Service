@@ -369,7 +369,7 @@ def baseline_links(db: Session, store_id: str, orders: dict[str, EbayOrder]) -> 
 
     from .models import BaselineConversation, BaselineMessage
 
-    if not orders or not inspect(db.get_bind()).has_table("baseline_conversations"):
+    if not orders or not inspect(db.get_bind()).has_table(BaselineConversation.__tablename__):
         return {}
     by_buyer: dict[str, list[str]] = defaultdict(list)
     for oid, o in orders.items():

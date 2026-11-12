@@ -394,7 +394,7 @@ function exportCsv() {
   const lines = list.map((c) => [
     c.id, c.buyer_key, c.store_name || c.store_id, c.marketplace_id, c.item_id, listings[c.id]?.sku, c.preview,
     ROLE_SHORT[c.preview_role || ''] || '', replyLabel(c), c.job?.risk_level, allMarks(c).map((m) => m.tag).join('、'),
-    c.claim?.claimed_by, fmtFull(c.last_message_at),
+    c.store_owner || '未分配', fmtFull(c.last_message_at),
   ].map(esc).join(','))
   const blob = new Blob(['﻿' + [head.map(esc).join(','), ...lines].join('\r\n')], { type: 'text/csv;charset=utf-8' })
   const a = document.createElement('a')
@@ -632,13 +632,16 @@ onUnmounted(() => {
         </el-table-column>
         <el-table-column width="96" align="center">
           <template #header>
-            <el-tooltip content="正在处理这个会话的客服（认领 10 分钟内有效）" placement="top">
+            <el-tooltip content="店铺负责客服（在账号管理里给客服分配店铺）；有人正在处理时下面显示“处理中”（认领 10 分钟内有效）" placement="top">
               <span class="th-help">负责人 <i>?</i></span>
             </el-tooltip>
           </template>
           <template #default="{ row }">
-            <span v-if="row.claim" class="owner" :title="`到期：${fmtFull(row.claim.expires_at)}`">{{ row.claim.claimed_by }}</span>
-            <el-tooltip v-else-if="!isSystem" content="认领给我" placement="top">
+            <span v-if="row.store_owner" class="owner">{{ row.store_owner }}</span>
+            <span v-else class="sub">未分配</span>
+            <div v-if="row.claim && !(row.store_owner || '').split('、').includes(row.claim.claimed_by)" class="claiming"
+                 :title="`到期：${fmtFull(row.claim.expires_at)}`">处理中：{{ row.claim.claimed_by }}</div>
+            <el-tooltip v-else-if="!row.claim && !isSystem" content="认领给我" placement="top">
               <button class="assign" @click.stop="claimOne(row)">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
                   <circle cx="10" cy="8" r="3.5" /><path d="M3.5 20c0-3.6 2.9-6 6.5-6 1.3 0 2.5.3 3.5.9M18 14v6M15 17h6" />
@@ -1000,6 +1003,12 @@ a.dotted:hover {
   font-style: normal;
   text-align: center;
   color: var(--muted);
+}
+.claiming {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
 }
 .owner {
   font-size: 12px;

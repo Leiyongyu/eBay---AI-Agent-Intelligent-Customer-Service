@@ -5,9 +5,11 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { get, post, session } from '../api'
 import { errorText } from '../format'
-import { TAG_DOT, copyText, downloadCsv, fmtFull, useCases } from '../caseCommon'
-import type { CaseOptions, CaseRow, ViewCounts } from '../caseCommon'
+import { copyText, downloadCsv, fmtFull, useCases } from '../caseCommon'
+import type { CaseOptions, CaseRow, CaseTag, ViewCounts } from '../caseCommon'
 import CaseTagDialog from '../components/CaseTagDialog.vue'
+import CaseTagFilter from '../components/CaseTagFilter.vue'
+import { dotStyle } from '../tagColor'
 
 const emit = defineEmits<{ open: [id: number] }>()
 const KIND = 'FEEDBACK'
@@ -19,7 +21,8 @@ const SEARCH_FIELDS = [
   { value: 'buyer', label: '客户ID' }, { value: 'title', label: '商品标题' },
 ]
 const tab = ref('negative')
-const f = reactive({ q: '', qField: 'item_id', storeIds: [] as string[], operator: '', tagId: '', time: null as [string, string] | null, starred: false })
+const f = reactive({ q: '', qField: 'item_id', storeIds: [] as string[], operator: '', tagIds: [] as string[],
+  tagMode: 'any' as 'any' | 'all', time: null as [string, string] | null, starred: false })
 const applied = ref({ ...f })
 const rows = ref<CaseRow[]>([])
 const counts = ref<ViewCounts | null>(null)
@@ -37,7 +40,10 @@ async function load() {
     }
     if (a.storeIds.length) q.set('store_ids', a.storeIds.join(','))
     if (a.operator) q.set('operator', a.operator)
-    if (a.tagId) q.set('tag_id', a.tagId)
+    if (a.tagIds.length) {
+      q.set('tag_ids', a.tagIds.join(','))
+      q.set('tag_mode', a.tagMode)
+    }
     if (a.starred) q.set('starred', 'true')
     if (a.time) {
       q.set('opened_from', a.time[0])
@@ -59,13 +65,18 @@ const common = useCases(() => KIND, load)
 const { tags, extras, busy } = common
 
 function search() {
-  applied.value = { ...f, storeIds: [...f.storeIds] }
+  applied.value = { ...f, storeIds: [...f.storeIds], tagIds: [...f.tagIds] }
   page.value = 1
   load()
 }
+/** 快捷标签栏：点一下只看这个标签，再点一下取消 */
 function quickTag(id: string) {
-  f.tagId = f.tagId === id ? '' : id
+  f.tagIds = applied.value.tagIds.length === 1 && applied.value.tagIds[0] === id ? [] : [id]
   search()
+}
+const pinnedTags = computed(() => tags.value.filter((t) => t.pinned))
+async function createFromFilter(name: string, color: string, done: (t: CaseTag | null) => void) {
+  done(await common.createTag(name, color))
 }
 watch(tab, () => {
   page.value = 1
@@ -163,20 +174,20 @@ onMounted(async () => {
         </el-select>
         <el-date-picker v-model="f.time" class="f-date" type="daterange" value-format="YYYY-MM-DD" range-separator="至"
                         start-placeholder="评价时间" end-placeholder="结束日期" />
-        <el-select v-model="f.tagId" class="f-sel" placeholder="标签" clearable>
-          <el-option v-for="t in tags" :key="t.id" :label="t.name" :value="String(t.id)" />
-        </el-select>
+        <CaseTagFilter v-model="f.tagIds" v-model:mode="f.tagMode" :tags="tags" :counts="counts?.tags" :is-admin="isAdmin"
+                       @create="createFromFilter" @pin="(t, v) => common.updateTag(t, { pinned: v })" @manage="tagDialog = true" @apply="search" />
         <el-tooltip content="只看星标" placement="top">
           <button class="star-btn" :class="{ on: f.starred }" @click="f.starred = !f.starred; search()">★</button>
         </el-tooltip>
         <el-button plain type="primary" @click="search">搜索</el-button>
       </div>
-      <div v-if="tags.length" class="tag-row">
+      <div class="tag-row">
         <span class="tag-title">标签:</span>
-        <button v-for="t in tags" :key="t.id" class="chip" :class="{ on: applied.tagId === String(t.id) }" @click="quickTag(String(t.id))">
-          <i class="dot" :style="{ background: TAG_DOT[t.color] || TAG_DOT.info }" />{{ t.name }}<span class="n">({{ counts?.tags[String(t.id)] || 0 }})</span>
+        <button v-for="t in pinnedTags" :key="t.id" class="chip" :class="{ on: applied.tagIds.includes(String(t.id)) }" @click="quickTag(String(t.id))">
+          <i class="dot" :style="dotStyle(t.color)" />{{ t.name }}<span class="n">({{ counts?.tags[String(t.id)] || 0 }})</span>
         </button>
-        <el-button link type="primary" size="small" @click="tagDialog = true">配置</el-button>
+        <span v-if="!pinnedTags.length" class="muted">{{ tags.length ? '没有固定的标签，' : '快速访问标签，' }}</span>
+        <el-button link type="primary" size="small" @click="tagDialog = true">{{ tags.length ? '标签管理' : '新建标签' }}</el-button>
       </div>
     </div>
 
@@ -195,10 +206,10 @@ onMounted(async () => {
         <template #dropdown>
           <el-dropdown-menu>
             <el-dropdown-item v-for="t in tags" :key="`a${t.id}`" :command="`add:${t.id}`">
-              <i class="dot" :style="{ background: TAG_DOT[t.color] }" />加上「{{ t.name }}」
+              <i class="dot" :style="dotStyle(t.color)" />加上「{{ t.name }}」
             </el-dropdown-item>
             <el-dropdown-item v-for="(t, i) in tags" :key="`r${t.id}`" :command="`remove:${t.id}`" :divided="i === 0">去掉「{{ t.name }}」</el-dropdown-item>
-            <el-dropdown-item :divided="!!tags.length" @click="tagDialog = true">配置标签…</el-dropdown-item>
+            <el-dropdown-item :divided="!!tags.length" @click="tagDialog = true">新建 / 管理标签…</el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
@@ -292,7 +303,7 @@ onMounted(async () => {
     </div>
     <p class="muted foot">回复评价、申请移除请到 eBay 后台；这里的状态、标签、备注只在本系统，同事共用。</p>
 
-    <CaseTagDialog v-model="tagDialog" :tags="tags" title="评价管理" @create="common.createTag"
+    <CaseTagDialog v-model="tagDialog" :tags="tags" title="评价管理" :is-admin="isAdmin" @create="common.createTag"
                    @update="common.updateTag" @remove="common.deleteTag" />
   </div>
 </template>

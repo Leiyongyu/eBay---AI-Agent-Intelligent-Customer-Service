@@ -1,6 +1,7 @@
 """连通性自检：PyCharm 里直接 Run 本文件。
 
-依次检查 .env 中的 PostgreSQL、Redis、大模型、向量模型，每项打印 ✅/❌ 和原因；
+依次检查 .env 中的业务库（MySQL / PostgreSQL）、向量库（pgvector）、Redis、大模型、向量模型、eBay 消息接口，每项打印 ✅/❌ 和原因；
+注意：大模型、向量模型会各真实调用一次（几十个 token），eBay 会只读调用一次，运行前先确认。
 不打印任何密钥、密码或完整业务空间 ID。全部通过时退出码为 0。
 """
 from __future__ import annotations
@@ -42,8 +43,9 @@ def check_database(s) -> tuple[bool, str]:
     try:
         created = ensure_database_exists()
         with get_engine().connect() as conn:
-            version = conn.execute(text("SHOW server_version")).scalar()
-        return True, f"{s.database_display}，PostgreSQL {version}" + ("（已自动建库）" if created else "")
+            version = conn.execute(text("SELECT version()")).scalar()  # MySQL、PostgreSQL 都支持
+        kind = {"mysql": "MySQL", "postgresql": "PostgreSQL"}.get(get_engine().dialect.name, get_engine().dialect.name)
+        return True, f"{s.database_display}，{kind} {str(version)[:40]}" + ("（已自动建库）" if created else "")
     except Exception as e:
         return False, f"{s.database_display}：{short(e)}"
 
@@ -54,9 +56,11 @@ def check_pgvector(s) -> tuple[bool, str]:
         return True, "SQLite 开发模式：向量在 Python 里比对，不需要 pgvector"
     from sqlalchemy import text
 
-    from app.db import get_engine
+    from app.db import get_vector_engine
 
-    with get_engine().connect() as conn:
+    if get_vector_engine().dialect.name != "postgresql":
+        return False, "向量库不是 PostgreSQL：请把 VECTOR_DATABASE_URL 配成装了 pgvector 的 PostgreSQL"
+    with get_vector_engine().connect() as conn:  # 向量库（业务库是 MySQL 时单独配置）
         row = conn.execute(text("SELECT default_version, installed_version FROM pg_available_extensions "
                                 "WHERE name = 'vector'")).first()
     mode = f"（KNOWLEDGE_MODE={s.knowledge_mode}）"
@@ -134,7 +138,7 @@ def check_ebay(s) -> tuple[bool, str]:
 def main() -> int:
     s = get_settings()
     results = []
-    checks = [("PostgreSQL", check_database), ("pgvector", check_pgvector), ("Redis", check_redis), ("大模型", check_llm),
+    checks = [("业务库", check_database), ("向量库 pgvector", check_pgvector), ("Redis", check_redis), ("大模型", check_llm),
               ("向量模型", check_embedding)]
     if s.ebay_client_id or s.ebay_refresh_token or s.ebay_user_access_token:
         checks.append(("eBay 消息接口", check_ebay))

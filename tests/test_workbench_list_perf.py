@@ -162,9 +162,14 @@ def test_missing_indexes_created(client):
 
     from app.db import ADD_INDEXES, add_missing_indexes, get_engine
 
+    from app.models import Message
+
     eng = get_engine()
     with eng.begin() as conn:
-        conn.execute(text('DROP INDEX IF EXISTS "ix_messages_conv_seq"'))
+        if eng.dialect.name == "mysql":  # MySQL：DROP INDEX 要带表名，没有 IF EXISTS
+            conn.execute(text(f"DROP INDEX `ix_messages_conv_seq` ON `{Message.__tablename__}`"))
+        else:
+            conn.execute(text('DROP INDEX IF EXISTS "ix_messages_conv_seq"'))
     assert "ix_messages_conv_seq" in add_missing_indexes()
     names = {ix["name"] for t in {x[0] for x in ADD_INDEXES} for ix in inspect(eng).get_indexes(t)}
     assert {x[1] for x in ADD_INDEXES} <= names

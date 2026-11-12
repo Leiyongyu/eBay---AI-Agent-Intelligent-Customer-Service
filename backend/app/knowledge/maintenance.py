@@ -164,18 +164,19 @@ def _remove_files(paths: list[str | None]) -> int:
 
 
 def purge_orphan_vectors(db: Session) -> int:
-    """删掉不再被任何条款用到的向量（向量表不存在或不可用时跳过）。"""
+    """删掉不再被任何条款用到的向量（向量表不存在或不可用时跳过）。条款在业务库、向量在向量库（可以是两个库）。"""
     from sqlalchemy import inspect
 
-    if not inspect(db.connection()).has_table(vi.TABLE):  # 没装 pgvector 等：没有向量表
-        return 0
     have = {vi.text_hash(t) for (t,) in db.execute(select(KnowledgeChunk.text))}
-    hashes = [h for (h,) in db.execute(text(f"SELECT DISTINCT content_hash FROM {vi.TABLE}"))]
-    orphan = [h for h in hashes if h not in have]
-    for i in range(0, len(orphan), 500):
-        part = orphan[i:i + 500]
-        db.execute(text(f"DELETE FROM {vi.TABLE} WHERE content_hash IN ({','.join(':h' + str(k) for k in range(len(part)))})"),
-                   {f"h{k}": h for k, h in enumerate(part)})
+    with vi._vec(db) as v:
+        if not inspect(v.connection()).has_table(vi.TABLE):  # 没装 pgvector 等：没有向量表
+            return 0
+        hashes = [h for (h,) in v.execute(text(f"SELECT DISTINCT content_hash FROM {vi.TABLE}"))]
+        orphan = [h for h in hashes if h not in have]
+        for i in range(0, len(orphan), 500):
+            part = orphan[i:i + 500]
+            v.execute(text(f"DELETE FROM {vi.TABLE} WHERE content_hash IN ({','.join(':h' + str(k) for k in range(len(part)))})"),
+                      {f"h{k}": h for k, h in enumerate(part)})
     return len(orphan)
 
 

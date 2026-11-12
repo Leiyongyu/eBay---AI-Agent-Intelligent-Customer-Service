@@ -78,5 +78,7 @@ def test_published_partial_index_exists(app_env):
 
     vector_status(refresh=True)  # 已有的库启动时补建（幂等）
     vector_status(refresh=True)
-    names = {ix["name"] for ix in inspect(get_engine()).get_indexes("knowledge_chunks")}
+    from app.models import KnowledgeChunk
+
+    names = {ix["name"] for ix in inspect(get_engine()).get_indexes(KnowledgeChunk.__tablename__)}
     assert PUBLISHED_INDEX in names

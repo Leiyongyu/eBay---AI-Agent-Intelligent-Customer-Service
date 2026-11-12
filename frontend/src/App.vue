@@ -34,7 +34,7 @@ import LoginView from './views/LoginView.vue'
 const VIEW_KEYS: ViewKey[] = ['workbench', 'knowledge', 'aftersales', 'tickets', 'shipnotices', 'cases', 'invoices', 'ebaycases', 'customers', 'sync',
   'usage', 'status', 'accounts', 'settings', 'todo', 'performance', 'launch', 'templates', 'offers', 'bestoffers', 'followups', 'reasons']
 const ADMIN_VIEWS: ViewKey[] = ['usage', 'status', 'accounts', 'settings', 'sync']
-const BOXES: BoxKey[] = ['pending', 'resolved', 'handoff', 'failed', 'unassigned', 'mine', 'auto', 'all', 'system',
+const BOXES: BoxKey[] = ['pending', 'resolved', 'failed', 'unassigned', 'mine', 'auto', 'all', 'system',
   'system_unread', 'system_read']
 
 const isAdmin = computed(() => session.user?.role === 'ADMIN')
@@ -258,7 +258,7 @@ async function refreshCounts(force = true) {
     navCounts.buyerUnread = stores.reduce((n, s) => n + (s.unread_conversations || 0), 0)
     navCounts.system = stores.reduce((n, s) => n + (s.unread_system || 0), 0)
     navCounts.pending = c.views?.pending
-    for (const k of ['resolved', 'handoff', 'failed', 'unassigned', 'mine'] as const) navCounts[k] = c.boxes?.[k]
+    for (const k of ['resolved', 'failed', 'unassigned', 'mine'] as const) navCounts[k] = c.boxes?.[k]
   } catch {
     /* 数字刷不出来不影响使用 */
   }

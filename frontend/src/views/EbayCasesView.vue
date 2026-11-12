@@ -5,9 +5,11 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { get, post, session } from '../api'
 import { errorText } from '../format'
-import { TAG_DOT, copyText, downloadCsv, fmtFull, fmtRemain, money, useCases } from '../caseCommon'
-import type { CaseOptions, CaseRow, ViewCounts } from '../caseCommon'
+import { copyText, downloadCsv, fmtFull, fmtRemain, money, useCases } from '../caseCommon'
+import type { CaseOptions, CaseRow, CaseTag, ViewCounts } from '../caseCommon'
 import CaseTagDialog from '../components/CaseTagDialog.vue'
+import CaseTagFilter from '../components/CaseTagFilter.vue'
+import { dotStyle, tagHex } from '../tagColor'
 import FeedbackView from './FeedbackView.vue'
 
 const props = defineProps<{ kind?: string }>()
@@ -38,7 +40,7 @@ const VIEWS = [
 // ---------------- 筛选 ----------------
 const f = reactive({
   q: '', qField: 'external_id', match: 'prefix', storeIds: [] as string[], reason: '', status: '',
-  tagId: '' as string, operator: '', hold: '', opened: null as [string, string] | null,
+  tagIds: [] as string[], tagMode: 'any' as 'any' | 'all', operator: '', hold: '', opened: null as [string, string] | null,
   updated: null as [string, string] | null, starred: false,
 })
 const view = ref('pending')
@@ -60,7 +62,10 @@ function query(): URLSearchParams {
   if (a.storeIds.length) q.set('store_ids', a.storeIds.join(','))
   if (a.reason) q.set('reason', a.reason)
   if (a.status) q.set('status', a.status)
-  if (a.tagId) q.set('tag_id', a.tagId)
+  if (a.tagIds.length) {
+    q.set('tag_ids', a.tagIds.join(','))
+    q.set('tag_mode', a.tagMode)
+  }
   if (a.operator) q.set('operator', a.operator)
   if (a.hold) q.set('hold_reason', a.hold)
   if (a.starred) q.set('starred', 'true')
@@ -103,17 +108,23 @@ const common = useCases(() => kind.value, load)
 const { tags, extras, busy } = common
 
 function search() {
-  applied.value = { ...f, storeIds: [...f.storeIds] }
+  applied.value = { ...f, storeIds: [...f.storeIds], tagIds: [...f.tagIds] }
   page.value = 1
   load()
 }
 function reset() {
-  Object.assign(f, { q: '', reason: '', status: '', tagId: '', operator: '', hold: '', opened: null, updated: null, starred: false, storeIds: [] })
+  Object.assign(f, { q: '', reason: '', status: '', tagIds: [], tagMode: 'any', operator: '', hold: '', opened: null, updated: null,
+    starred: false, storeIds: [] })
   search()
 }
+/** 快捷标签栏：点一下只看这个标签，再点一下取消 */
 function quickTag(id: string) {
-  f.tagId = f.tagId === id ? '' : id
+  f.tagIds = applied.value.tagIds.length === 1 && applied.value.tagIds[0] === id ? [] : [id]
   search()
+}
+const pinnedTags = computed(() => tags.value.filter((t) => t.pinned))
+async function createFromFilter(name: string, color: string, done: (t: CaseTag | null) => void) {
+  done(await common.createTag(name, color))
 }
 function quickStar() {
   f.starred = !f.starred
@@ -280,9 +291,8 @@ onUnmounted(() => clearInterval(timer))
         <el-select v-model="f.status" class="f-sel" placeholder="状态" clearable filterable>
           <el-option v-for="s in opts?.statuses || []" :key="s" :label="opts?.status_labels?.[s] || s" :value="s" />
         </el-select>
-        <el-select v-model="f.tagId" class="f-sel w-s" placeholder="标签" clearable>
-          <el-option v-for="t in tags" :key="t.id" :label="t.name" :value="String(t.id)" />
-        </el-select>
+        <CaseTagFilter v-model="f.tagIds" v-model:mode="f.tagMode" :tags="tags" :counts="counts?.tags" :is-admin="isAdmin"
+                       @create="createFromFilter" @pin="(t, v) => common.updateTag(t, { pinned: v })" @manage="tagDialog = true" @apply="search" />
         <el-select v-if="meta.hold" v-model="f.hold" class="f-sel" placeholder="暂不处理原因" clearable filterable>
           <el-option v-for="h in opts?.hold_reasons || []" :key="h" :label="h" :value="h" />
         </el-select>
@@ -305,12 +315,12 @@ onUnmounted(() => clearInterval(timer))
         <button class="chip" :class="{ on: applied.starred }" @click="quickStar">
           <span class="star">★</span>星标<span class="n">({{ counts?.starred ?? 0 }})</span>
         </button>
-        <button v-for="t in tags" :key="t.id" class="chip" :class="{ on: applied.tagId === String(t.id) }" @click="quickTag(String(t.id))">
-          <i class="dot" :style="{ background: TAG_DOT[t.color] || TAG_DOT.info }" />{{ t.name }}
+        <button v-for="t in pinnedTags" :key="t.id" class="chip" :class="{ on: applied.tagIds.includes(String(t.id)) }" @click="quickTag(String(t.id))">
+          <i class="dot" :style="dotStyle(t.color)" />{{ t.name }}
           <span class="n">({{ counts?.tags[String(t.id)] || 0 }})</span>
         </button>
-        <span v-if="!tags.length" class="muted">快速访问标签，</span>
-        <el-button link type="primary" size="small" @click="tagDialog = true">配置</el-button>
+        <span v-if="!pinnedTags.length" class="muted">{{ tags.length ? '没有固定的标签，' : '快速访问标签，' }}</span>
+        <el-button link type="primary" size="small" @click="tagDialog = true">{{ tags.length ? '标签管理' : '新建标签' }}</el-button>
       </div>
     </div>
 
@@ -329,10 +339,10 @@ onUnmounted(() => clearInterval(timer))
         <template #dropdown>
           <el-dropdown-menu>
             <el-dropdown-item v-for="t in tags" :key="`a${t.id}`" :command="`add:${t.id}`">
-              <i class="dot" :style="{ background: TAG_DOT[t.color] }" />加上「{{ t.name }}」
+              <i class="dot" :style="dotStyle(t.color)" />加上「{{ t.name }}」
             </el-dropdown-item>
             <el-dropdown-item v-for="(t, i) in tags" :key="`r${t.id}`" :command="`remove:${t.id}`" :divided="i === 0">去掉「{{ t.name }}」</el-dropdown-item>
-            <el-dropdown-item v-if="!tags.length" disabled>还没有标签，先点上面的「配置」</el-dropdown-item>
+            <el-dropdown-item :divided="!!tags.length" @click="tagDialog = true">新建 / 管理标签…</el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
@@ -389,7 +399,7 @@ onUnmounted(() => clearInterval(timer))
               <span v-else-if="r.work_state === 'HOLD'" class="flag hold">暂不处理</span>
               <span v-else-if="r.view === 'processing'" class="flag proc">处理中</span>
               <span v-if="r.blacklisted" class="flag bl">黑名单</span>
-              <span v-for="t in r.tag_ids" :key="t" class="flag" :style="{ background: TAG_DOT[common.tagOf(t)?.color || 'info'] }">{{ common.tagOf(t)?.name }}</span>
+              <span v-for="t in r.tag_ids" :key="t" class="flag" :style="{ background: tagHex(common.tagOf(t)?.color) || 'var(--muted)' }">{{ common.tagOf(t)?.name }}</span>
               <span class="remain" :class="remainClass(r)">
                 <template v-if="r.remaining_seconds != null">剩余处理时间: {{ fmtRemain(r.remaining_seconds) }}</template>
               </span>
@@ -472,7 +482,7 @@ onUnmounted(() => clearInterval(timer))
                      layout="total, sizes, prev, pager, next, jumper" background small />
     </div>
 
-    <CaseTagDialog v-model="tagDialog" :tags="tags" :title="meta.label" @create="common.createTag"
+    <CaseTagDialog v-model="tagDialog" :tags="tags" :title="meta.label" :is-admin="isAdmin" @create="common.createTag"
                    @update="common.updateTag" @remove="common.deleteTag" />
 
     <!-- ======== 详情 ======== -->

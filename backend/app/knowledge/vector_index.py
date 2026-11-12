@@ -9,6 +9,10 @@
                  未安装 pgvector 时检索模式直接报 RAG_NOT_READY，不悄悄退回全量注入或内存检索。
   SQLite     —— 仅开发/测试：向量以 JSON 文本存放，相似度在 Python 里算。
 这张表不在 SQLAlchemy 模型里：vector 类型依赖扩展，放进 create_all 会让没装 pgvector 的库整体建表失败。
+
+两个库（2026-11-12 起）：向量（knowledge_embeddings、embedding_profiles）在向量库（VECTOR_DATABASE_URL，PostgreSQL），
+知识条款（knowledge_chunks）在业务库（可以是 MySQL）；两边只靠正文哈希对应，不跨库联表。
+没单独配置向量库时两者是同一个库，行为和以前一样（同一个会话、同一个事务）。
 """
 from __future__ import annotations
 
@@ -19,13 +23,14 @@ import math
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..db import _sql_literal, get_engine
+from ..db import _sql_literal, get_engine, get_vector_engine, vector_separate, vector_session_scope
 from ..models import EmbeddingProfile, KnowledgeChunk
 from ..providers.embeddings import build_embeddings, embedding_ready
 from .tokenize import search_text
@@ -83,18 +88,39 @@ def reset() -> None:
         _hnsw_done.clear()
 
 
+@contextmanager
+def _vec(db: Session):
+    """向量操作用的会话：向量库单独一个时新开（提交在退出时），否则就用调用方的业务会话（同一事务）。"""
+    if not vector_separate():
+        yield db
+        return
+    with vector_session_scope() as v:
+        yield v
+
+
+def _chunks_table() -> str:
+    return KnowledgeChunk.__tablename__
+
+
 def text_hash(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------- 建表与状态
-def _ensure_pg() -> VectorStatus:
+def ensure_chunk_indexes() -> None:
+    """业务库里知识条款的索引：PostgreSQL 建全文检索 GIN 索引；各库都建“当前有效版本”的索引。"""
     engine = get_engine()
+    with engine.begin() as conn:
+        if engine.dialect.name == "postgresql":
+            conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{_chunks_table()}_search_text ON {_chunks_table()} "
+                              "USING gin (to_tsvector('simple', coalesce(search_text, '')))"))
+        ensure_published_index(conn)
+
+
+def _ensure_pg() -> VectorStatus:
+    engine = get_vector_engine()
     st = VectorStatus(backend="pgvector")
     with engine.begin() as conn:
-        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_knowledge_chunks_search_text ON knowledge_chunks "
-                          "USING gin (to_tsvector('simple', coalesce(search_text, '')))"))
-        ensure_published_index(conn)
         if not conn.execute(text("SELECT to_tsvector('simple', '退款')::text <> ''")).scalar():
             st.reasons.append("数据库区域设置不把中文当作词，全文检索会漏掉中文（换 UTF-8 / 中文 locale 的库）")
         available = conn.execute(text("SELECT default_version, installed_version FROM pg_available_extensions "
@@ -131,16 +157,18 @@ PUBLISHED_INDEX_COMMENT = ("起草取知识用的部分索引：只含 review_st
 
 
 def ensure_published_index(conn) -> None:
-    """已有的库建表时没有这个索引（create_all 只给新表建索引）：启动时幂等补建（模型里也声明了，新库建表时就有）。"""
-    conn.execute(text(f"CREATE INDEX IF NOT EXISTS {PUBLISHED_INDEX} ON knowledge_chunks (store_id, marketplace_id, audience) "
+    """已有的库建表时没有这个索引（create_all 只给新表建索引）：启动时幂等补建（模型里也声明了，新库建表时就有）。
+    MySQL 不支持部分索引，也没有 CREATE INDEX IF NOT EXISTS：建表时模型已建普通索引（没有 WHERE），这里不再补。"""
+    if conn.dialect.name == "mysql":
+        return
+    conn.execute(text(f"CREATE INDEX IF NOT EXISTS {PUBLISHED_INDEX} ON {_chunks_table()} (store_id, marketplace_id, audience) "
                       "WHERE review_state = 'PUBLISHED'"))
     if conn.dialect.name == "postgresql":
         conn.execute(text(f"COMMENT ON INDEX {PUBLISHED_INDEX} IS {_sql_literal(PUBLISHED_INDEX_COMMENT)}"))
 
 
 def _ensure_sqlite() -> VectorStatus:
-    with get_engine().begin() as conn:
-        ensure_published_index(conn)
+    with get_vector_engine().begin() as conn:
         conn.execute(text(f"""
             CREATE TABLE IF NOT EXISTS {TABLE} (
                 profile_id INTEGER NOT NULL,
@@ -157,9 +185,16 @@ def vector_status(refresh: bool = False) -> VectorStatus:
     global _status
     with _lock:
         if _status is None or refresh:
-            dialect = get_engine().dialect.name
+            dialect = get_vector_engine().dialect.name
             try:
-                _status = _ensure_pg() if dialect == "postgresql" else _ensure_sqlite()
+                ensure_chunk_indexes()
+                if dialect == "postgresql":
+                    _status = _ensure_pg()
+                elif dialect == "sqlite":
+                    _status = _ensure_sqlite()
+                else:
+                    _status = VectorStatus(backend="unavailable",
+                                           reasons=[f"向量库不能是 {dialect}：请把 VECTOR_DATABASE_URL 配成装了 pgvector 的 PostgreSQL"])
             except Exception as e:
                 _status = VectorStatus(backend="unavailable", reasons=[f"向量索引初始化失败：{type(e).__name__}: {e}"])
         return _status
@@ -179,7 +214,13 @@ def require_ready() -> None:
 
 
 # ---------------------------------------------------------------- 档案
+def profile_id(db: Session) -> int:
+    with _vec(db) as v:
+        return current_profile(v).id
+
+
 def current_profile(db: Session) -> EmbeddingProfile:
+    """db 必须是向量库的会话（模块内部用 _vec 取）。"""
     s = get_settings()
     key = dict(provider=s.embedding_provider or "fake", model=s.embedding_model or "fake",
                dimension=int(s.embedding_dimension or 0), distance=s.embedding_distance,
@@ -211,6 +252,11 @@ def fill_search_text(chunks) -> int:
 
 
 def existing_hashes(db: Session, profile_id: int, hashes: list[str]) -> set[str]:
+    with _vec(db) as v:
+        return _existing_hashes(v, profile_id, hashes)
+
+
+def _existing_hashes(db: Session, profile_id: int, hashes: list[str]) -> set[str]:
     found: set[str] = set()
     for i in range(0, len(hashes), 500):
         part = hashes[i:i + 500]
@@ -230,9 +276,15 @@ def _normalize(v: list[float]) -> list[float]:
 def embed_texts(db: Session, bodies: list[str]) -> dict:
     """确保这些正文都有当前档案的向量；只对缺的调用向量模型。失败直接抛出，由调用方决定是否中止。"""
     require_ready()
-    profile = current_profile(db)
+    with _vec(db) as v:
+        return _embed_texts(db, v, bodies)
+
+
+def _embed_texts(db: Session, v: Session, bodies: list[str]) -> dict:
+    """db：业务会话（记用量）；v：向量会话（档案、向量）。"""
+    profile = current_profile(v)
     by_hash = {text_hash(b): b for b in bodies if b}
-    missing = [h for h in by_hash if h not in existing_hashes(db, profile.id, list(by_hash))]
+    missing = [h for h in by_hash if h not in _existing_hashes(v, profile.id, list(by_hash))]
     if missing:
         from .. import usage as usage_log
         from .retriever import estimate_tokens
@@ -245,20 +297,20 @@ def embed_texts(db: Session, bodies: list[str]) -> dict:
                          duration_ms=int((time.perf_counter() - started) * 1000))
         if len(vectors) != len(missing):
             raise ValueError(f"向量模型返回 {len(vectors)} 条，请求 {len(missing)} 条")
-        pg = db.get_bind().dialect.name == "postgresql"
-        for h, v in zip(missing, vectors):
-            if len(v) != profile.dimension:
-                raise ValueError(f"实际维度 {len(v)} 与 EMBEDDING_DIMENSION={profile.dimension} 不一致，停止写入")
+        pg = v.get_bind().dialect.name == "postgresql"
+        for h, vec in zip(missing, vectors):
+            if len(vec) != profile.dimension:
+                raise ValueError(f"实际维度 {len(vec)} 与 EMBEDDING_DIMENSION={profile.dimension} 不一致，停止写入")
             if profile.normalize:
-                v = _normalize(v)
+                vec = _normalize(vec)
             if pg:
-                db.execute(text(f"INSERT INTO {TABLE} (profile_id, content_hash, embedding) "
-                                f"VALUES (:p, :h, CAST(:v AS vector)) ON CONFLICT DO NOTHING"),
-                           {"p": profile.id, "h": h, "v": "[" + ",".join(f"{x:.7g}" for x in v) + "]"})
+                v.execute(text(f"INSERT INTO {TABLE} (profile_id, content_hash, embedding) "
+                               f"VALUES (:p, :h, CAST(:v AS vector)) ON CONFLICT DO NOTHING"),
+                          {"p": profile.id, "h": h, "v": "[" + ",".join(f"{x:.7g}" for x in vec) + "]"})
             else:
-                db.execute(text(f"INSERT OR IGNORE INTO {TABLE} (profile_id, content_hash, embedding) "
-                                f"VALUES (:p, :h, :v)"), {"p": profile.id, "h": h, "v": json.dumps(v)})
-        db.flush()
+                v.execute(text(f"INSERT OR IGNORE INTO {TABLE} (profile_id, content_hash, embedding) "
+                               f"VALUES (:p, :h, :v)"), {"p": profile.id, "h": h, "v": json.dumps(vec)})
+        v.flush()
     return {"profile_id": profile.id, "texts": len(by_hash), "embedded": len(missing), "reused": len(by_hash) - len(missing)}
 
 
@@ -278,9 +330,9 @@ def index_status(db: Session, store_id: str) -> dict:
            "published_public": len(chunks), "missing_search_text": sum(c.search_text is None for c in chunks),
            "indexed": None, "missing_vectors": None, "profile": None}
     if st.ready:
-        profile = current_profile(db)
-        hashes = {text_hash(c.text) for c in chunks}
-        have = existing_hashes(db, profile.id, list(hashes))
+        with _vec(db) as v:
+            profile = current_profile(v)
+            have = _existing_hashes(v, profile.id, list({text_hash(c.text) for c in chunks}))
         out.update(indexed=sum(text_hash(c.text) in have for c in chunks),
                    missing_vectors=sum(text_hash(c.text) not in have for c in chunks),
                    profile={"id": profile.id, "model": profile.model, "dimension": profile.dimension})
@@ -327,6 +379,11 @@ def vector_search(db: Session, query_vec: list[float], hashes: list[str], limit:
     """在给定正文哈希范围内按 cosine 距离取最近的 limit 个，返回 [(content_hash, distance)]。"""
     if not hashes:
         return []
+    with _vec(db) as v:
+        return _vector_search(v, query_vec, hashes, limit)
+
+
+def _vector_search(db: Session, query_vec: list[float], hashes: list[str], limit: int) -> list[tuple[str, float]]:
     profile = current_profile(db)
     if len(query_vec) != profile.dimension:
         raise ValueError(f"查询向量维度 {len(query_vec)} 与档案 {profile.dimension} 不一致")
@@ -372,7 +429,7 @@ def keyword_search(db: Session, chunks: list[KnowledgeChunk], query_tokens: list
     if db.get_bind().dialect.name == "postgresql":
         tsq = " | ".join(f"'{t}'" for t in query_tokens[:64])
         matched_ids = set(db.execute(text(
-            "SELECT chunk_id FROM knowledge_chunks "
+            f"SELECT chunk_id FROM {_chunks_table()} "
             "WHERE chunk_id = ANY(:ids) AND to_tsvector('simple', coalesce(search_text, '')) @@ to_tsquery('simple', :tsq)"),
             {"tsq": tsq, "ids": list(docs)}).scalars())
     else:

@@ -54,6 +54,7 @@ export interface ConversationItem {
   job: JobInfo | null
   intent: string | null
   claim: Claim | null
+  store_owner?: string | null // 店铺负责客服（账号管理里分配），没有分配为 null
   auto_replied: boolean // 当前任务由 AI 自动回复发出
   aftersales: AftersalesInfo | null
   situation?: SituationInfo | null // AI 判断的会话情况（阶段 + 一句话概括）

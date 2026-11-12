@@ -2,6 +2,9 @@
 
 默认每个测试用独立的临时 SQLite；设置 TEST_DATABASE_URL（PostgreSQL 连接串）时，
 每个测试在该实例上新建一个临时库，结束后删除。TEST_REDIS_URL 同理可选。
+设置 TEST_MYSQL_URL（MySQL 连接串，不带库名；密码可放 TEST_MYSQL_PASSWORD）时：业务库每个测试新建 ebaycs_test_xxxx 库、
+表名加 cs_ 前缀（和正式 MySQL 一样），向量库用临时 SQLite（同时验证业务库、向量库分开的两库模式）。
+一键在本机 MySQL 上跑：python scripts/test_on_mysql.py
 """
 from __future__ import annotations
 
@@ -14,6 +17,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
+
+if os.environ.get("TEST_MYSQL_URL"):  # 表名前缀在导入模型时读一次：要在导入 app 之前设
+    os.environ["TABLE_PREFIX"] = "cs_"
 
 from app import config  # noqa: E402
 
@@ -28,7 +34,16 @@ def app_env(tmp_path, monkeypatch):
     for key in ("DATABASE_URL", "DATABASE_PASSWORD", "REDIS_URL"):
         monkeypatch.delenv(key, raising=False)
     pg_base = os.environ.get("TEST_DATABASE_URL")
-    if pg_base:
+    my_base = os.environ.get("TEST_MYSQL_URL")
+    if my_base:
+        from sqlalchemy.engine import make_url
+
+        url = make_url(my_base).set(database=f"ebaycs_test_{uuid.uuid4().hex[:8]}")
+        if os.environ.get("TEST_MYSQL_PASSWORD"):
+            url = url.set(password=os.environ["TEST_MYSQL_PASSWORD"])
+        monkeypatch.setenv("DATABASE_URL", url.render_as_string(hide_password=False))
+        monkeypatch.setenv("VECTOR_DATABASE_URL", f"sqlite:///{(tmp_path / 'vectors.db').as_posix()}")
+    elif pg_base:
         from sqlalchemy.engine import make_url
 
         url = make_url(pg_base).set(database=f"ebaycs_test_{uuid.uuid4().hex[:8]}")
@@ -60,9 +75,23 @@ def app_env(tmp_path, monkeypatch):
 
     set_vision_provider_override(None)
     db.reset_engine()
-    if pg_base:
+    if my_base:
+        _drop_mysql_database(os.environ["DATABASE_URL"])
+    elif pg_base:
         _drop_database(os.environ["DATABASE_URL"])
     config.get_settings.cache_clear()
+
+
+def _drop_mysql_database(url_str: str) -> None:
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.engine import make_url
+
+    url = make_url(url_str)
+    assert url.database.startswith("ebaycs_test_")  # 只删测试库
+    admin = create_engine(url._replace(database=None))
+    with admin.connect() as conn:
+        conn.execute(text(f"DROP DATABASE IF EXISTS `{url.database}`"))
+    admin.dispose()
 
 
 def _drop_database(url_str: str) -> None:

@@ -101,24 +101,40 @@ class AppLauncher:
     # ------------------------------------------------------------------ 数据库与 Redis
     @staticmethod
     def check_database(settings) -> None:
-        """PostgreSQL：库不存在就自动创建；连不上时给出明确原因后退出，不静默回退到 SQLite。"""
+        """业务库（MySQL / PostgreSQL）库不存在就自动创建；向量库（PostgreSQL）单独配置时也连一下。
+        连不上时给出明确原因后退出，不静默回退到 SQLite。"""
         if settings.using_sqlite_fallback:
             log.warning("DATABASE_URL 未配置，使用本地 SQLite（仅开发用）")
             return
         from sqlalchemy import text
 
-        from app.db import ensure_database_exists, get_engine
+        from sqlalchemy.engine import make_url
 
+        from app.db import ensure_database_exists, get_engine, get_vector_engine, vector_separate
+
+        names = {"mysql": "MySQL", "postgresql": "PostgreSQL"}
         try:
             if ensure_database_exists():
                 log.info("已自动创建数据库：%s", settings.database_display)
-            with get_engine().connect() as conn:
-                version = conn.execute(text("SHOW server_version")).scalar()
-            log.info("数据库已连接：%s（PostgreSQL %s）", settings.database_display, version)
+            engine = get_engine()
+            with engine.connect() as conn:
+                version = conn.execute(text("SELECT version()")).scalar()  # MySQL、PostgreSQL 都支持
+            log.info("业务库已连接：%s（%s %s，表名前缀 %s）", settings.database_display,
+                     names.get(engine.dialect.name, engine.dialect.name), str(version)[:40], settings.table_prefix or "无")
         except Exception as e:
             msg = str(getattr(e, "orig", e)).strip().splitlines()[0]
-            hint = "请在 .env 填写 DATABASE_PASSWORD" if not settings.database_password else "请核对 .env 中的 DATABASE_URL / DATABASE_PASSWORD，以及 PostgreSQL 服务是否在运行"
+            hint = "请在 .env 填写 DATABASE_PASSWORD" if not settings.database_password else \
+                "请核对 .env 中的 DATABASE_URL / DATABASE_PASSWORD，以及数据库服务（MySQL / PostgreSQL）是否在运行"
             sys.exit(f"连接数据库失败：{settings.database_display}\n原因：{msg}\n{hint}")
+        if not vector_separate():
+            return
+        shown = make_url(settings.effective_vector_database_url).render_as_string(hide_password=True)
+        try:
+            with get_vector_engine().connect() as conn:
+                version = conn.execute(text("SELECT version()")).scalar()
+            log.info("向量库已连接：%s（%s）", shown, str(version)[:40])
+        except Exception as e:  # 向量库连不上只影响知识检索（检索模式下交人工），不阻止启动
+            log.warning("向量库连接失败：%s：%s（知识检索会报未就绪）", shown, str(getattr(e, "orig", e)).strip().splitlines()[0])
 
     @staticmethod
     def ensure_redis(settings) -> None:

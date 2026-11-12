@@ -125,7 +125,7 @@ def retrieve(db: Session, store_id: str, marketplace_id: str, on: date, query: s
     by_hash: dict[str, list[KnowledgeChunk]] = {}
     for c in eligible:
         by_hash.setdefault(vi.text_hash(c.text), []).append(c)
-    missing = [h for h in by_hash if h not in vi.existing_hashes(db, vi.current_profile(db).id, list(by_hash))]
+    missing = [h for h in by_hash if h not in vi.existing_hashes(db, vi.profile_id(db), list(by_hash))]
     if missing:
         raise vi.RagNotReady([f"有 {sum(len(by_hash[h]) for h in missing)} 条适用条款还没生成向量，请在知识库页重建索引"])
     if vi.fill_search_text(eligible):

@@ -56,16 +56,17 @@ def _order_for(db: Session, conv: Conversation, text: str) -> str | None:
 
 
 def _only_order(db: Session, conv: Conversation) -> str | None:
-    """买家在这个店铺最近 90 天只有一笔订单：就是它（多笔或没有就不猜，回复里请买家给订单号）。"""
-    from sqlalchemy import text
+    """买家在这个店铺最近 90 天只有一笔订单：就是它（多笔或没有就不猜，回复里请买家给订单号）。
+    读 ebay_orders（售后同步每小时更新）；原来读的 sales_orders 是已删除的数据助手留下的旧表，早已不更新。"""
+    from sqlalchemy import func
 
-    try:
-        with db.begin_nested():  # 出错只回滚这一句，不影响前面的改动
-            rows = db.execute(text("select order_id from sales_orders where store_id = :s and lower(buyer) = lower(:b) "
-                                   "and not coalesce(cancelled, false) and created_at >= :since"),
-                              {"s": conv.store_id, "b": conv.buyer_key or "", "since": utcnow() - timedelta(days=90)}).scalars().all()
-    except Exception:  # noqa: BLE001  没有订单表（测试库等）
+    from ..models import EbayOrder
+
+    if not conv.buyer_key:
         return None
+    rows = db.scalars(select(EbayOrder.order_id).where(
+        EbayOrder.store_id == conv.store_id, func.lower(EbayOrder.buyer) == conv.buyer_key.lower(),
+        EbayOrder.cancelled.is_(False), EbayOrder.created_at >= utcnow() - timedelta(days=90)).limit(2)).all()
     return rows[0] if len(rows) == 1 else None
 
 

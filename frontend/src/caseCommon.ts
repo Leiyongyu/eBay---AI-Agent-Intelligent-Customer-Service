@@ -54,8 +54,10 @@ export interface CaseTag {
   id: number
   kind: string
   name: string
-  color: string
+  color: string // #rrggbb，或早期的 primary / success / warning / danger / info
   sort: number
+  pinned: boolean // 固定在列表上方的快捷标签栏（只有管理员能改）
+  created_by?: string | null
 }
 export interface CaseExtras {
   sku: string | null
@@ -131,7 +133,8 @@ export function useCases(kind: () => string, reload: () => Promise<void> | void)
 
   async function loadTags() {
     try {
-      tags.value = await get<CaseTag[]>(`/internal/ebay-cases/tags?kind=${kind()}`)
+      // 旧数据 / 旧后端没有 pinned：当作固定（和以前一样都显示在快捷标签栏）
+      tags.value = (await get<CaseTag[]>(`/internal/ebay-cases/tags?kind=${kind()}`)).map((t) => ({ ...t, pinned: t.pinned !== false }))
     } catch {
       tags.value = []
     }
@@ -200,16 +203,19 @@ export function useCases(kind: () => string, reload: () => Promise<void> | void)
       return false
     }
   }
-  async function createTag(name: string, color: string) {
+  /** 新建标签（所有人都可以）；成功返回新标签 */
+  async function createTag(name: string, color: string): Promise<CaseTag | null> {
     try {
-      await post('/internal/ebay-cases/tags', { kind: kind(), name, color })
+      const t = await post<CaseTag>('/internal/ebay-cases/tags', { kind: kind(), name, color })
       await loadTags()
-      return true
+      ElMessage.success(`已新建标签「${t.name}」`)
+      return t
     } catch (e) {
       ElMessage.error(errorText(e))
-      return false
+      return null
     }
   }
+  /** 改名、改颜色、固定（只有管理员，后端也会拦） */
   async function updateTag(t: CaseTag, body: Record<string, unknown>) {
     try {
       await api('PATCH', `/internal/ebay-cases/tags/${t.id}`, body)
@@ -218,11 +224,13 @@ export function useCases(kind: () => string, reload: () => Promise<void> | void)
       ElMessage.error(errorText(e))
     }
   }
+  /** 删除（只有管理员）：从所有记录上去掉 */
   async function deleteTag(t: CaseTag) {
     try {
-      await api('DELETE', `/internal/ebay-cases/tags/${t.id}`)
+      const r = await api<{ removed_from?: number }>('DELETE', `/internal/ebay-cases/tags/${t.id}`)
       await loadTags()
       await reload()
+      ElMessage.success(`已删除标签「${t.name}」${r?.removed_from ? `，从 ${r.removed_from} 条记录上去掉` : ''}`)
     } catch (e) {
       ElMessage.error(errorText(e))
     }
