@@ -1,0 +1,31 @@
+.env
+.env.*
+!.env.example
+!.env.sample
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+/data/
+frontend/node_modules/
+frontend/dist/
+.idea/
+.uv-cache/
+
+# Local credentials and runtime files
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Customer records, company knowledge, and generated documents
+/客户测试消息系统/data/
+/知识库/来源/
+/知识库/上传/
+/测试输出/

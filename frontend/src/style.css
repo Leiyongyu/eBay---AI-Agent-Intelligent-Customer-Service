@@ -1,0 +1,325 @@
+/* 主题：温和护眼型。主色深青（按钮、链接、选中态），墨绿只用于品牌标识和少量强调，避免和"成功"混淆 */
+:root {
+  /* 主题：ERP 风格。白色面板 + 浅灰底，橙色只用于主操作、选中和数字，其余保持中性 */
+  /* 业务色 */
+  --brand: #ff6b1a;          /* 品牌橙 */
+  --accent: #ff6b1a;         /* 主按钮、选中、链接 */
+  --accent-soft: #fff4ec;    /* 橙色浅底：选中行、数字底 */
+  --accent-line: #ffd3ba;    /* 橙色浅边框 */
+  --sage: #8fbc8f;
+  --aqua: #ffd3ba;           /* 辅助边框（AI 草稿、引用） */
+
+  --bg: #f4f5f7;             /* 页面底 */
+  --panel: #ffffff;          /* 面板 */
+  --sunken: #f7f8fa;         /* 面板内的凹陷区（聊天区、代码块） */
+  --hover: #f5f6f8;          /* 菜单悬停 */
+  --active-bg: #eef0f3;      /* 菜单选中 */
+  --line: #e4e7ec;
+  --line-soft: #eff1f4;
+  --text: #1f2329;
+  --text-2: #4e5969;
+  --muted: #86909c;
+
+  --ok: #2fae5b;
+  --ok-text: #23864a;
+  --warn: #f59a23;
+  --warn-text: #b86e0f;
+  --warn-soft: #fff7e8;
+  --danger: #e5484d;
+  --danger-text: #c33237;
+  --danger-soft: #fdeeee;
+
+  /* 聊天气泡 */
+  --buyer: #f2f3f5;
+  --seller: #fff1e7;
+  --system: #fdf6e3;
+
+  /* Element Plus 主题覆盖 */
+  --el-color-primary: #ff6b1a;
+  --el-color-primary-light-3: #ff975f;
+  --el-color-primary-light-5: #ffb58d;
+  --el-color-primary-light-7: #ffd3ba;
+  --el-color-primary-light-8: #ffe1d1;
+  --el-color-primary-light-9: #fff0e8;
+  --el-color-primary-dark-2: #cc5615;
+  --el-color-success: #2fae5b;
+  --el-color-success-light-3: #6dc68c;
+  --el-color-success-light-5: #97d7ad;
+  --el-color-success-light-7: #c1e7ce;
+  --el-color-success-light-8: #d5efde;
+  --el-color-success-light-9: #eaf7ef;
+  --el-color-success-dark-2: #268b49;
+  --el-color-warning: #f59a23;
+  --el-color-warning-light-3: #f8b865;
+  --el-color-warning-light-5: #facd91;
+  --el-color-warning-light-7: #fce1bd;
+  --el-color-warning-light-8: #fdebd3;
+  --el-color-warning-light-9: #fef5e9;
+  --el-color-warning-dark-2: #c47b1c;
+  --el-color-danger: #e5484d;
+  --el-color-danger-light-3: #ed7f82;
+  --el-color-danger-light-5: #f2a4a6;
+  --el-color-danger-light-7: #f7c8ca;
+  --el-color-danger-light-8: #fadadb;
+  --el-color-danger-light-9: #fceded;
+  --el-color-danger-dark-2: #b73a3e;
+  --el-color-error: #e5484d;
+  --el-color-error-light-3: #ed7f82;
+  --el-color-error-light-5: #f2a4a6;
+  --el-color-error-light-7: #f7c8ca;
+  --el-color-error-light-8: #fadadb;
+  --el-color-error-light-9: #fceded;
+  --el-color-error-dark-2: #b73a3e;
+  --el-color-info: #86909c;
+  --el-color-info-light-3: #aab1ba;
+  --el-color-info-light-5: #c3c8ce;
+  --el-color-info-light-7: #dbdee1;
+  --el-color-info-light-8: #e7e9eb;
+  --el-color-info-light-9: #f3f4f5;
+  --el-color-info-dark-2: #6b737d;
+
+  --el-bg-color: #ffffff;
+  --el-bg-color-page: #f4f5f7;
+  --el-bg-color-overlay: #ffffff;
+  --el-fill-color-blank: #ffffff;
+  --el-fill-color: #f0f2f5;
+  --el-fill-color-light: #f5f7fa;
+  --el-fill-color-lighter: #f7f8fa;
+  --el-fill-color-extra-light: #fafbfc;
+  --el-fill-color-dark: #e9ecf0;
+  --el-text-color-primary: #1f2329;
+  --el-text-color-regular: #4e5969;
+  --el-text-color-secondary: #86909c;
+  --el-text-color-placeholder: #a9aeb8;
+  --el-text-color-disabled: #c0c4cc;
+  --el-border-color: #dcdfe6;
+  --el-border-color-light: #e4e7ec;
+  --el-border-color-lighter: #eff1f4;
+  --el-border-color-extra-light: #f5f6f8;
+  --el-border-color-dark: #d0d4db;
+  --el-border-radius-base: 4px;
+  --el-box-shadow-light: 0 2px 10px rgba(31, 35, 41, 0.08);
+  --el-box-shadow: 0 6px 20px rgba(31, 35, 41, 0.1);
+  --el-mask-color: rgba(255, 255, 255, 0.85);
+
+  /* 字体：西文先用系统 UI 字体（Windows 上是 Segoe UI，比微软雅黑自带的西文清楚），中文按平台取最好的黑体 */
+  --font-sans: 'Segoe UI Variable Text', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'HarmonyOS Sans SC',
+    'MiSans', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans CJK SC', 'Source Han Sans SC', sans-serif;
+  --font-mono: 'Cascadia Mono', 'JetBrains Mono', 'SF Mono', Consolas, 'Microsoft YaHei UI', monospace;
+  /* 字号层级：12 辅助 / 13 次要 / 14 正文 / 15 消息正文 / 16 区块标题 */
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-base: 14px;
+  --fs-msg: 15px;
+  --fs-lg: 16px;
+  --el-font-family: var(--font-sans);
+  --el-font-size-base: 14px;
+  --el-font-size-small: 13px;
+  --el-font-size-extra-small: 12px;
+
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+  line-height: 1.5;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+textarea,
+select {
+  font-family: inherit;
+}
+
+/* 时间、数量、单号这类会上下对齐比较的数字统一等宽 */
+.el-table,
+.el-tag,
+.muted,
+.badge {
+  font-variant-numeric: tabular-nums;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::selection {
+  background: #ffe1d1;
+}
+
+a {
+  color: var(--accent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* 滚动条：细、浅，长时间看不扎眼 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #d5d9e0 transparent;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.panel-head {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  font-weight: 600;
+  font-size: var(--fs-base);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.panel-body {
+  padding: 12px 14px;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  letter-spacing: 0;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.section-title {
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  margin: 14px 0 6px;
+}
+
+.section-title:first-child {
+  margin-top: 0;
+}
+
+pre.json {
+  background: var(--sunken);
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  padding: 8px;
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.55;
+  max-height: 260px;
+  overflow: auto;
+}
+
+mark.block {
+  background: #f8dcdc;
+  border-bottom: 2px solid var(--danger);
+  color: inherit;
+}
+
+mark.review {
+  background: #f8ecd2;
+  border-bottom: 2px solid var(--warn);
+  color: inherit;
+}
+
+/* ---- Element Plus 细节收敛：去掉默认的蓝色光晕和过重的阴影 ---- */
+.el-table {
+  --el-table-header-bg-color: #f5f6f8;
+  --el-table-header-text-color: #4e5969;
+  --el-table-row-hover-bg-color: #fafbfc;
+  --el-table-current-row-bg-color: #fff4ec;
+  --el-table-border-color: #eceef2;
+}
+
+.el-table th.el-table__cell {
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell {
+  background: #fafbfc;
+}
+
+.el-tag {
+  border-radius: 3px;
+}
+
+.el-button {
+  font-weight: 500;
+}
+
+.el-card,
+.el-dialog,
+.el-drawer,
+.el-message-box {
+  --el-card-border-radius: 6px;
+  border-radius: 6px;
+}
+
+.el-dialog__title,
+.el-drawer__title {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.el-textarea__inner {
+  line-height: 1.65;
+}
+
+.el-form-item__label {
+  color: var(--text-2);
+}
+
+.el-tabs__item.is-active {
+  font-weight: 600;
+}
+
+.el-alert {
+  border-radius: 4px;
+}
+
+.el-empty {
+  --el-empty-description-margin-top: 12px;
+}
+
+/* 会话卡片和会话头部需要人工审核的状态：深红实底白字，一眼看到 */
+.el-tag.el-tag.review-hot {
+  --el-tag-bg-color: #a8071a;
+  --el-tag-border-color: #a8071a;
+  --el-tag-text-color: #fff;
+  font-weight: 600;
+}
